@@ -409,8 +409,8 @@ final class PDFContainerViewController: NSViewController {
     }
 
     private func conceptID(atViewPoint point: NSPoint) -> String? {
-        let pagePoint = pdfView.convert(point, to: pdfView.currentPage)
         guard let page = pdfView.page(for: point, nearest: true) else { return nil }
+        let pagePoint = pdfView.convert(point, to: page)
         for annotation in page.annotations where annotation.bounds.contains(pagePoint) {
             if let id = conceptIDs[ObjectIdentifier(annotation)] { return id }
         }
