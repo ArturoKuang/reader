@@ -18,8 +18,9 @@ final class PDFContainerViewController: NSViewController {
     private var annotations: [PDFAnnotation] = []
     private var highlightIDs: [ObjectIdentifier: String] = [:]
     private var lookupPopover: NSPopover?
-    private var didApplyInitialScale = false
+    private var didRestorePosition = false
     private var suppressScaleSave = false
+    private var lastFitSize: CGSize = .zero
 
     init(session: ReaderSession) {
         self.session = session
@@ -67,13 +68,7 @@ final class PDFContainerViewController: NSViewController {
             findConstraint,
         ])
         applyDisplayMode()
-        if session.hasSavedViewState && session.fitMode == .fitPage {
-            pdfView.autoScales = true
-        } else if session.hasSavedViewState && session.fitMode == .actual {
-            pdfView.scaleFactor = 1
-        } else if session.hasSavedViewState && session.fitMode == .custom {
-            pdfView.scaleFactor = min(max(session.zoom, pdfView.minScaleFactor), pdfView.maxScaleFactor)
-        }
+        // Do not scale here. bounds are still zero, and PDFView would stick at minScaleFactor (10%).
         NotificationCenter.default.addObserver(self, selector: #selector(pageChanged), name: .PDFViewPageChanged, object: pdfView)
         NotificationCenter.default.addObserver(self, selector: #selector(scaleChanged), name: .PDFViewScaleChanged, object: pdfView)
         pdfView.onMouseUp = { [weak self] in self?.captureSelection() }
@@ -85,30 +80,79 @@ final class PDFContainerViewController: NSViewController {
 
     override func viewDidLayout() {
         super.viewDidLayout()
-        guard !didApplyInitialScale else { return }
-        guard pdfView.bounds.width > 80, pdfView.currentPage != nil else { return }
-        didApplyInitialScale = true
-        // A first open has no saved zoom. Fit the page width once the window has a real size.
-        // Later opens keep a custom or actual-size zoom and only refit when that was the saved mode.
-        if !session.hasSavedViewState || session.fitMode == .fitWidth {
-            fitWidth()
-        }
-        guard session.hasSavedViewState else { return }
-        let state = session.package.state
-        reveal(ReadingPosition(page: state.page, scrollY: state.scrollY, zoom: nil))
+        applyFittingScale()
     }
 
     override func viewDidAppear() {
         super.viewDidAppear()
+        // Layout during appearance can still be short of the final window size.
+        lastFitSize = .zero
+        DispatchQueue.main.async { [weak self] in
+            self?.applyFittingScale(force: true)
+            self?.restorePositionOnce()
+        }
         guard let clip = enclosingScrollClip(in: pdfView) else { return }
         clip.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(scrolled), name: NSView.boundsDidChangeNotification, object: clip)
     }
 
+    /// Fit modes track the view size, the way Preview's Zoom to Fit does.
+    /// Actual size and a custom scale are applied once, after the view has a real size.
+    func applyFittingScale(force: Bool = false) {
+        guard view.window != nil else { return }
+        let bounds = pdfView.bounds
+        guard bounds.width > 160, bounds.height > 160, pdfView.document != nil else { return }
+        let mode: FitMode = session.hasSavedViewState ? session.fitMode : .fitPage
+        switch mode {
+        case .fitPage:
+            guard force || bounds.size != lastFitSize else { return }
+            lastFitSize = bounds.size
+            suppressScaleSave = true
+            pdfView.autoScales = true
+            let fit = pdfView.scaleFactorForSizeToFit
+            if fit.isFinite, fit > 0.05 {
+                pdfView.scaleFactor = fit
+            }
+            pdfView.autoScales = true
+            suppressScaleSave = false
+            session.rememberZoom(pdfView.scaleFactor, fit: .fitPage)
+        case .fitWidth:
+            guard bounds.size != lastFitSize else { return }
+            lastFitSize = bounds.size
+            fitWidth()
+        case .actual:
+            guard lastFitSize == .zero else { return }
+            lastFitSize = bounds.size
+            suppressScaleSave = true
+            pdfView.autoScales = false
+            pdfView.scaleFactor = 1
+            suppressScaleSave = false
+        case .custom:
+            guard lastFitSize == .zero else { return }
+            lastFitSize = bounds.size
+            suppressScaleSave = true
+            pdfView.autoScales = false
+            let scale = min(max(session.zoom, 0.25), pdfView.maxScaleFactor)
+            pdfView.scaleFactor = scale
+            suppressScaleSave = false
+        }
+    }
+
+    private func restorePositionOnce() {
+        guard !didRestorePosition, session.hasSavedViewState else { return }
+        guard pdfView.bounds.width > 160 else { return }
+        didRestorePosition = true
+        let state = session.package.state
+        reveal(ReadingPosition(page: state.page, scrollY: state.scrollY, zoom: nil))
+    }
+
     override func viewWillDisappear() {
-        session.rememberScroll(currentPosition())
-        session.saveViewQuietly()
+        capturePositionForSave()
         super.viewWillDisappear()
+    }
+
+    func capturePositionForSave() {
+        session.rememberScroll(currentPosition())
     }
 
     func applyDisplayMode() {
@@ -342,7 +386,6 @@ final class PDFContainerViewController: NSViewController {
         let section = session.outline.last { ($0.page ?? 0) <= number }?.title
         session.updatePage(number, count: document.pageCount, section: section)
         session.rememberScroll(currentPosition())
-        session.saveViewQuietly()
         overlay.needsLayout = true
     }
 
@@ -352,7 +395,18 @@ final class PDFContainerViewController: NSViewController {
 
     @objc private func scaleChanged() {
         guard !suppressScaleSave else { return }
-        session.rememberZoom(pdfView.scaleFactor, fit: pdfView.autoScales ? .fitPage : .custom)
+        guard pdfView.bounds.width > 160, pdfView.bounds.height > 160 else { return }
+        let scale = pdfView.scaleFactor
+        guard scale.isFinite, scale > 0.05 else { return }
+        if pdfView.autoScales {
+            session.rememberZoom(scale, fit: .fitPage)
+        } else if session.fitMode == .fitWidth {
+            session.rememberZoom(scale, fit: .fitWidth)
+        } else if abs(scale - 1) < 0.001 && session.fitMode == .actual {
+            session.rememberZoom(1, fit: .actual)
+        } else {
+            session.rememberZoom(scale, fit: .custom)
+        }
     }
 
     private func highlightID(atViewPoint point: NSPoint) -> String? {

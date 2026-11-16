@@ -44,6 +44,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         super.init(window: window)
         window.delegate = self
         window.minSize = NSSize(width: 720, height: 480)
+        restoreWindowFrame(window)
         configureSplit()
         configureToolbar()
         installToast()
@@ -149,6 +150,39 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             }
             return event
         }
+    }
+
+    private func restoreWindowFrame(_ window: NSWindow) {
+        guard session.hasSavedViewState, let frame = session.package.state.windowFrame else { return }
+        let rect = NSRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
+        guard rect.width > 400, rect.height > 300 else { return }
+        window.setFrame(rect, display: false)
+    }
+
+    private func storeWindowFrame() {
+        guard let frame = window?.frame else { return }
+        session.noteWindowFrame(x: frame.origin.x, y: frame.origin.y, width: frame.width, height: frame.height)
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        pdfController?.applyFittingScale()
+        storeWindowFrame()
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        storeWindowFrame()
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        pdfController?.applyFittingScale(force: true)
+        storeWindowFrame()
+        session.saveViewNow()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        storeWindowFrame()
+        pdfController?.capturePositionForSave()
+        session.saveViewNow()
     }
 
     func applyChrome() {

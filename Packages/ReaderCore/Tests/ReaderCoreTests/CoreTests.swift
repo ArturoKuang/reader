@@ -68,6 +68,72 @@ final class CoreTests: XCTestCase {
         XCTAssertFalse(rejected.warnings.isEmpty)
     }
 
+    func testViewStateJSONRoundTrip() throws {
+        let state = ViewState(
+            page: 12,
+            scrollY: 0.42,
+            zoom: 1.35,
+            fitMode: .custom,
+            continuous: false,
+            twoPages: true,
+            sidebar: .bookmarks,
+            panelVisible: false,
+            panelTab: .highlights,
+            rotations: ["3": 90],
+            bookmarks: [Bookmark(id: "b1", page: 12, title: "Here")],
+            lastHighlightColor: 4,
+            windowFrame: StoredWindowFrame(x: 40, y: 80, width: 1200, height: 860)
+        )
+        let data = try JSONEncoder().encode(state)
+        let decoded = try JSONDecoder().decode(ViewState.self, from: data)
+        XCTAssertEqual(decoded, state)
+        XCTAssertEqual(decoded.fitMode, .custom)
+        XCTAssertEqual(decoded.scrollY, 0.42)
+        XCTAssertEqual(decoded.windowFrame?.width, 1200)
+        XCTAssertEqual(decoded.continuous, false)
+        XCTAssertEqual(decoded.twoPages, true)
+        XCTAssertEqual(decoded.page, 12)
+
+        let legacy = """
+        {"bookmarks":[],"continuous":true,"fitMode":"fitWidth","lastHighlightColor":1,"page":4,"panelTab":"notes","panelVisible":true,"rotations":{},"scrollY":0.2,"sidebar":"thumbnails","twoPages":false,"version":1,"zoom":1.1}
+        """
+        let older = try JSONDecoder().decode(ViewState.self, from: Data(legacy.utf8))
+        XCTAssertEqual(older.page, 4)
+        XCTAssertEqual(older.fitMode, .fitWidth)
+        XCTAssertEqual(older.scrollY, 0.2)
+        XCTAssertEqual(older.zoom, 1.1)
+        XCTAssertNil(older.windowFrame)
+        XCTAssertEqual(older.sidebar, .thumbnails)
+    }
+
+    func testSidecarStateFileRoundTrip() throws {
+        let fs = MemoryFileSystem()
+        try fs.createDirectory("/books")
+        let identity = FrontMatter(kind: "notes", document: "Book.pdf", fingerprint: "sha256:abc")
+        var package = SidecarPackage.empty(identity: identity)
+        package.state = ViewState(
+            page: 7,
+            scrollY: 0.15,
+            zoom: 2,
+            fitMode: .actual,
+            continuous: true,
+            twoPages: false,
+            windowFrame: StoredWindowFrame(x: 1, y: 2, width: 900, height: 700)
+        )
+        try package.write(to: "/books/Book.reader", fs: fs)
+        let raw = try fs.readString("/books/Book.reader/state.json")
+        XCTAssertTrue(raw.contains("actual"))
+        XCTAssertTrue(raw.contains("windowFrame"))
+        let loaded = try SidecarPackage.read(from: "/books/Book.reader", fs: fs)
+        XCTAssertEqual(loaded.state.page, 7)
+        XCTAssertEqual(loaded.state.scrollY, 0.15)
+        XCTAssertEqual(loaded.state.zoom, 2)
+        XCTAssertEqual(loaded.state.fitMode, .actual)
+        XCTAssertEqual(loaded.state.continuous, true)
+        XCTAssertEqual(loaded.state.twoPages, false)
+        XCTAssertEqual(loaded.state.windowFrame, package.state.windowFrame)
+    }
+
     func testDeletedHighlightRoundTripsOutOfHighlightsFile() {
         let matter = FrontMatter(kind: "highlights", document: "Book.pdf", fingerprint: "sha256:ff")
         let keep = HighlightEntry(id: "h_keep", color: 2, page: 10, quote: "kept sentence", prefix: "a ", suffix: " b", section: "Ch. 1")

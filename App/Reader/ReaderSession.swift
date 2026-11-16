@@ -54,6 +54,7 @@ final class ReaderSession: ObservableObject {
     private var lastLookupUndo: WordUndo?
     private var runner = ProcessCommandRunner()
     private var toastTimer: Timer?
+    private var viewStateTimer: Timer?
 
     var isPDF: Bool { bookURL.pathExtension.lowercased() == "pdf" }
     var notes: [NoteEntry] { package.notes.notes }
@@ -150,6 +151,35 @@ final class ReaderSession: ObservableObject {
         }
     }
 
+    /// Writes view state shortly after zoom, scroll, page, or frame changes.
+    func scheduleViewStateSave() {
+        let arm = {
+            self.viewStateTimer?.invalidate()
+            let timer = Timer(timeInterval: 0.4, repeats: false) { [weak self] _ in
+                self?.saveViewQuietly()
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            self.viewStateTimer = timer
+        }
+        if Thread.isMainThread {
+            arm()
+        } else {
+            DispatchQueue.main.async(execute: arm)
+        }
+    }
+
+    func saveViewNow() {
+        viewStateTimer?.invalidate()
+        viewStateTimer = nil
+        saveViewQuietly()
+    }
+
+    func noteWindowFrame(x: Double, y: Double, width: Double, height: Double) {
+        guard width > 320, height > 240 else { return }
+        package.state.windowFrame = StoredWindowFrame(x: x, y: y, width: width, height: height)
+        scheduleViewStateSave()
+    }
+
     func setSidebar(_ mode: SidebarMode) {
         sidebar = mode
         package.state.sidebar = mode
@@ -190,10 +220,12 @@ final class ReaderSession: ObservableObject {
     }
 
     func rememberZoom(_ scale: Double, fit: FitMode) {
+        guard scale.isFinite, scale > 0.05 else { return }
         zoom = scale
         fitMode = fit
         package.state.zoom = scale
         package.state.fitMode = fit
+        scheduleViewStateSave()
     }
 
     func highlight(color: Int) {
@@ -240,7 +272,9 @@ final class ReaderSession: ObservableObject {
         package.state.scrollY = position.scrollY
         if let page = position.page {
             package.state.page = page
+            self.page = page
         }
+        scheduleViewStateSave()
     }
 
     func highlightLast() {

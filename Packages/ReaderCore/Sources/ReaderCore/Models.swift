@@ -61,6 +61,20 @@ public struct Bookmark: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+public struct StoredWindowFrame: Codable, Equatable, Sendable {
+    public var x: Double
+    public var y: Double
+    public var width: Double
+    public var height: Double
+
+    public init(x: Double, y: Double, width: Double, height: Double) {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+    }
+}
+
 public struct ViewState: Codable, Equatable, Sendable {
     public var version: Int
     public var page: Int
@@ -77,13 +91,15 @@ public struct ViewState: Codable, Equatable, Sendable {
     public var rotations: [String: Int]
     public var bookmarks: [Bookmark]
     public var lastHighlightColor: Int
+    /// Window frame in screen points. Older sidecars omit this.
+    public var windowFrame: StoredWindowFrame?
 
     public init(
         version: Int = 1,
         page: Int = 1,
         scrollY: Double? = nil,
         zoom: Double = 1,
-        fitMode: FitMode = .fitWidth,
+        fitMode: FitMode = .fitPage,
         continuous: Bool = true,
         twoPages: Bool = false,
         sidebar: SidebarMode = .thumbnails,
@@ -91,7 +107,8 @@ public struct ViewState: Codable, Equatable, Sendable {
         panelTab: PanelTab = .notes,
         rotations: [String: Int] = [:],
         bookmarks: [Bookmark] = [],
-        lastHighlightColor: Int = 1
+        lastHighlightColor: Int = 1,
+        windowFrame: StoredWindowFrame? = nil
     ) {
         self.version = version
         self.page = page
@@ -106,9 +123,33 @@ public struct ViewState: Codable, Equatable, Sendable {
         self.rotations = rotations
         self.bookmarks = bookmarks
         self.lastHighlightColor = lastHighlightColor
+        self.windowFrame = windowFrame
     }
 
     public static var fresh: ViewState { ViewState() }
+
+    private enum CodingKeys: String, CodingKey {
+        case version, page, scrollY, zoom, fitMode, continuous, twoPages
+        case sidebar, panelVisible, panelTab, rotations, bookmarks, lastHighlightColor, windowFrame
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        page = try container.decodeIfPresent(Int.self, forKey: .page) ?? 1
+        scrollY = try container.decodeIfPresent(Double.self, forKey: .scrollY)
+        zoom = try container.decodeIfPresent(Double.self, forKey: .zoom) ?? 1
+        fitMode = try container.decodeIfPresent(FitMode.self, forKey: .fitMode) ?? .fitPage
+        continuous = try container.decodeIfPresent(Bool.self, forKey: .continuous) ?? true
+        twoPages = try container.decodeIfPresent(Bool.self, forKey: .twoPages) ?? false
+        sidebar = try container.decodeIfPresent(SidebarMode.self, forKey: .sidebar) ?? .thumbnails
+        panelVisible = try container.decodeIfPresent(Bool.self, forKey: .panelVisible) ?? true
+        panelTab = try container.decodeIfPresent(PanelTab.self, forKey: .panelTab) ?? .notes
+        rotations = try container.decodeIfPresent([String: Int].self, forKey: .rotations) ?? [:]
+        bookmarks = try container.decodeIfPresent([Bookmark].self, forKey: .bookmarks) ?? []
+        lastHighlightColor = try container.decodeIfPresent(Int.self, forKey: .lastHighlightColor) ?? 1
+        windowFrame = try container.decodeIfPresent(StoredWindowFrame.self, forKey: .windowFrame)
+    }
 }
 
 /// Exact reading position. `scrollY` is the fraction of the page from the top of the
