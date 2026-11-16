@@ -45,6 +45,7 @@ final class ReaderSession: ObservableObject {
     var onDirty: (() -> Void)?
     var onPageChange: (() -> Void)?
     var onAnnotationsChanged: (() -> Void)?
+    var onToast: ((String?) -> Void)?
     weak var undoManager: UndoManager?
     /// True when `state.json` already existed. A first open fits the page width.
     let hasSavedViewState: Bool
@@ -464,10 +465,21 @@ final class ReaderSession: ObservableObject {
     func forwardPosition(current: ReadingPosition) -> ReadingPosition? { navigation.forward(current: current) }
 
     func showToast(_ text: String) {
-        toast = text
-        toastTimer?.invalidate()
-        toastTimer = Timer.scheduledTimer(withTimeInterval: 1.6, repeats: false) { [weak self] _ in
-            Task { @MainActor in self?.toast = nil }
+        let present = {
+            self.toast = text
+            self.onToast?(text)
+            self.toastTimer?.invalidate()
+            let timer = Timer(timeInterval: 1.2, repeats: false) { [weak self] _ in
+                self?.toast = nil
+                self?.onToast?(nil)
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            self.toastTimer = timer
+        }
+        if Thread.isMainThread {
+            present()
+        } else {
+            DispatchQueue.main.async(execute: present)
         }
     }
 

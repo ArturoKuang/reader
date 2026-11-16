@@ -26,8 +26,10 @@ final class ReaderDocument: NSDocument {
         try index.save(to: AppPaths.indexFile, fs: fs)
         let session = ReaderSession(bookURL: opened.url, bookData: opened.data, open: result)
         session.onDirty = { [weak self] in
-            self?.updateChangeCount(.changeDone)
+            // Set the page subtitle first, then mark edited. AppKit appends " — Edited"
+            // itself; including it here shows the suffix twice.
             self?.refreshSubtitle()
+            self?.updateChangeCount(.changeDone)
         }
         session.onPageChange = { [weak self] in
             self?.refreshSubtitle()
@@ -49,6 +51,11 @@ final class ReaderDocument: NSDocument {
     override func save(to url: URL, ofType typeName: String, for saveOperation: NSDocument.SaveOperationType, completionHandler: @escaping (Error?) -> Void) {
         do {
             try session?.persistSidecar()
+            // This override replaces NSDocument's save, which is what normally
+            // clears the edited flag. Without this, " — Edited" stays after ⌘S.
+            if saveOperation != .saveToOperation {
+                updateChangeCount(.changeCleared)
+            }
             completionHandler(nil)
         } catch {
             completionHandler(error)
@@ -68,14 +75,14 @@ final class ReaderDocument: NSDocument {
         refreshSubtitle()
     }
 
+    /// Page or section text only. AppKit appends " — Edited" while the document
+    /// is dirty and removes it when the change count is cleared.
     func refreshSubtitle() {
         guard let session, let window = windowControllers.first?.window else { return }
-        let edited = isDocumentEdited ? " — Edited" : ""
         if session.isPDF {
-            window.subtitle = "Page \(session.page) of \(max(session.pageCount, 1))\(edited)"
+            window.subtitle = "Page \(session.page) of \(max(session.pageCount, 1))"
         } else {
-            let place = session.sectionTitle.isEmpty ? "EPUB" : session.sectionTitle
-            window.subtitle = "\(place)\(edited)"
+            window.subtitle = session.sectionTitle.isEmpty ? "EPUB" : session.sectionTitle
         }
         window.title = session.bookURL.deletingPathExtension().lastPathComponent
     }

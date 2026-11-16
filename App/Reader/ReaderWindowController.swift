@@ -15,6 +15,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     private var panelItem: NSSplitViewItem?
     private var slideshowTimer: Timer?
     private var previousSidebar: SidebarMode = .thumbnails
+    private let toastView = PassThroughView()
+    private let toastLabel = NSTextField(labelWithString: "")
 
     init(session: ReaderSession) {
         self.session = session
@@ -44,6 +46,10 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         window.minSize = NSSize(width: 720, height: 480)
         configureSplit()
         configureToolbar()
+        installToast()
+        session.onToast = { [weak self] text in
+            self?.presentToast(text)
+        }
         installMonitor()
         session.onPageChange = { [weak self] in
             self?.document.map { ($0 as? ReaderDocument)?.refreshSubtitle() }
@@ -87,6 +93,43 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         toolbar.allowsUserCustomization = false
         toolbar.displayMode = .iconOnly
         window?.toolbar = toolbar
+    }
+
+    private func installToast() {
+        guard let content = window?.contentView else { return }
+        toastView.wantsLayer = true
+        toastView.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.82).cgColor
+        toastView.layer?.cornerRadius = 8
+        toastView.translatesAutoresizingMaskIntoConstraints = false
+        toastView.isHidden = true
+        toastLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        toastLabel.textColor = .white
+        toastLabel.alignment = .center
+        toastLabel.drawsBackground = false
+        toastLabel.isBezeled = false
+        toastLabel.isEditable = false
+        toastLabel.translatesAutoresizingMaskIntoConstraints = false
+        toastView.addSubview(toastLabel)
+        content.addSubview(toastView)
+        NSLayoutConstraint.activate([
+            toastLabel.leadingAnchor.constraint(equalTo: toastView.leadingAnchor, constant: 14),
+            toastLabel.trailingAnchor.constraint(equalTo: toastView.trailingAnchor, constant: -14),
+            toastLabel.topAnchor.constraint(equalTo: toastView.topAnchor, constant: 8),
+            toastLabel.bottomAnchor.constraint(equalTo: toastView.bottomAnchor, constant: -8),
+            toastView.centerXAnchor.constraint(equalTo: content.centerXAnchor),
+            toastView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -32),
+        ])
+    }
+
+    private func presentToast(_ text: String?) {
+        let message = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !message.isEmpty else {
+            toastView.isHidden = true
+            return
+        }
+        toastLabel.stringValue = message
+        toastView.isHidden = false
+        window?.contentView?.addSubview(toastView, positioned: .above, relativeTo: nil)
     }
 
     private func installMonitor() {
@@ -427,6 +470,10 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         }
         return true
     }
+}
+
+private final class PassThroughView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 private extension NSToolbarItem.Identifier {
