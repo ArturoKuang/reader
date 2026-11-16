@@ -21,6 +21,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool { false }
 
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls where url.scheme == "reader" {
+            guard let link = ReaderLink.parse(url.absoluteString) else { continue }
+            let book = URL(fileURLWithPath: link.path)
+            NSDocumentController.shared.openDocument(withContentsOf: book, display: true) { document, _, _ in
+                (document as? ReaderDocument)?.reveal(link)
+            }
+        }
+    }
+
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
 
     @objc func showWelcome(_ sender: Any?) {
@@ -198,6 +208,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Summarize Section", #selector(ReaderWindowController.summarizeSection(_:))),
             separator(),
             item("Bookmark This Page", #selector(ReaderWindowController.bookmarkPage(_:)), "d", .command),
+            item("Reveal in Obsidian", #selector(ReaderWindowController.revealInObsidian(_:))),
+            item("Concept Markers", #selector(ReaderWindowController.toggleConceptMarkers(_:))),
             item("Words", #selector(showWords(_:)), "w", [.command, .shift]),
         ]))
         main.addItem(menu("Window", items: [

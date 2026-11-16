@@ -325,7 +325,38 @@ final class PDFContainerViewController: NSViewController {
                 }
             }
         }
+        addConceptMarkers(to: document)
         overlay.needsLayout = true
+    }
+
+    private func addConceptMarkers(to document: PDFDocument) {
+        guard session.showConceptMarkers, !session.concepts.isEmpty else { return }
+        for index in 0..<document.pageCount {
+            guard let page = document.page(at: index), let string = page.string else { continue }
+            let section = session.outline.last { ($0.page ?? 0) <= index + 1 }?.title ?? ""
+            let chapter = ChapterFiles.number(in: section)
+            for concept in session.concepts where concept.chapter == nil || concept.chapter == chapter {
+                for term in concept.findTerms {
+                    guard let range = string.range(of: term, options: .caseInsensitive),
+                          let selection = page.selection(for: NSRange(range, in: string)) else { continue }
+                    let mark = PDFAnnotation(bounds: selection.bounds(for: page), forType: .underline, withProperties: nil)
+                    mark.color = conceptColor(concept)
+                    mark.contents = "\(concept.id)\nClaim: \(concept.claim ?? "")\nTrap: \(concept.trap ?? "")"
+                    page.addAnnotation(mark)
+                    annotations.append(mark)
+                    break
+                }
+            }
+        }
+    }
+
+    private func conceptColor(_ concept: Concept) -> NSColor {
+        switch MasteryFile.badge(session.mastery[concept.id]) {
+        case .notStarted: return .secondaryLabelColor
+        case .learning: return .systemBlue
+        case .known: return .systemGreen
+        case .due: return .systemOrange
+        }
     }
 
     func reveal(_ position: ReadingPosition) {

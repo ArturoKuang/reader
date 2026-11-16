@@ -131,6 +131,20 @@ A toast says `Mark a set` or `Jumped to a`. The position stored is the PDF page,
 
 Preview’s viewing shortcuts win where the design draft overlapped them. ⌘1, ⌘2, and ⌘3 are Continuous Scroll, Single Page, and Two Pages. The inspector tabs are ⌃1–⌃4. Fit Width (⌘8) is extra; Zoom to Fit is ⌘9, as in Preview. Help → Keyboard Shortcuts lists the full set.
 
+## Vault mode
+
+If the book lives inside an Obsidian vault (a parent folder contains `.obsidian`), Reader does not create a `.reader` package. The book folder is the file's parent, for example `books/beginning-of-infinity/`.
+
+- Notes and highlights are appended to `notes/Chapter N.md`. Reader only edits blocks it wrote, wrapped as `<!-- reader:begin id=... -->` … `<!-- reader:end -->`. Hand-written outline text is left byte for byte. Each block ends with `[↗ Open in Reader](reader://open?...)` and an Obsidian block id `^id`.
+- Words go to `learner/vocabulary.md` when that file exists, otherwise `words.md`. The heading is `# Vocabulary — <title>`, then `## Chapter N` and `### Word` with Meaning, Book context, and Added. In plain language and Example are omitted when empty. Hand-written entries are shown in the Words tab and are not rewritten.
+- Marks and view state live in hidden `.reader-state.json` (notes folder, vocab path, Claude session id, concept-marker toggle).
+- Reader watches the book folder and reloads external edits after about a quarter second. Its own writes are ignored. If the same Reader block changed on both sides, both copies are kept and flagged.
+- `reader://open?path=&loc=&id=` opens the book and can scroll to the passage. Tools → Reveal in Obsidian opens `obsidian://open`.
+- `curriculum/concepts.md` supplies `[[wikilinks]]`, find-terms, and Claim/Trap. Missing concept stubs can be created under `concepts/` and are never overwritten. View → Concept Markers underlines those terms; badge color comes from `learner/mastery.json` and is grey when a concept is absent.
+- If `CLAUDE.md` is in the book folder, Ask AI can run Claude Code with that folder as the working directory, `--resume` / `--continue` (not a one-shot ephemeral session), and write access limited to `learner/`, `learning/`, and `reviews/`. Learn, Review, and Wrap send `/learn`, `/review`, and `/wrap`. Reader appends a `reader_passage_question` line to `learning/events.jsonl` without the passage text.
+
+Books outside a vault keep the `.reader` sidecar.
+
 ## Layout
 
 ```
@@ -141,7 +155,7 @@ Packages/ReaderCore          Sidecars, anchors, EPUB, words, prompts, CLI argv
 
 ## Known gaps
 
-Verified here: `Packages/ReaderCore` unit tests, run with Swift 6.0.3 on Linux (16 tests). That covers SHA-256, PDF trailer ids, ZIP store and deflate, EPUB package/nav/text, CFI parse and build, Markdown round-trip for notes, words, highlights, and marks, sidecar create / rename / move offer / unwritable fallback / stable-id refresh / re-anchor, word undo and export, prompt assembly including the long-book fallback, OpenAI and Anthropic request shape and SSE parsing, and the exact `claude` / `codex` argument lists.
+Verified here: `Packages/ReaderCore` unit tests on Linux. Vault tests cover block preservation, vocabulary order, concept parsing, mastery, tutor events, and sync conflicts. That covers SHA-256, PDF trailer ids, ZIP store and deflate, EPUB package/nav/text, CFI parse and build, Markdown round-trip for notes, words, highlights, and marks, sidecar create / rename / move offer / unwritable fallback / stable-id refresh / re-anchor, word undo and export, prompt assembly including the long-book fallback, OpenAI and Anthropic request shape and SSE parsing, and the exact `claude` / `codex` argument lists.
 
 Not verified here, because this environment has no Xcode and no Mac:
 

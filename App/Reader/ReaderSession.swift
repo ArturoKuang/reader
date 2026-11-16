@@ -15,6 +15,19 @@ final class ReaderSession: ObservableObject {
     @Published var offerMoveTo: String?
     @Published var needsReanchor: Bool
     @Published var toast: String?
+    @Published var concepts: [Concept] = []
+    @Published var mastery: [String: MasteryRecord] = [:]
+    @Published var tutorLines: [String] = []
+    @Published var showConceptMarkers = true
+    var usesVault = false
+    var vaultName: String?
+    var vaultRoot: String?
+    var bookFolder: String?
+    var tutorAvailable = false
+    var claudeSessionID: String?
+    var onVaultFlush: (() -> Void)?
+    var onSaveVaultState: (() -> Void)?
+    var pendingReaderLink: ReaderLink?
     @Published var sidebar: SidebarMode
     @Published var panelVisible: Bool
     @Published var panelTab: PanelTab
@@ -144,6 +157,10 @@ final class ReaderSession: ObservableObject {
 
     func saveViewQuietly() {
         captureState()
+        if usesVault {
+            onSaveVaultState?()
+            return
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         if let data = try? encoder.encode(package.state) {
@@ -519,8 +536,88 @@ final class ReaderSession: ObservableObject {
 
     private func dirty() {
         captureState()
-        onDirty?()
+        if usesVault {
+            onVaultFlush?()
+        } else {
+            onDirty?()
+        }
         objectWillChange.send()
+    }
+
+    func wordsFromVault(_ entries: [VocabEntry]) {
+        package.words.words = entries.map { entry in
+            WordEntry(
+                id: entry.readerOwned ? entry.id : "hand_\(entry.word.lowercased())",
+                word: entry.word,
+                definition: entry.meaning,
+                explanation: entry.plainLanguage,
+                lookups: [LookupEntry(id: "l_\(entry.id)", section: entry.chapter.map { "Chapter \($0)" }, quote: entry.word, sentence: entry.bookContext, date: entry.added)]
+            )
+        }
+    }
+
+    func askTutor(command: TutorCommand?, question: String) {
+        guard let bookFolder, tutorAvailable else { return }
+        let passage = selection?.text ?? ""
+        let chapter = ChapterFiles.number(in: selection?.section ?? sectionTitle)
+        let nearby = ConceptsFile.suggested(passage: passage, concepts: concepts, chapter: chapter)
+        let file = chapter.flatMap { ChapterFiles.chapterTextFile(bookFolder: bookFolder, chapter: $0, fs: LocalFileSystem()) }
+        let prompt = TutorPrompt.message(passage: passage, chapter: chapter, chapterFile: file, concepts: nearby, question: question, command: command)
+        let event = TutorExchange(
+            bookID: Paths.name(bookFolder),
+            chapter: chapter,
+            conceptIDs: nearby.map(\.id),
+            passageCharacterCount: passage.count,
+            date: isoDay(Date()),
+            eventID: "reader-\(UUID().uuidString.lowercased())"
+        )
+        appendTutorEvent(event)
+        tutorLines.append("You: \(command?.slash ?? question)")
+        asking = true
+        show(tab: .askAI)
+        let invocation = ClaudeCommand.tutorInvocation(
+            executable: settings.claudeCLIPath ?? "claude",
+            prompt: prompt,
+            workingDirectory: bookFolder,
+            sessionID: claudeSessionID
+        )
+        let runner = ProcessCommandRunner()
+        Task { [weak self] in
+            do {
+                let result = try runner.run(invocation, timeout: 180) { chunk in
+                    Task { @MainActor in self?.answer = chunk }
+                }
+                let text = (try? CLIOutput.parseClaude(result.stdout)) ?? result.stdout
+                await MainActor.run {
+                    self?.answer = text
+                    self?.tutorLines.append(text)
+                    self?.asking = false
+                    self?.answerLabel = "Answered by Claude Code in this vault"
+                }
+            } catch {
+                await MainActor.run {
+                    self?.answer = error.localizedDescription
+                    self?.asking = false
+                }
+            }
+        }
+    }
+
+    private func appendTutorEvent(_ event: TutorExchange) {
+        guard let bookFolder else { return }
+        let path = Paths.join(bookFolder, "learning/events.jsonl")
+        let fs = LocalFileSystem()
+        try? fs.createDirectory(Paths.parent(path))
+        let existing = (try? fs.readString(path)) ?? ""
+        let line = event.jsonLine()
+        let next = existing.isEmpty || existing.hasSuffix("\n") ? existing + line + "\n" : existing + "\n" + line + "\n"
+        try? fs.writeString(path, next)
+    }
+
+    private func isoDay(_ date: Date) -> String {
+        let calendar = Calendar(identifier: .gregorian)
+        let parts = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
     }
 
     private func captureState() {

@@ -481,6 +481,26 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         applyChrome()
     }
     @objc func bookmarkPage(_ sender: Any?) { session.addBookmark(); applyChrome() }
+    @objc func revealInObsidian(_ sender: Any?) {
+        guard session.usesVault, let vault = session.vaultName, let root = session.vaultRoot, let folder = session.bookFolder else { return }
+        let chapter = ChapterFiles.number(in: session.selection?.section ?? session.sectionTitle)
+        let name = ChapterFiles.notesFile(chapter: chapter, bookTitle: session.bookURL.deletingPathExtension().lastPathComponent)
+        var relative = folder
+        if relative.hasPrefix(root) {
+            relative = String(relative.dropFirst(root.count))
+            if relative.hasPrefix("/") { relative.removeFirst() }
+        }
+        let file = Paths.join(Paths.join(relative, "notes"), name)
+        let block = session.notes.last?.id ?? session.highlights.last?.id
+        if let url = URL(string: ObsidianLink.open(vault: vault, file: file, blockID: block)) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+    @objc func toggleConceptMarkers(_ sender: Any?) {
+        session.showConceptMarkers.toggle()
+        session.onAnnotationsChanged?()
+        session.onSaveVaultState?()
+    }
     @objc func copyCitation(_ sender: Any?) {
         pdfController?.captureSelection()
         guard let text = session.copyCitation() else { return }
@@ -500,6 +520,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         case #selector(singlePage(_:)): menuItem.state = session.twoPages ? .off : .on
         case #selector(twoPages(_:)): menuItem.state = session.twoPages ? .on : .off
         case #selector(togglePanel(_:)): menuItem.state = session.panelVisible ? .on : .off
+        case #selector(toggleConceptMarkers(_:)): menuItem.state = session.showConceptMarkers ? .on : .off
         default: break
         }
         return true

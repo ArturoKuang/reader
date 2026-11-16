@@ -3,6 +3,7 @@ import ReaderCore
 
 final class ReaderDocument: NSDocument {
     var session: ReaderSession?
+    private var vault: VaultCoordinator?
     private var bookData = Data()
 
     override class var autosavesInPlace: Bool { true }
@@ -14,6 +15,24 @@ final class ReaderDocument: NSDocument {
         fileURL = opened.url
         fileType = opened.kind == .epub ? "org.idpf.epub-container" : "com.adobe.pdf"
         let fs = LocalFileSystem()
+        if let coordinator = VaultCoordinator.make(bookPath: opened.url.path) {
+            let hasState = fs.exists(Paths.join(coordinator.location.bookFolder, ".reader-state.json"))
+            let identity = FrontMatter(kind: "notes", document: opened.url.lastPathComponent, fingerprint: SHA256.fingerprint(opened.data))
+            let result = OpenResult(package: SidecarPackage.empty(identity: identity), directory: coordinator.location.bookFolder, placement: .sibling, hasSavedViewState: hasState)
+            let session = ReaderSession(bookURL: opened.url, bookData: opened.data, open: result)
+            if hasState {
+                session.package.state = VaultBookSettings.load(bookFolder: coordinator.location.bookFolder, fs: fs).view
+                session.fitMode = session.package.state.fitMode
+                session.zoom = session.package.state.zoom
+                session.page = max(session.package.state.page, 1)
+            }
+            coordinator.attach(session)
+            session.onPageChange = { [weak self] in self?.refreshSubtitle() }
+            self.vault = coordinator
+            self.session = session
+            DispatchQueue.main.async { [weak self] in self?.refreshSubtitle() }
+            return
+        }
         var index = LibraryIndex.load(from: AppPaths.indexFile, fs: fs)
         let result = try SidecarStore.open(
             bookPath: opened.url.path,
@@ -48,7 +67,20 @@ final class ReaderDocument: NSDocument {
     }
 
     /// Autosave writes the sidecar only. The book file is never replaced.
+    func reveal(_ link: ReaderLink) {
+        session?.pendingReaderLink = link
+        session?.onAnnotationsChanged?()
+    }
+
     override func save(to url: URL, ofType typeName: String, for saveOperation: NSDocument.SaveOperationType, completionHandler: @escaping (Error?) -> Void) {
+        if session?.usesVault == true {
+            session?.onVaultFlush?()
+            if saveOperation != .saveToOperation {
+                updateChangeCount(.changeCleared)
+            }
+            completionHandler(nil)
+            return
+        }
         do {
             try session?.persistSidecar()
             // This override replaces NSDocument's save, which is what normally

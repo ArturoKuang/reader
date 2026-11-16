@@ -270,6 +270,7 @@ struct EPUBContactSheet: View {
 
 struct RightPanelView: View {
     @ObservedObject var session: ReaderSession
+    @State private var noteDraft = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -310,7 +311,35 @@ struct RightPanelView: View {
                 }
                 .onTapGesture { session.toggleNote(note.id) }
             }
+            if session.usesVault, !session.concepts.isEmpty {
+                conceptComposer
+            }
         }
+    }
+
+    private var conceptComposer: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            TextField("Write a note. Type [[ for a concept", text: $noteDraft)
+                .textFieldStyle(.roundedBorder)
+            if let query = conceptQuery(noteDraft) {
+                ForEach(Array(ConceptsFile.autocomplete(prefix: query, concepts: session.concepts).prefix(6))) { concept in
+                    Button(concept.wiki) {
+                        if let range = noteDraft.range(of: "[[", options: .backwards) {
+                            noteDraft.replaceSubrange(range.lowerBound..<noteDraft.endIndex, with: concept.wiki)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .help(conceptHelp(concept))
+                }
+            }
+        }
+    }
+
+    private func conceptQuery(_ text: String) -> String? {
+        guard let range = text.range(of: "[[", options: .backwards) else { return nil }
+        let rest = String(text[range.upperBound...])
+        if rest.contains("]]") { return nil }
+        return rest
     }
 
     private var words: some View {
@@ -377,6 +406,22 @@ struct RightPanelView: View {
                 Button(session.asking ? "Asking…" : "Ask") { session.askCurrentQuestion() }.disabled(session.asking)
                 Button("Stop") { session.stopAsk() }.disabled(!session.asking)
             }
+            if session.tutorAvailable {
+                HStack {
+                    Button("Learn") { session.askTutor(command: .learn, question: session.question) }
+                    Button("Review") { session.askTutor(command: .review, question: session.question) }
+                    Button("Wrap") { session.askTutor(command: .wrap, question: session.question) }
+                }
+                ForEach(Array(session.tutorLines.enumerated()), id: \.offset) { _, line in
+                    Text(line).font(.callout).textSelection(.enabled)
+                }
+                if !session.concepts.isEmpty {
+                    Text("Concepts in this passage").font(.caption).foregroundStyle(.secondary)
+                    ForEach(ConceptsFile.suggested(passage: session.selection?.text ?? "", concepts: session.concepts, chapter: ChapterFiles.number(in: session.selection?.section ?? session.sectionTitle))) { concept in
+                        Text(concept.wiki).font(.caption).help(conceptHelp(concept))
+                    }
+                }
+            }
             if !session.answer.isEmpty {
                 Text(session.answer).textSelection(.enabled)
                 Text(session.answerLabel).font(.caption).foregroundStyle(.secondary)
@@ -390,6 +435,13 @@ struct RightPanelView: View {
             }
             Text("Questions are sent as soon as you ask. Nothing is saved unless you choose Save as note.").font(.caption).foregroundStyle(.secondary)
         }
+    }
+
+    private func conceptHelp(_ concept: Concept) -> String {
+        var lines: [String] = []
+        if let claim = concept.claim { lines.append("Claim: \(claim)") }
+        if let trap = concept.trap { lines.append("Trap: \(trap)") }
+        return lines.joined(separator: "\n")
     }
 }
 
