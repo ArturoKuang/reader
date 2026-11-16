@@ -36,6 +36,9 @@ final class VaultCoordinator {
         session.vaultRoot = location.vaultRoot
         session.bookFolder = location.bookFolder
         session.showConceptMarkers = settings.showConceptMarkers
+        session.vaultNotesFolder = settings.notesFolder
+        session.vaultVocabularyFile = settings.vocabularyFile ?? ""
+        session.vaultEnabled = settings.enabled
         session.tutorAvailable = fs.exists(Paths.join(location.bookFolder, "CLAUDE.md"))
         session.claudeSessionID = settings.claudeSessionID
         reload(into: session, mergePending: false)
@@ -48,7 +51,13 @@ final class VaultCoordinator {
             self.settings.view = session.package.state
             self.settings.showConceptMarkers = session.showConceptMarkers
             self.settings.claudeSessionID = session.claudeSessionID
+            self.settings.enabled = session.vaultEnabled
+            self.settings.notesFolder = session.vaultNotesFolder.isEmpty ? "notes" : session.vaultNotesFolder
+            self.settings.vocabularyFile = session.vaultVocabularyFile.isEmpty ? nil : session.vaultVocabularyFile
             try? self.settings.save(bookFolder: self.location.bookFolder, fs: self.fs)
+        }
+        session.onInsertConcept = { [weak self] concept in
+            self?.ensureConceptStub(concept)
         }
         watcher = VaultFolderWatcher(bookFolder: location.bookFolder) { [weak self, weak session] in
             guard let self, let session, !self.applyingOwnWrite else { return }
@@ -117,6 +126,14 @@ final class VaultCoordinator {
         let file = Paths.join(settings.notesFolder, ChapterFiles.notesFile(chapter: chapter, bookTitle: ""))
         let url = URL(string: ObsidianLink.open(vault: location.vaultName, file: file, blockID: id))
         if let url { NSWorkspace.shared.open(url) }
+    }
+
+    func ensureConceptStub(_ concept: Concept) {
+        let directory = Paths.join(location.bookFolder, "concepts")
+        let path = Paths.join(directory, concept.stubFileName)
+        if fs.exists(path) { return }
+        try? fs.createDirectory(directory)
+        try? fs.writeString(path, ConceptsFile.stub(for: concept))
     }
 
     func setEnabled(_ enabled: Bool) {

@@ -27,6 +27,10 @@ final class ReaderSession: ObservableObject {
     var claudeSessionID: String?
     var onVaultFlush: (() -> Void)?
     var onSaveVaultState: (() -> Void)?
+    var onInsertConcept: ((Concept) -> Void)?
+    @Published var vaultNotesFolder = "notes"
+    @Published var vaultVocabularyFile = ""
+    @Published var vaultEnabled = true
     var pendingReaderLink: ReaderLink?
     @Published var sidebar: SidebarMode
     @Published var panelVisible: Bool

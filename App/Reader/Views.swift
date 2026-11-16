@@ -311,9 +311,23 @@ struct RightPanelView: View {
                 }
                 .onTapGesture { session.toggleNote(note.id) }
             }
-            if session.usesVault, !session.concepts.isEmpty {
+            if session.usesVault {
+                vaultMapping
                 conceptComposer
             }
+        }
+    }
+
+    private var vaultMapping: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle("Write notes into this vault", isOn: $session.vaultEnabled)
+                .onChange(of: session.vaultEnabled) { _, _ in session.onSaveVaultState?() }
+            TextField("Notes folder", text: $session.vaultNotesFolder)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { session.onSaveVaultState?() }
+            TextField("Vocabulary file", text: $session.vaultVocabularyFile)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { session.onSaveVaultState?() }
         }
     }
 
@@ -324,6 +338,7 @@ struct RightPanelView: View {
             if let query = conceptQuery(noteDraft) {
                 ForEach(Array(ConceptsFile.autocomplete(prefix: query, concepts: session.concepts).prefix(6))) { concept in
                     Button(concept.wiki) {
+                        session.onInsertConcept?(concept)
                         if let range = noteDraft.range(of: "[[", options: .backwards) {
                             noteDraft.replaceSubrange(range.lowerBound..<noteDraft.endIndex, with: concept.wiki)
                         }
