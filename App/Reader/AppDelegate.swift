@@ -1,0 +1,251 @@
+import AppKit
+import ReaderCore
+import SwiftUI
+import UniformTypeIdentifiers
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var welcome: NSWindow?
+    private var settingsWindow: NSWindow?
+    private var wordsWindow: NSWindow?
+    private var shortcutsWindow: NSWindow?
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        buildMenu()
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        if NSDocumentController.shared.documents.isEmpty {
+            showWelcome(nil)
+        }
+    }
+
+    func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool { false }
+
+    func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
+
+    @objc func showWelcome(_ sender: Any?) {
+        if welcome == nil {
+            let host = NSHostingController(rootView: WelcomeView())
+            let window = NSWindow(contentViewController: host)
+            window.title = "Reader"
+            window.setContentSize(NSSize(width: 520, height: 420))
+            window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+            welcome = window
+        }
+        welcome?.center()
+        welcome?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc func openDocument(_ sender: Any?) {
+        NSDocumentController.shared.openDocument(nil)
+    }
+
+    @objc func showSettings(_ sender: Any?) {
+        if settingsWindow == nil {
+            let host = NSHostingController(rootView: SettingsView())
+            let window = NSWindow(contentViewController: host)
+            window.title = "Reader Settings"
+            window.setContentSize(NSSize(width: 560, height: 640))
+            window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+            settingsWindow = window
+        }
+        settingsWindow?.center()
+        settingsWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc func showWords(_ sender: Any?) {
+        let books = LibraryIndex.load(from: AppPaths.indexFile, fs: LocalFileSystem()).documents
+        let host = NSHostingController(rootView: WordsBrowser(books: books))
+        let window = NSWindow(contentViewController: host)
+        window.title = "Words"
+        window.setContentSize(NSSize(width: 860, height: 560))
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        wordsWindow = window
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    @objc func showShortcuts(_ sender: Any?) {
+        if shortcutsWindow == nil {
+            let host = NSHostingController(rootView: ShortcutsView())
+            let window = NSWindow(contentViewController: host)
+            window.title = "Keyboard Shortcuts"
+            window.setContentSize(NSSize(width: 520, height: 640))
+            window.styleMask = [.titled, .closable, .resizable]
+            shortcutsWindow = window
+        }
+        shortcutsWindow?.center()
+        shortcutsWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc func exportAllWords(_ sender: Any?) {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.plainText]
+        panel.nameFieldStringValue = "All words.md"
+        panel.prompt = "Export"
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            let csv = url.pathExtension.lowercased() == "csv"
+            let (text, missing) = WordLibrary.export(csv: csv)
+            do {
+                try text.write(to: url, atomically: true, encoding: .utf8)
+                if !missing.isEmpty {
+                    let alert = NSAlert()
+                    alert.messageText = "Some books were skipped"
+                    alert.informativeText = missing.joined(separator: "\n")
+                    alert.runModal()
+                }
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "Couldn't export words"
+                alert.informativeText = error.localizedDescription
+                alert.runModal()
+            }
+        }
+    }
+
+    private func buildMenu() {
+        let main = NSMenu()
+        main.addItem(menu("Reader", items: [
+            item("About Reader", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
+            separator(),
+            item("Settings…", #selector(showSettings(_:)), ",", .command),
+            separator(),
+            item("Hide Reader", #selector(NSApplication.hide(_:)), "h", .command),
+            item("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option]),
+            item("Show All", #selector(NSApplication.unhideAllApplications(_:))),
+            separator(),
+            item("Quit Reader", #selector(NSApplication.terminate(_:)), "q", .command),
+        ]))
+        main.addItem(menu("File", items: [
+            item("Open…", #selector(openDocument(_:)), "o", .command),
+            separator(),
+            item("Export All Words…", #selector(exportAllWords(_:)), "e", [.command, .shift]),
+            separator(),
+            item("Close", #selector(NSWindow.performClose(_:)), "w", .command),
+            item("Save", #selector(NSDocument.save(_:)), "s", .command),
+        ]))
+        // Recent menu: the line above is awkward if submenu returns nil. Fix below after construction.
+        main.addItem(menu("Edit", items: [
+            item("Undo", Selector(("undo:")), "z", .command),
+            item("Redo", Selector(("redo:")), "Z", .command),
+            separator(),
+            item("Cut", #selector(NSText.cut(_:)), "x", .command),
+            item("Copy", #selector(NSText.copy(_:)), "c", .command),
+            item("Copy with Citation", #selector(ReaderWindowController.copyCitation(_:)), "c", [.command, .shift]),
+            item("Paste", #selector(NSText.paste(_:)), "v", .command),
+            item("Select All", #selector(NSText.selectAll(_:)), "a", .command),
+            separator(),
+            item("Find…", #selector(ReaderWindowController.find(_:)), "f", .command),
+            item("Find Next", #selector(ReaderWindowController.findNext(_:)), "g", .command),
+            item("Find Previous", #selector(ReaderWindowController.findPrevious(_:)), "g", [.command, .shift]),
+        ]))
+        main.addItem(menu("View", items: [
+            item("Hide Sidebar", #selector(ReaderWindowController.hideSidebar(_:)), "1", [.command, .option]),
+            item("Thumbnails", #selector(ReaderWindowController.showThumbnails(_:)), "2", [.command, .option]),
+            item("Table of Contents", #selector(ReaderWindowController.showContents(_:)), "3", [.command, .option]),
+            item("Highlights and Notes", #selector(ReaderWindowController.showHighlightsAndNotes(_:)), "4", [.command, .option]),
+            item("Bookmarks", #selector(ReaderWindowController.showBookmarks(_:)), "5", [.command, .option]),
+            item("Contact Sheet", #selector(ReaderWindowController.showContactSheet(_:)), "6", [.command, .option]),
+            separator(),
+            item("Continuous Scroll", #selector(ReaderWindowController.toggleContinuous(_:)), "1", .command),
+            item("Single Page", #selector(ReaderWindowController.singlePage(_:)), "2", .command),
+            item("Two Pages", #selector(ReaderWindowController.twoPages(_:)), "3", .command),
+            separator(),
+            item("Actual Size", #selector(ReaderWindowController.actualSize(_:)), "0", .command),
+            item("Zoom to Fit", #selector(ReaderWindowController.zoomToFit(_:)), "9", .command),
+            item("Fit Width", #selector(ReaderWindowController.fitWidth(_:)), "8", .command),
+            item("Zoom In", #selector(ReaderWindowController.zoomIn(_:)), "+", .command),
+            item("Zoom Out", #selector(ReaderWindowController.zoomOut(_:)), "-", .command),
+            item("Zoom to Selection", #selector(ReaderWindowController.zoomToSelection(_:)), "*", .command),
+            separator(),
+            item("Rotate Left", #selector(ReaderWindowController.rotateLeft(_:)), "l", .command),
+            item("Rotate Right", #selector(ReaderWindowController.rotateRight(_:)), "r", .command),
+            separator(),
+            item("Show Inspector", #selector(ReaderWindowController.togglePanel(_:)), "i", .command),
+            item("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control]),
+            item("Slideshow", #selector(ReaderWindowController.slideshow(_:)), "f", [.command, .shift]),
+            separator(),
+            item("Notes", #selector(ReaderWindowController.showNotesTab(_:)), "1", .control),
+            item("Words", #selector(ReaderWindowController.showWordsTab(_:)), "2", .control),
+            item("Highlights", #selector(ReaderWindowController.showHighlightsTab(_:)), "3", .control),
+            item("Ask AI", #selector(ReaderWindowController.showAskTab(_:)), "4", .control),
+            item("Expand All Notes", #selector(ReaderWindowController.expandAllNotes(_:)), "e", [.command, .option]),
+            item("Collapse All Notes", #selector(ReaderWindowController.collapseAllNotes(_:))),
+        ]))
+        main.addItem(menu("Go", items: [
+            item("Back", #selector(ReaderWindowController.goBack(_:)), "[", .command),
+            item("Forward", #selector(ReaderWindowController.goForward(_:)), "]", .command),
+            separator(),
+            item("Go to Page…", #selector(ReaderWindowController.goToPage(_:)), "g", [.command, .option]),
+            item("Next Page", #selector(ReaderWindowController.nextPage(_:))),
+            item("Previous Page", #selector(ReaderWindowController.previousPage(_:))),
+        ]))
+        main.addItem(menu("Tools", items: [
+            item("Highlight Color 1", #selector(ReaderWindowController.highlight1(_:)), "1", [.command, .control]),
+            item("Highlight Color 2", #selector(ReaderWindowController.highlight2(_:)), "2", [.command, .control]),
+            item("Highlight Color 3", #selector(ReaderWindowController.highlight3(_:)), "3", [.command, .control]),
+            item("Highlight Color 4", #selector(ReaderWindowController.highlight4(_:)), "4", [.command, .control]),
+            item("Highlight Color 5", #selector(ReaderWindowController.highlight5(_:)), "5", [.command, .control]),
+            item("Highlight Color 6", #selector(ReaderWindowController.highlight6(_:)), "6", [.command, .control]),
+            item("Highlight with Last Color", #selector(ReaderWindowController.highlightLast(_:)), "h", [.command, .control]),
+            separator(),
+            item("Add Note", #selector(ReaderWindowController.addNote(_:)), "n", [.command, .shift]),
+            item("Look Up", #selector(ReaderWindowController.lookUp(_:)), "d", [.command, .control]),
+            item("Ask AI…", #selector(ReaderWindowController.askAI(_:)), "k", .command),
+            item("Explain Simply", #selector(ReaderWindowController.explainSimply(_:))),
+            item("Summarize Section", #selector(ReaderWindowController.summarizeSection(_:))),
+            separator(),
+            item("Bookmark This Page", #selector(ReaderWindowController.bookmarkPage(_:)), "d", .command),
+            item("Words", #selector(showWords(_:)), "w", [.command, .shift]),
+        ]))
+        main.addItem(menu("Window", items: [
+            item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m", .command),
+            item("Zoom", #selector(NSWindow.performZoom(_:))),
+        ]))
+        main.addItem(menu("Help", items: [
+            item("Keyboard Shortcuts", #selector(showShortcuts(_:)), "?", .command),
+        ]))
+        NSApp.mainMenu = main
+    }
+
+    private func menu(_ title: String, items: [NSMenuItem]) -> NSMenuItem {
+        let menu = NSMenu(title: title)
+        items.forEach { menu.addItem($0) }
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.submenu = menu
+        return item
+    }
+
+    private func item(_ title: String, _ action: Selector?, _ key: String = "", _ modifiers: NSEvent.ModifierFlags = []) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        item.keyEquivalentModifierMask = modifiers
+        return item
+    }
+
+    private func separator() -> NSMenuItem { .separator() }
+}
+
+enum WordLibrary {
+    static func export(csv: Bool) -> (String, [String]) {
+        let fs = LocalFileSystem()
+        let index = LibraryIndex.load(from: AppPaths.indexFile, fs: fs)
+        var books: [ExportBook] = []
+        var missing: [String] = []
+        for entry in index.documents {
+            guard fs.isDirectory(entry.sidecarPath),
+                  let package = try? SidecarPackage.read(from: entry.sidecarPath, fs: fs) else {
+                missing.append(entry.title)
+                continue
+            }
+            books.append(ExportBook(title: entry.title, words: package.words.words))
+        }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        let date = formatter.string(from: Date())
+        let text = csv ? WordExport.csv(books: books) : WordExport.markdown(books: books, date: date)
+        return (text, missing)
+    }
+}

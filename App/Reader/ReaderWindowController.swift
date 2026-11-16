@@ -1,0 +1,401 @@
+import AppKit
+import ReaderCore
+import SwiftUI
+
+final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWindowDelegate {
+    let session: ReaderSession
+    private let split = NSSplitViewController()
+    private let sidebarHost: NSHostingController<SidebarView>
+    private let panelHost: NSHostingController<RightPanelView>
+    private let center: NSViewController
+    private var pdfController: PDFContainerViewController?
+    private var epubController: EPUBContainerViewController?
+    private var keyMonitor: Any?
+    private var sidebarItem: NSSplitViewItem?
+    private var panelItem: NSSplitViewItem?
+    private var slideshowTimer: Timer?
+    private var previousSidebar: SidebarMode = .thumbnails
+
+    init(session: ReaderSession) {
+        self.session = session
+        sidebarHost = NSHostingController(rootView: SidebarView(session: session))
+        panelHost = NSHostingController(rootView: RightPanelView(session: session))
+        if session.isPDF {
+            let pdf = PDFContainerViewController(session: session)
+            pdfController = pdf
+            center = pdf
+        } else {
+            let epub = EPUBContainerViewController(session: session)
+            epubController = epub
+            center = epub
+        }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 840),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.titlebarAppearsTransparent = false
+        window.titleVisibility = .visible
+        window.toolbarStyle = .unified
+        super.init(window: window)
+        window.delegate = self
+        window.minSize = NSSize(width: 720, height: 480)
+        configureSplit()
+        configureToolbar()
+        installMonitor()
+        session.onPageChange = { [weak self] in
+            self?.document.map { ($0 as? ReaderDocument)?.refreshSubtitle() }
+            self?.pdfController?.consumePendingJump()
+            self?.epubController?.consumePendingJump()
+        }
+        applyChrome()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    private func configureSplit() {
+        let sidebar = NSSplitViewItem(sidebarWithViewController: sidebarHost)
+        sidebar.minimumThickness = 180
+        sidebar.maximumThickness = 320
+        sidebar.canCollapse = true
+        let content = NSSplitViewItem(viewController: center)
+        content.minimumThickness = 320
+        let inspector = NSSplitViewItem(viewController: panelHost)
+        inspector.minimumThickness = 280
+        inspector.maximumThickness = 460
+        inspector.canCollapse = true
+        split.splitView.dividerStyle = .thin
+        split.addSplitViewItem(sidebar)
+        split.addSplitViewItem(content)
+        split.addSplitViewItem(inspector)
+        sidebarItem = sidebar
+        panelItem = inspector
+        window?.contentViewController = split
+    }
+
+    private func configureToolbar() {
+        let toolbar = NSToolbar(identifier: "ReaderToolbar")
+        toolbar.delegate = self
+        toolbar.allowsUserCustomization = false
+        toolbar.displayMode = .iconOnly
+        window?.toolbar = toolbar
+    }
+
+    private func installMonitor() {
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, event.window === self.window else { return event }
+            if self.slideshowTimer != nil, event.keyCode == 53 {
+                self.stopSlideshow()
+                return nil
+            }
+            let position = self.pdfController?.currentPosition() ?? self.epubController?.currentPosition() ?? ReadingPosition(page: self.session.page, zoom: self.session.zoom)
+            let handled = self.session.handleMarkEvent(event, documentFocused: true, position: position)
+            if handled.consumed {
+                if let jump = handled.jump {
+                    self.reveal(jump)
+                }
+                return nil
+            }
+            return event
+        }
+    }
+
+    func applyChrome() {
+        let contact = session.sidebar == .contactSheet
+        sidebarItem?.isCollapsed = session.sidebar == .hidden || contact
+        panelItem?.isCollapsed = !session.panelVisible
+        pdfController?.setContactSheet(contact)
+        epubController?.setContactSheet(contact)
+        sidebarHost.rootView = SidebarView(session: session)
+        panelHost.rootView = RightPanelView(session: session)
+    }
+
+    func reveal(_ position: ReadingPosition) {
+        if session.isPDF {
+            pdfController?.reveal(position)
+        } else {
+            epubController?.reveal(position)
+        }
+    }
+
+    deinit {
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        slideshowTimer?.invalidate()
+    }
+
+    // MARK: Toolbar
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.sidebarMenu, .navigation, .flexibleSpace, .search, .inspector]
+    }
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.sidebarMenu, .navigation, .flexibleSpace, .search, .inspector]
+    }
+
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        switch itemIdentifier {
+        case .sidebarMenu:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.view = sidebarControl()
+            item.label = "Sidebar"
+            return item
+        case .navigation:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            let back = NSButton(image: NSImage(systemSymbolName: "chevron.left", accessibilityDescription: "Back")!, target: self, action: #selector(goBack(_:)))
+            let forward = NSButton(image: NSImage(systemSymbolName: "chevron.right", accessibilityDescription: "Forward")!, target: self, action: #selector(goForward(_:)))
+            back.bezelStyle = .texturedRounded
+            forward.bezelStyle = .texturedRounded
+            let stack = NSStackView(views: [back, forward])
+            stack.spacing = 2
+            item.view = stack
+            item.label = "Navigation"
+            return item
+        case .search:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            let button = NSButton(image: NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "Find")!, target: self, action: #selector(find(_:)))
+            button.bezelStyle = .texturedRounded
+            item.view = button
+            item.label = "Find"
+            return item
+        case .inspector:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            let button = NSButton(image: NSImage(systemSymbolName: "info.circle", accessibilityDescription: "Inspector")!, target: self, action: #selector(togglePanel(_:)))
+            button.bezelStyle = .texturedRounded
+            item.view = button
+            item.label = "Inspector"
+            return item
+        default:
+            return nil
+        }
+    }
+
+    private func sidebarControl() -> NSView {
+        let button = NSButton(image: NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Sidebar")!, target: self, action: #selector(toggleSidebar(_:)))
+        button.bezelStyle = .texturedRounded
+        let pull = NSPopUpButton()
+        pull.pullsDown = true
+        pull.menu = sidebarMenu()
+        pull.bezelStyle = .texturedRounded
+        if let first = pull.item(at: 0) {
+            first.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "Sidebar options")
+            first.title = ""
+        }
+        let stack = NSStackView(views: [button, pull])
+        stack.spacing = 0
+        return stack
+    }
+
+    private func sidebarMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Sidebar", action: nil, keyEquivalent: "")
+        let entries: [(String, Selector, SidebarMode?)] = [
+            ("Hide Sidebar", #selector(hideSidebar(_:)), .hidden),
+            ("Thumbnails", #selector(showThumbnails(_:)), .thumbnails),
+            ("Table of Contents", #selector(showContents(_:)), .tableOfContents),
+            ("Highlights and Notes", #selector(showHighlightsAndNotes(_:)), .highlightsAndNotes),
+            ("Bookmarks", #selector(showBookmarks(_:)), .bookmarks),
+            ("Contact Sheet", #selector(showContactSheet(_:)), .contactSheet),
+        ]
+        for entry in entries {
+            let item = NSMenuItem(title: entry.0, action: entry.1, keyEquivalent: "")
+            item.target = self
+            item.state = session.sidebar == entry.2 ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let continuous = NSMenuItem(title: "Continuous Scroll", action: #selector(toggleContinuous(_:)), keyEquivalent: "")
+        continuous.target = self
+        continuous.state = session.continuous ? .on : .off
+        menu.addItem(continuous)
+        let single = NSMenuItem(title: "Single Page", action: #selector(singlePage(_:)), keyEquivalent: "")
+        single.target = self
+        single.state = session.twoPages ? .off : .on
+        menu.addItem(single)
+        let two = NSMenuItem(title: "Two Pages", action: #selector(twoPages(_:)), keyEquivalent: "")
+        two.target = self
+        two.state = session.twoPages ? .on : .off
+        menu.addItem(two)
+        return menu
+    }
+
+    // MARK: View menu
+
+    @objc func hideSidebar(_ sender: Any?) { session.setSidebar(.hidden); applyChrome() }
+    @objc func showThumbnails(_ sender: Any?) { session.setSidebar(.thumbnails); applyChrome() }
+    @objc func showContents(_ sender: Any?) { session.setSidebar(.tableOfContents); applyChrome() }
+    @objc func showHighlightsAndNotes(_ sender: Any?) { session.setSidebar(.highlightsAndNotes); applyChrome() }
+    @objc func showBookmarks(_ sender: Any?) { session.setSidebar(.bookmarks); applyChrome() }
+    @objc func showContactSheet(_ sender: Any?) {
+        if session.sidebar != .contactSheet { previousSidebar = session.sidebar }
+        session.setSidebar(.contactSheet)
+        applyChrome()
+    }
+    @objc func toggleSidebar(_ sender: Any?) {
+        if session.sidebar == .hidden {
+            session.setSidebar(previousSidebar == .hidden ? .thumbnails : previousSidebar)
+        } else if session.sidebar == .contactSheet {
+            session.setSidebar(previousSidebar == .contactSheet ? .thumbnails : previousSidebar)
+        } else {
+            previousSidebar = session.sidebar
+            session.setSidebar(.hidden)
+        }
+        applyChrome()
+    }
+    @objc func toggleContinuous(_ sender: Any?) {
+        session.setContinuous(!session.continuous)
+        pdfController?.applyDisplayMode()
+        epubController?.applyDisplayMode()
+        applyChrome()
+    }
+    @objc func singlePage(_ sender: Any?) {
+        session.setTwoPages(false)
+        pdfController?.applyDisplayMode()
+        epubController?.applyDisplayMode()
+        applyChrome()
+    }
+    @objc func twoPages(_ sender: Any?) {
+        session.setTwoPages(true)
+        pdfController?.applyDisplayMode()
+        epubController?.applyDisplayMode()
+        applyChrome()
+    }
+    @objc func actualSize(_ sender: Any?) { pdfController?.actualSize(); epubController?.actualSize() }
+    @objc func zoomToFit(_ sender: Any?) { pdfController?.zoomToFit(); epubController?.zoomToFit() }
+    @objc func fitWidth(_ sender: Any?) { pdfController?.fitWidth(); epubController?.fitWidth() }
+    @objc func zoomIn(_ sender: Any?) { pdfController?.zoomIn(); epubController?.zoom(by: 1.15) }
+    @objc func zoomOut(_ sender: Any?) { pdfController?.zoomOut(); epubController?.zoom(by: 1 / 1.15) }
+    @objc func zoomToSelection(_ sender: Any?) { pdfController?.zoomToSelection() }
+    @objc func rotateLeft(_ sender: Any?) { session.rotate(clockwise: false); pdfController?.refreshAnnotations() }
+    @objc func rotateRight(_ sender: Any?) { session.rotate(clockwise: true); pdfController?.refreshAnnotations() }
+    @objc func togglePanel(_ sender: Any?) { session.togglePanel(); applyChrome() }
+    @objc func showNotesTab(_ sender: Any?) { session.show(tab: .notes); applyChrome() }
+    @objc func showWordsTab(_ sender: Any?) { session.show(tab: .words); applyChrome() }
+    @objc func showHighlightsTab(_ sender: Any?) { session.show(tab: .highlights); applyChrome() }
+    @objc func showAskTab(_ sender: Any?) { session.show(tab: .askAI); applyChrome() }
+    @objc func expandAllNotes(_ sender: Any?) { session.expandAllNotes(); pdfController?.refreshAnnotations(); applyChrome() }
+    @objc func collapseAllNotes(_ sender: Any?) { session.collapseAllNotes(); pdfController?.refreshAnnotations(); applyChrome() }
+    @objc func slideshow(_ sender: Any?) {
+        if slideshowTimer != nil { stopSlideshow(); return }
+        window?.toggleFullScreen(nil)
+        slideshowTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            self?.nextPage(nil)
+        }
+    }
+    private func stopSlideshow() {
+        slideshowTimer?.invalidate()
+        slideshowTimer = nil
+    }
+
+    @objc func goBack(_ sender: Any?) {
+        if let pdf = pdfController, pdf.goBack() { return }
+        guard let position = session.backPosition(current: pdfController?.currentPosition() ?? epubController?.currentPosition() ?? ReadingPosition(page: session.page)) else { return }
+        reveal(position)
+    }
+    @objc func goForward(_ sender: Any?) {
+        if let pdf = pdfController, pdf.goForward() { return }
+        guard let position = session.forwardPosition(current: pdfController?.currentPosition() ?? epubController?.currentPosition() ?? ReadingPosition(page: session.page)) else { return }
+        reveal(position)
+    }
+    @objc func nextPage(_ sender: Any?) { pdfController?.nextPage(); epubController?.nextPage() }
+    @objc func previousPage(_ sender: Any?) { pdfController?.previousPage(); epubController?.previousPage() }
+    @objc func goToPage(_ sender: Any?) {
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Go to Page"
+        alert.informativeText = session.isPDF ? "Enter a page from 1 to \(session.pageCount)." : "Enter a section number."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+        field.stringValue = "\(session.page)"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Go")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let page = Int(field.stringValue) else { return }
+            self?.reveal(ReadingPosition(page: page))
+        }
+    }
+
+    @objc func find(_ sender: Any?) { pdfController?.toggleFind(); epubController?.toggleFind() }
+    @objc func findNext(_ sender: Any?) { pdfController?.findNext(); epubController?.find(forward: true) }
+    @objc func findPrevious(_ sender: Any?) { pdfController?.findPrevious(); epubController?.find(forward: false) }
+
+    @objc func highlight1(_ sender: Any?) { highlight(1) }
+    @objc func highlight2(_ sender: Any?) { highlight(2) }
+    @objc func highlight3(_ sender: Any?) { highlight(3) }
+    @objc func highlight4(_ sender: Any?) { highlight(4) }
+    @objc func highlight5(_ sender: Any?) { highlight(5) }
+    @objc func highlight6(_ sender: Any?) { highlight(6) }
+    @objc func highlightLast(_ sender: Any?) { session.highlightLast(); pdfController?.refreshAnnotations(); applyChrome() }
+    private func highlight(_ color: Int) {
+        pdfController?.captureSelection()
+        epubController?.captureSelection()
+        session.highlight(color: color)
+        pdfController?.refreshAnnotations()
+        applyChrome()
+    }
+    @objc func addNote(_ sender: Any?) {
+        pdfController?.captureSelection()
+        epubController?.captureSelection()
+        session.addNote()
+        pdfController?.refreshAnnotations()
+        applyChrome()
+    }
+    @objc func lookUp(_ sender: Any?) {
+        pdfController?.captureSelection()
+        epubController?.captureSelection()
+        session.lookUp()
+        pdfController?.showLookup()
+        applyChrome()
+    }
+    @objc func askAI(_ sender: Any?) {
+        pdfController?.captureSelection()
+        epubController?.captureSelection()
+        session.show(tab: .askAI)
+        applyChrome()
+    }
+    @objc func explainSimply(_ sender: Any?) {
+        pdfController?.captureSelection()
+        epubController?.captureSelection()
+        session.ask(purpose: .explainSimply)
+        applyChrome()
+    }
+    @objc func summarizeSection(_ sender: Any?) {
+        pdfController?.captureSelection()
+        epubController?.captureSelection()
+        session.ask(purpose: .summarizeSection)
+        applyChrome()
+    }
+    @objc func bookmarkPage(_ sender: Any?) { session.addBookmark(); applyChrome() }
+    @objc func copyCitation(_ sender: Any?) {
+        pdfController?.captureSelection()
+        guard let text = session.copyCitation() else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    @objc func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        switch menuItem.action {
+        case #selector(hideSidebar(_:)): menuItem.state = session.sidebar == .hidden ? .on : .off
+        case #selector(showThumbnails(_:)): menuItem.state = session.sidebar == .thumbnails ? .on : .off
+        case #selector(showContents(_:)): menuItem.state = session.sidebar == .tableOfContents ? .on : .off
+        case #selector(showHighlightsAndNotes(_:)): menuItem.state = session.sidebar == .highlightsAndNotes ? .on : .off
+        case #selector(showBookmarks(_:)): menuItem.state = session.sidebar == .bookmarks ? .on : .off
+        case #selector(showContactSheet(_:)): menuItem.state = session.sidebar == .contactSheet ? .on : .off
+        case #selector(toggleContinuous(_:)): menuItem.state = session.continuous ? .on : .off
+        case #selector(singlePage(_:)): menuItem.state = session.twoPages ? .off : .on
+        case #selector(twoPages(_:)): menuItem.state = session.twoPages ? .on : .off
+        case #selector(togglePanel(_:)): menuItem.state = session.panelVisible ? .on : .off
+        default: break
+        }
+        return true
+    }
+}
+
+private extension NSToolbarItem.Identifier {
+    static let sidebarMenu = NSToolbarItem.Identifier("sidebarMenu")
+    static let navigation = NSToolbarItem.Identifier("navigation")
+    static let search = NSToolbarItem.Identifier("search")
+    static let inspector = NSToolbarItem.Identifier("inspector")
+}

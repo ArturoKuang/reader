@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- Hardened runtime, no App Sandbox. Reader is a notarized direct download so it
+     can launch the claude and codex CLIs and write a .reader package beside a book. -->
+<dict>
+</dict>
+</plist>

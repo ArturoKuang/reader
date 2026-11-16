@@ -1,0 +1,219 @@
+import AppKit
+import ReaderCore
+import WebKit
+
+/// EPUB is rendered in WKWebView rather than Readium. The core package already parses
+/// the ZIP, spine, and a CFI subset on any platform; WebKit only displays it. Reflow
+/// zoom changes the font size. Two-page mode uses CSS columns, which is an approximation.
+final class EPUBContainerViewController: NSViewController, WKScriptMessageHandler, WKNavigationDelegate {
+    let session: ReaderSession
+    private var webView: WKWebView?
+    private let findBar = NSSearchField()
+    private var findTop: NSLayoutConstraint?
+    private var fontScale: Double = 1
+    private var contactHost: NSHostingController<EPUBContactSheet>?
+
+    init(session: ReaderSession) {
+        self.session = session
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    override func loadView() {
+        view = NSView()
+        let configuration = WKWebViewConfiguration()
+        configuration.userContentController.add(self, name: "reader")
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.navigationDelegate = self
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        self.webView = webView
+        view.addSubview(webView)
+        findBar.translatesAutoresizingMaskIntoConstraints = false
+        findBar.placeholderString = "Find"
+        findBar.target = self
+        findBar.action = #selector(submitFind)
+        findBar.isHidden = true
+        view.addSubview(findBar)
+        let findConstraint = findBar.topAnchor.constraint(equalTo: view.topAnchor, constant: -40)
+        findTop = findConstraint
+        NSLayoutConstraint.activate([
+            webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            webView.topAnchor.constraint(equalTo: findBar.bottomAnchor),
+            findBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            findBar.widthAnchor.constraint(equalToConstant: 240),
+            findConstraint,
+        ])
+        fontScale = session.zoom
+        loadSpine()
+    }
+
+    func applyDisplayMode() { loadSpine() }
+
+    func setContactSheet(_ visible: Bool) {
+        contactHost?.view.removeFromSuperview()
+        contactHost = nil
+        webView?.isHidden = visible
+        guard visible else { return }
+        let host = NSHostingController(rootView: EPUBContactSheet(session: session) { [weak self] index in
+            self?.session.page = index + 1
+            self?.session.setSidebar(.thumbnails)
+            self?.loadSpine()
+            (self?.view.window?.windowController as? ReaderWindowController)?.applyChrome()
+        })
+        host.view.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(host.view)
+        NSLayoutConstraint.activate([
+            host.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            host.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            host.view.topAnchor.constraint(equalTo: view.topAnchor),
+            host.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+        contactHost = host
+    }
+
+    func actualSize() { fontScale = 1; session.rememberZoom(1, fit: .actual); loadSpine() }
+    func zoomToFit() { fontScale = 1.15; session.rememberZoom(fontScale, fit: .fitPage); loadSpine() }
+    func fitWidth() { fontScale = 1.15; session.rememberZoom(fontScale, fit: .fitWidth); loadSpine() }
+    func zoom(by factor: Double) {
+        fontScale = min(max(fontScale * factor, 0.6), 2.4)
+        session.rememberZoom(fontScale, fit: .custom)
+        loadSpine()
+    }
+    func nextPage() { session.page = min(session.page + 1, session.pageCount); loadSpine() }
+    func previousPage() { session.page = max(session.page - 1, 1); loadSpine() }
+    func toggleFind() {
+        findBar.isHidden.toggle()
+        findTop?.constant = findBar.isHidden ? -40 : 8
+        if !findBar.isHidden { view.window?.makeFirstResponder(findBar) }
+    }
+    @objc private func submitFind() { find(forward: true) }
+    func find(forward: Bool) {
+        let query = findBar.stringValue.isEmpty ? session.findQuery : findBar.stringValue
+        session.findQuery = query
+        let escaped = query.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+        webView?.evaluateJavaScript("window.find('\(escaped)', false, \(!forward), true)")
+    }
+
+    func captureSelection() {
+        webView?.evaluateJavaScript("window.readerSelection && window.readerSelection()") { [weak self] result, _ in
+            guard let self, let object = result as? [String: Any], let text = object["text"] as? String, !text.isEmpty else { return }
+            Task { @MainActor in
+                self.session.selection = SelectionContext(
+                    text: text,
+                    cfi: object["cfi"] as? String,
+                    section: self.session.sectionTitle,
+                    prefix: object["prefix"] as? String ?? "",
+                    suffix: object["suffix"] as? String ?? "",
+                    sentence: object["sentence"] as? String ?? text,
+                    rects: []
+                )
+            }
+        }
+    }
+
+    func reveal(_ position: ReadingPosition) {
+        if let page = position.page { session.page = page }
+        loadSpine()
+        if let quote = position.quote, !quote.isEmpty {
+            let escaped = quote.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+            webView?.evaluateJavaScript("window.find('\(escaped)')")
+        }
+    }
+
+    func consumePendingJump() {}
+
+    func currentPosition() -> ReadingPosition {
+        let index = min(max(session.page - 1, 0), max((session.epub?.spine.count ?? 1) - 1, 0))
+        return ReadingPosition(
+            zoom: fontScale,
+            cfi: EPUBCFI.make(spineIndex: index, start: 0, end: 0).value,
+            section: session.sectionTitle,
+            quote: session.selection?.text
+        )
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any], let text = body["text"] as? String else { return }
+        session.selection = SelectionContext(
+            text: text,
+            cfi: body["cfi"] as? String,
+            section: session.sectionTitle,
+            prefix: body["prefix"] as? String ?? "",
+            suffix: body["suffix"] as? String ?? "",
+            sentence: body["sentence"] as? String ?? text,
+            rects: []
+        )
+    }
+
+    private func loadSpine() {
+        guard let epub = session.epub, let webView else { return }
+        let items: [EPUBSpineItem]
+        if session.continuous {
+            items = epub.spine
+        } else if session.twoPages {
+            let start = max(session.page - 1, 0)
+            items = Array(epub.spine.dropFirst(start).prefix(2))
+        } else {
+            let index = min(max(session.page - 1, 0), max(epub.spine.count - 1, 0))
+            items = [epub.spine[index]]
+            session.sectionTitle = epub.spine[index].title
+            session.updatePage(index + 1, count: epub.spine.count, section: epub.spine[index].title)
+        }
+        let columns = session.twoPages && !session.continuous ? "column-count: 2; column-gap: 32px; height: 100vh;" : ""
+        var body = ""
+        for item in items {
+            let html = epub.xhtml(for: item.href) ?? "<p>Missing \(item.href)</p>"
+            body += "<section id=\"spine-\(item.id)\"><h2>\(item.title)</h2>\(html)</section>"
+        }
+        let css = """
+        body { font: \(16 * fontScale)px Georgia, serif; line-height: 1.6; margin: 48px auto; max-width: \(session.twoPages ? 920 : 680)px; \(columns) }
+        .reader-hl { background: #F2C94C59; }
+        .reader-word { border-bottom: 1.5px dotted #666; }
+        .reader-note { border-left: 3px solid #888; margin: 8px 0; padding: 8px 10px; background: rgba(0,0,0,0.04); }
+        """
+        let marks = session.words.map(\.word).map { "\"\($0.replacingOccurrences(of: "\"", with: ""))\"" }.joined(separator: ",")
+        let html = """
+        <!doctype html><html><head><meta charset="utf-8"><style>\(css)</style></head><body>
+        \(body)
+        <script>
+        window.readerSelection = function() {
+          const sel = document.getSelection();
+          if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
+          const text = sel.toString();
+          const node = sel.anchorNode ? sel.anchorNode.textContent || "" : "";
+          const start = Math.max(0, node.indexOf(text));
+          return { text, prefix: node.slice(Math.max(0, start - 40), start), suffix: node.slice(start + text.length, start + text.length + 40), sentence: node.trim(), cfi: "epubcfi(/6/\((max(session.page - 1, 0) + 1) * 2)!/4,/1:" + start + ",/1:" + (start + text.length) + ")" };
+        };
+        document.addEventListener("mouseup", () => {
+          const value = window.readerSelection();
+          if (value && window.webkit && window.webkit.messageHandlers.reader) window.webkit.messageHandlers.reader.postMessage(value);
+        });
+        const words = [\(marks)];
+        if (words.length) {
+          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+          const nodes = [];
+          while (walker.nextNode()) nodes.push(walker.currentNode);
+          nodes.forEach(node => {
+            let text = node.nodeValue;
+            words.forEach(word => {
+              if (!word || !text.toLowerCase().includes(word.toLowerCase())) return;
+              const span = document.createElement("span");
+              span.className = "reader-word";
+              const parent = node.parentNode;
+              if (!parent || parent.classList.contains("reader-word")) return;
+            });
+          });
+        }
+        </script></body></html>
+        """
+        if let root = session.epubRoot {
+            webView.loadHTMLString(html, baseURL: root)
+        } else {
+            webView.loadHTMLString(html, baseURL: nil)
+        }
+    }
+}
