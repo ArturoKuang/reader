@@ -38,8 +38,10 @@ final class ReaderDocument: NSDocument {
 
     override func makeWindowControllers() {
         guard let session else { return }
+        session.undoManager = undoManager
         let controller = ReaderWindowController(session: session)
         addWindowController(controller)
+        session.undoManager = undoManager
         refreshSubtitle()
     }
 

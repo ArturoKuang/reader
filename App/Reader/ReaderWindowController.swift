@@ -35,9 +35,10 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             backing: .buffered,
             defer: false
         )
-        window.titlebarAppearsTransparent = false
+        window.titlebarAppearsTransparent = true
         window.titleVisibility = .visible
         window.toolbarStyle = .unified
+        window.titlebarSeparatorStyle = .automatic
         super.init(window: window)
         window.delegate = self
         window.minSize = NSSize(width: 720, height: 480)
@@ -58,14 +59,19 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     private func configureSplit() {
         let sidebar = NSSplitViewItem(sidebarWithViewController: sidebarHost)
         sidebar.minimumThickness = 180
-        sidebar.maximumThickness = 320
+        sidebar.maximumThickness = 280
         sidebar.canCollapse = true
+        // Full-height sidebar draws under the title bar, beside the traffic lights.
+        sidebar.allowsFullHeightLayout = true
+        sidebarHost.view.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let content = NSSplitViewItem(viewController: center)
         content.minimumThickness = 320
+        content.allowsFullHeightLayout = true
         let inspector = NSSplitViewItem(viewController: panelHost)
         inspector.minimumThickness = 280
         inspector.maximumThickness = 460
         inspector.canCollapse = true
+        inspector.allowsFullHeightLayout = true
         split.splitView.dividerStyle = .thin
         split.addSplitViewItem(sidebar)
         split.addSplitViewItem(content)
@@ -128,43 +134,42 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     // MARK: Toolbar
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarMenu, .navigation, .flexibleSpace, .search, .inspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .flexibleSpace, .search, .inspector]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarMenu, .navigation, .flexibleSpace, .search, .inspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .flexibleSpace, .search, .inspector]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         switch itemIdentifier {
-        case .sidebarMenu:
+        case .sidebarModes:
+            // Before the sidebar-tracking separator, so this capsule stays in the sidebar title bar.
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.view = sidebarControl()
+            item.view = sidebarModeControl()
             item.label = "Sidebar"
             return item
-        case .navigation:
+        case .backForward:
+            // After the separator: its own capsule at the leading edge of the document.
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            let back = NSButton(image: NSImage(systemSymbolName: "chevron.left", accessibilityDescription: "Back")!, target: self, action: #selector(goBack(_:)))
-            let forward = NSButton(image: NSImage(systemSymbolName: "chevron.right", accessibilityDescription: "Forward")!, target: self, action: #selector(goForward(_:)))
-            back.bezelStyle = .texturedRounded
-            forward.bezelStyle = .texturedRounded
-            let stack = NSStackView(views: [back, forward])
-            stack.spacing = 2
-            item.view = stack
-            item.label = "Navigation"
+            item.view = backForwardControl()
+            item.label = "History"
+            item.isNavigational = true
             return item
+        case .sidebarTrackingSeparator:
+            return nil
         case .search:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            let button = NSButton(image: NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "Find")!, target: self, action: #selector(find(_:)))
-            button.bezelStyle = .texturedRounded
-            item.view = button
+            item.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "Find")
+            item.action = #selector(find(_:))
+            item.target = self
             item.label = "Find"
             return item
         case .inspector:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            let button = NSButton(image: NSImage(systemSymbolName: "info.circle", accessibilityDescription: "Inspector")!, target: self, action: #selector(togglePanel(_:)))
-            button.bezelStyle = .texturedRounded
-            item.view = button
+            item.image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: "Inspector")
+            item.action = #selector(togglePanel(_:))
+            item.target = self
             item.label = "Inspector"
             return item
         default:
@@ -172,25 +177,56 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         }
     }
 
-    private func sidebarControl() -> NSView {
-        let button = NSButton(image: NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Sidebar")!, target: self, action: #selector(toggleSidebar(_:)))
-        button.bezelStyle = .texturedRounded
-        let pull = NSPopUpButton()
-        pull.pullsDown = true
-        pull.menu = sidebarMenu()
-        pull.bezelStyle = .texturedRounded
-        if let first = pull.item(at: 0) {
-            first.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "Sidebar options")
-            first.title = ""
+    private func sidebarModeControl() -> NSSegmentedControl {
+        let control = NSSegmentedControl()
+        control.segmentCount = 2
+        control.trackingMode = .momentary
+        control.segmentStyle = .separated
+        control.setImage(NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Toggle sidebar"), forSegment: 0)
+        let chevron = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "Sidebar options")?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold))
+        control.setImage(chevron, forSegment: 1)
+        control.setWidth(32, forSegment: 0)
+        control.setWidth(22, forSegment: 1)
+        control.target = self
+        control.action = #selector(sidebarSegmentClicked(_:))
+        return control
+    }
+
+    private func backForwardControl() -> NSSegmentedControl {
+        let control = NSSegmentedControl()
+        control.segmentCount = 2
+        control.trackingMode = .momentary
+        control.segmentStyle = .separated
+        control.setImage(NSImage(systemSymbolName: "chevron.left", accessibilityDescription: "Back"), forSegment: 0)
+        control.setImage(NSImage(systemSymbolName: "chevron.right", accessibilityDescription: "Forward"), forSegment: 1)
+        control.setWidth(36, forSegment: 0)
+        control.setWidth(36, forSegment: 1)
+        control.target = self
+        control.action = #selector(backForwardClicked(_:))
+        return control
+    }
+
+    @objc private func sidebarSegmentClicked(_ sender: NSSegmentedControl) {
+        if sender.selectedSegment == 0 {
+            toggleSidebar(sender)
+            return
         }
-        let stack = NSStackView(views: [button, pull])
-        stack.spacing = 0
-        return stack
+        let menu = sidebarMenu()
+        let origin = NSPoint(x: sender.width(forSegment: 0), y: sender.isFlipped ? sender.bounds.maxY : sender.bounds.minY)
+        menu.popUp(positioning: nil, at: origin, in: sender)
+    }
+
+    @objc private func backForwardClicked(_ sender: NSSegmentedControl) {
+        if sender.selectedSegment == 0 {
+            goBack(sender)
+        } else {
+            goForward(sender)
+        }
     }
 
     private func sidebarMenu() -> NSMenu {
         let menu = NSMenu()
-        menu.addItem(withTitle: "Sidebar", action: nil, keyEquivalent: "")
         let entries: [(String, Selector, SidebarMode?)] = [
             ("Hide Sidebar", #selector(hideSidebar(_:)), .hidden),
             ("Thumbnails", #selector(showThumbnails(_:)), .thumbnails),
@@ -394,8 +430,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
 }
 
 private extension NSToolbarItem.Identifier {
-    static let sidebarMenu = NSToolbarItem.Identifier("sidebarMenu")
-    static let navigation = NSToolbarItem.Identifier("navigation")
+    static let sidebarModes = NSToolbarItem.Identifier("sidebarModes")
+    static let backForward = NSToolbarItem.Identifier("backForward")
     static let search = NSToolbarItem.Identifier("search")
     static let inspector = NSToolbarItem.Identifier("inspector")
 }

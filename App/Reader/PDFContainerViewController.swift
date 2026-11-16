@@ -1,5 +1,7 @@
 import AppKit
+import PDFKit
 import ReaderCore
+import SwiftUI
 
 /// The document view is a PDFView, not a SwiftUI scroll view. Pinch zoom, continuous
 /// scroll, and page navigation are PDFKit's. Reader only draws annotations and note
@@ -14,7 +16,10 @@ final class PDFContainerViewController: NSViewController {
     private var matchIndex = 0
     private var contactHost: NSHostingController<ContactSheetView>?
     private var annotations: [PDFAnnotation] = []
+    private var highlightIDs: [ObjectIdentifier: String] = [:]
     private var lookupPopover: NSPopover?
+    private var didApplyInitialScale = false
+    private var suppressScaleSave = false
 
     init(session: ReaderSession) {
         self.session = session
@@ -27,7 +32,7 @@ final class PDFContainerViewController: NSViewController {
     override func loadView() {
         view = NSView()
         pdfView.translatesAutoresizingMaskIntoConstraints = false
-        pdfView.autoScales = session.fitMode == .fitPage
+        pdfView.autoScales = false
         pdfView.displayDirection = .vertical
         pdfView.displaysPageBreaks = true
         pdfView.displayBox = .mediaBox
@@ -62,16 +67,48 @@ final class PDFContainerViewController: NSViewController {
             findConstraint,
         ])
         applyDisplayMode()
-        if session.fitMode == .fitWidth { fitWidth() }
-        else if session.fitMode == .actual { actualSize() }
-        else if session.fitMode == .custom { pdfView.scaleFactor = session.zoom }
+        if session.hasSavedViewState && session.fitMode == .fitPage {
+            pdfView.autoScales = true
+        } else if session.hasSavedViewState && session.fitMode == .actual {
+            pdfView.scaleFactor = 1
+        } else if session.hasSavedViewState && session.fitMode == .custom {
+            pdfView.scaleFactor = min(max(session.zoom, pdfView.minScaleFactor), pdfView.maxScaleFactor)
+        }
         NotificationCenter.default.addObserver(self, selector: #selector(pageChanged), name: .PDFViewPageChanged, object: pdfView)
         NotificationCenter.default.addObserver(self, selector: #selector(scaleChanged), name: .PDFViewScaleChanged, object: pdfView)
         pdfView.onMouseUp = { [weak self] in self?.captureSelection() }
+        pdfView.highlightIDAt = { [weak self] point in self?.highlightID(atViewPoint: point) }
+        pdfView.onRemoveHighlight = { [weak self] id in self?.session.deleteHighlight(id: id) }
+        session.onAnnotationsChanged = { [weak self] in self?.refreshAnnotations() }
         refreshAnnotations()
-        if let page = session.pdfDocument?.page(at: max(session.page - 1, 0)) {
-            pdfView.go(to: page)
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        guard !didApplyInitialScale else { return }
+        guard pdfView.bounds.width > 80, pdfView.currentPage != nil else { return }
+        didApplyInitialScale = true
+        // A first open has no saved zoom. Fit the page width once the window has a real size.
+        // Later opens keep a custom or actual-size zoom and only refit when that was the saved mode.
+        if !session.hasSavedViewState || session.fitMode == .fitWidth {
+            fitWidth()
         }
+        guard session.hasSavedViewState else { return }
+        let state = session.package.state
+        reveal(ReadingPosition(page: state.page, scrollY: state.scrollY, zoom: nil))
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        guard let clip = enclosingScrollClip(in: pdfView) else { return }
+        clip.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(scrolled), name: NSView.boundsDidChangeNotification, object: clip)
+    }
+
+    override func viewWillDisappear() {
+        session.rememberScroll(currentPosition())
+        session.saveViewQuietly()
+        super.viewWillDisappear()
     }
 
     func applyDisplayMode() {
@@ -106,13 +143,17 @@ final class PDFContainerViewController: NSViewController {
     }
 
     func actualSize() {
+        suppressScaleSave = true
         pdfView.autoScales = false
         pdfView.scaleFactor = 1
+        suppressScaleSave = false
         session.rememberZoom(1, fit: .actual)
     }
 
     func zoomToFit() {
+        suppressScaleSave = true
         pdfView.autoScales = true
+        suppressScaleSave = false
         session.rememberZoom(pdfView.scaleFactor, fit: .fitPage)
     }
 
@@ -120,9 +161,11 @@ final class PDFContainerViewController: NSViewController {
         pdfView.autoScales = false
         guard let page = pdfView.currentPage else { return }
         let width = page.bounds(for: pdfView.displayBox).width
-        let available = max(pdfView.bounds.width - 24, 1)
-        guard width > 0 else { return }
+        let available = pdfView.bounds.width - 24
+        guard width > 1, available > 80 else { return }
+        suppressScaleSave = true
         pdfView.scaleFactor = available / width
+        suppressScaleSave = false
         session.rememberZoom(pdfView.scaleFactor, fit: .fitWidth)
     }
 
@@ -212,6 +255,7 @@ final class PDFContainerViewController: NSViewController {
             annotation.page?.removeAnnotation(annotation)
         }
         annotations.removeAll()
+        highlightIDs.removeAll()
         guard let document = pdfView.document else { return }
         for highlight in session.highlights {
             guard let pageNumber = highlight.page, let page = document.page(at: pageNumber - 1) else { continue }
@@ -222,6 +266,7 @@ final class PDFContainerViewController: NSViewController {
                 annotation.color = ReaderColor.nsColor(highlight.color).withAlphaComponent(0.35)
                 page.addAnnotation(annotation)
                 annotations.append(annotation)
+                highlightIDs[ObjectIdentifier(annotation)] = highlight.id
             }
         }
         for word in session.words {
@@ -296,12 +341,35 @@ final class PDFContainerViewController: NSViewController {
         let number = document.index(for: page) + 1
         let section = session.outline.last { ($0.page ?? 0) <= number }?.title
         session.updatePage(number, count: document.pageCount, section: section)
+        session.rememberScroll(currentPosition())
         session.saveViewQuietly()
         overlay.needsLayout = true
     }
 
+    @objc private func scrolled() {
+        session.rememberScroll(currentPosition())
+    }
+
     @objc private func scaleChanged() {
+        guard !suppressScaleSave else { return }
         session.rememberZoom(pdfView.scaleFactor, fit: pdfView.autoScales ? .fitPage : .custom)
+    }
+
+    private func highlightID(atViewPoint point: NSPoint) -> String? {
+        guard let page = pdfView.page(for: point, nearest: true) else { return nil }
+        let pagePoint = pdfView.convert(point, to: page)
+        for annotation in page.annotations where annotation.bounds.contains(pagePoint) {
+            if let id = highlightIDs[ObjectIdentifier(annotation)] { return id }
+        }
+        return nil
+    }
+
+    private func enclosingScrollClip(in view: NSView) -> NSClipView? {
+        if let scroll = view as? NSScrollView { return scroll.contentView }
+        for subview in view.subviews {
+            if let found = enclosingScrollClip(in: subview) { return found }
+        }
+        return nil
     }
 
     private func rectsFor(quote: String, on page: PDFPage) -> [[Double]] {
@@ -317,10 +385,31 @@ final class PDFContainerViewController: NSViewController {
 
 final class ReaderPDFView: PDFView {
     var onMouseUp: (() -> Void)?
+    var highlightIDAt: ((NSPoint) -> String?)?
+    var onRemoveHighlight: ((String) -> Void)?
 
     override func mouseUp(with event: NSEvent) {
         super.mouseUp(with: event)
         onMouseUp?()
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if let id = highlightIDAt?(point) {
+            let menu = NSMenu()
+            let item = NSMenuItem(title: "Remove Highlight", action: #selector(removeHighlightClicked(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = id
+            menu.addItem(item)
+            NSMenu.popUpContextMenu(menu, with: event, for: self)
+            return
+        }
+        super.rightMouseDown(with: event)
+    }
+
+    @objc private func removeHighlightClicked(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        onRemoveHighlight?(id)
     }
 
     override func draw(_ dirtyRect: NSRect) {

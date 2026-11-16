@@ -1,5 +1,7 @@
 import AppKit
+import PDFKit
 import ReaderCore
+import SwiftUI
 import WebKit
 
 /// EPUB is rendered in WKWebView rather than Readium. The core package already parses

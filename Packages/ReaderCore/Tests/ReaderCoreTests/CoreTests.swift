@@ -68,6 +68,23 @@ final class CoreTests: XCTestCase {
         XCTAssertFalse(rejected.warnings.isEmpty)
     }
 
+    func testDeletedHighlightRoundTripsOutOfHighlightsFile() {
+        let matter = FrontMatter(kind: "highlights", document: "Book.pdf", fingerprint: "sha256:ff")
+        let keep = HighlightEntry(id: "h_keep", color: 2, page: 10, quote: "kept sentence", prefix: "a ", suffix: " b", section: "Ch. 1")
+        let drop = HighlightEntry(id: "h_drop", color: 5, page: 11, quote: "delete me", prefix: "", suffix: "", section: "Ch. 1")
+        var document = HighlightsDocument(frontMatter: matter, highlights: [keep, drop])
+        let removed = document.removeHighlight(id: "h_drop")
+        XCTAssertEqual(removed?.id, "h_drop")
+        XCTAssertNil(document.removeHighlight(id: "missing"))
+        let rendered = document.render()
+        XCTAssertFalse(rendered.contains("h_drop"))
+        XCTAssertFalse(rendered.contains("delete me"))
+        XCTAssertTrue(rendered.contains("h_keep"))
+        let parsed = HighlightsDocument.parse(rendered)
+        XCTAssertEqual(parsed.highlights.map(\.id), ["h_keep"])
+        XCTAssertEqual(parsed.highlights.first?.quote, "kept sentence")
+    }
+
     func testWordsRoundTripUndoAndOrphanBullet() {
         let matter = FrontMatter(kind: "words", document: "On the Origin of Species.pdf", fingerprint: "sha256:abc")
         let lookup = LookupEntry(

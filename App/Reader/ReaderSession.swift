@@ -1,4 +1,5 @@
 import AppKit
+import PDFKit
 import ReaderCore
 
 final class ReaderSession: ObservableObject {
@@ -43,6 +44,10 @@ final class ReaderSession: ObservableObject {
     var bookText: BookText?
     var onDirty: (() -> Void)?
     var onPageChange: (() -> Void)?
+    var onAnnotationsChanged: (() -> Void)?
+    weak var undoManager: UndoManager?
+    /// True when `state.json` already existed. A first open fits the page width.
+    let hasSavedViewState: Bool
     var navigation = NavigationHistory()
     private var markChord = MarkChord.idle
     private var lastLookupUndo: WordUndo?
@@ -66,6 +71,7 @@ final class ReaderSession: ObservableObject {
         self.notice = open.notice
         self.offerMoveTo = open.offerMoveTo
         self.needsReanchor = open.needsReanchor
+        self.hasSavedViewState = open.hasSavedViewState
         let state = open.package.state
         self.sidebar = state.sidebar
         self.panelVisible = state.panelVisible
@@ -205,7 +211,35 @@ final class ReaderSession: ObservableObject {
         package.highlights.highlights.append(entry)
         package.state.lastHighlightColor = color
         showToast("Highlighted with color \(color)")
+        onAnnotationsChanged?()
         dirty()
+    }
+
+    func deleteHighlight(id: String) {
+        guard let removed = package.highlights.removeHighlight(id: id) else { return }
+        undoManager?.registerUndo(withTarget: self) { session in
+            session.restoreHighlight(removed)
+        }
+        undoManager?.setActionName("Remove Highlight")
+        onAnnotationsChanged?()
+        dirty()
+    }
+
+    func restoreHighlight(_ entry: HighlightEntry) {
+        package.highlights.highlights.append(entry)
+        undoManager?.registerUndo(withTarget: self) { session in
+            session.deleteHighlight(id: entry.id)
+        }
+        undoManager?.setActionName("Remove Highlight")
+        onAnnotationsChanged?()
+        dirty()
+    }
+
+    func rememberScroll(_ position: ReadingPosition) {
+        package.state.scrollY = position.scrollY
+        if let page = position.page {
+            package.state.page = page
+        }
     }
 
     func highlightLast() {

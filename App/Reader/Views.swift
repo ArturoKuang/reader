@@ -66,15 +66,25 @@ struct SidebarView: View {
 
     private var thumbnailList: some View {
         ScrollView {
-            LazyVStack(spacing: 12) {
+            LazyVStack(spacing: 14) {
                 if let document = session.pdfDocument {
                     ForEach(0..<document.pageCount, id: \.self) { index in
-                        VStack(spacing: 4) {
+                        VStack(spacing: 6) {
                             PageThumb(document: document, index: index)
-                                .frame(width: 92, height: 120)
-                                .overlay(RoundedRectangle(cornerRadius: 2).stroke(session.page == index + 1 ? Color.accentColor : Color.secondary.opacity(0.3), lineWidth: session.page == index + 1 ? 2 : 1))
-                            Text("\(index + 1)").font(.caption).foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity)
+                                .aspectRatio(0.72, contentMode: .fit)
+                                .background(Color.white)
+                                .clipShape(RoundedRectangle(cornerRadius: 2, style: .continuous))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 2, style: .continuous)
+                                        .stroke(session.page == index + 1 ? Color.accentColor : Color.black.opacity(0.12), lineWidth: session.page == index + 1 ? 2 : 1)
+                                )
+                                .shadow(color: .black.opacity(0.18), radius: 1, y: 1)
+                            Text("\(index + 1)")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
                         }
+                        .padding(.horizontal, 18)
                         .onTapGesture { jump(page: index + 1) }
                     }
                 } else {
@@ -119,6 +129,9 @@ struct SidebarView: View {
                         }
                     }
                     .onTapGesture { if let page = highlight.page { jump(page: page) } }
+                    .contextMenu {
+                        Button("Remove Highlight") { session.deleteHighlight(id: highlight.id) }
+                    }
                 }
                 ForEach(session.notes) { note in
                     VStack(alignment: .leading, spacing: 2) {
@@ -323,15 +336,28 @@ struct RightPanelView: View {
 
     private var highlights: some View {
         Group {
-            if session.highlights.isEmpty { Text("Six colors, numbered 1–6. ⌃⌘1 through ⌃⌘6.").foregroundStyle(.secondary) }
-            ForEach(session.highlights) { highlight in
-                HStack(alignment: .top) {
-                    RoundedRectangle(cornerRadius: 2).fill(Color(nsColor: ReaderColor.nsColor(highlight.color))).frame(width: 4)
-                    VStack(alignment: .leading) {
-                        Text("Color \(highlight.color) · \(highlight.page.map { "p. \($0)" } ?? "")").font(.caption).foregroundStyle(.secondary)
-                        Text(highlight.quote).font(.callout)
+            if session.highlights.isEmpty {
+                Text("Six colors, numbered 1–6. ⌃⌘1 through ⌃⌘6. Select a row and press Delete to remove it.").foregroundStyle(.secondary)
+            } else {
+                List {
+                    ForEach(session.highlights) { highlight in
+                        HStack(alignment: .top) {
+                            RoundedRectangle(cornerRadius: 2).fill(Color(nsColor: ReaderColor.nsColor(highlight.color))).frame(width: 4)
+                            VStack(alignment: .leading) {
+                                Text("Color \(highlight.color) · \(highlight.page.map { "p. \($0)" } ?? "")").font(.caption).foregroundStyle(.secondary)
+                                Text(highlight.quote).font(.callout)
+                            }
+                        }
+                        .contextMenu {
+                            Button("Remove Highlight") { session.deleteHighlight(id: highlight.id) }
+                        }
+                    }
+                    .onDelete { offsets in
+                        let ids = offsets.map { session.highlights[$0].id }
+                        ids.forEach { session.deleteHighlight(id: $0) }
                     }
                 }
+                .frame(minHeight: 220)
             }
         }
     }

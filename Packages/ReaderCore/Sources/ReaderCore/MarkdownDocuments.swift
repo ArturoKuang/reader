@@ -231,6 +231,12 @@ public struct HighlightsDocument: Equatable, Sendable {
         self.warnings = warnings
     }
 
+    /// Drops one highlight. The next `render()` omits it from `highlights.md`.
+    public mutating func removeHighlight(id: String) -> HighlightEntry? {
+        guard let index = highlights.firstIndex(where: { $0.id == id }) else { return nil }
+        return highlights.remove(at: index)
+    }
+
     public static func parse(_ text: String) -> HighlightsDocument {
         let (matter, body, warnings) = MarkdownText.splitFrontMatter(text)
         var highlights: [HighlightEntry] = []

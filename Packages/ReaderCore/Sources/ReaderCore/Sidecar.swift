@@ -130,8 +130,11 @@ public struct OpenResult: Equatable, Sendable {
     public var offerMoveTo: String?
     public var needsReanchor: Bool
     public var renamedFrom: String?
+    /// False when this open created the sidecar, or the package had no `state.json`.
+    /// The window uses that to fit the page width instead of restoring a zoom.
+    public var hasSavedViewState: Bool
 
-    public init(package: SidecarPackage, directory: String, placement: Placement, notice: String? = nil, offerMoveTo: String? = nil, needsReanchor: Bool = false, renamedFrom: String? = nil) {
+    public init(package: SidecarPackage, directory: String, placement: Placement, notice: String? = nil, offerMoveTo: String? = nil, needsReanchor: Bool = false, renamedFrom: String? = nil, hasSavedViewState: Bool = false) {
         self.package = package
         self.directory = directory
         self.placement = placement
@@ -139,6 +142,7 @@ public struct OpenResult: Equatable, Sendable {
         self.offerMoveTo = offerMoveTo
         self.needsReanchor = needsReanchor
         self.renamedFrom = renamedFrom
+        self.hasSavedViewState = hasSavedViewState
     }
 }
 
@@ -213,6 +217,7 @@ public enum SidecarStore {
         }
 
         if fs.isDirectory(sibling) {
+            let hadViewState = fs.exists(Paths.join(sibling, "state.json"))
             var package = try SidecarPackage.read(from: sibling, fs: fs)
             let stored = storedIdentity(sibling, fs: fs)
             let match = matchIdentity(
@@ -237,7 +242,7 @@ public enum SidecarStore {
                 needsReanchor = true
                 notice = [notice, "This file doesn't match the notes saved beside it. Reader can re-find each entry by its quoted text."].compactMap { $0 }.joined(separator: " ")
             }
-            let result = OpenResult(package: package, directory: sibling, placement: .sibling, notice: notice, needsReanchor: needsReanchor, renamedFrom: renamedFrom)
+            let result = OpenResult(package: package, directory: sibling, placement: .sibling, notice: notice, needsReanchor: needsReanchor, renamedFrom: renamedFrom, hasSavedViewState: hadViewState)
             record(result, fingerprint: fingerprint, pdfID: pdfID, epubID: epubID, title: resolvedTitle, bookPath: bookPath, index: &index, now: now)
             return result
         }
@@ -249,6 +254,7 @@ public enum SidecarStore {
             if let epubID, entry.epubID == epubID { return true }
             return false
         }), Paths.normalize(existing.sidecarPath) != Paths.normalize(sibling) {
+            let hadViewState = fs.exists(Paths.join(existing.sidecarPath, "state.json"))
             var package = try SidecarPackage.read(from: existing.sidecarPath, fs: fs)
             if package.notes.frontMatter.fingerprint != fingerprint {
                 package = package.refreshingFingerprint(fingerprint)
@@ -260,7 +266,8 @@ public enum SidecarStore {
                 placement: existing.placement,
                 notice: "This book moved. Its notes are still in the previous folder.",
                 offerMoveTo: sibling,
-                renamedFrom: renamedFrom
+                renamedFrom: renamedFrom,
+                hasSavedViewState: hadViewState
             )
             record(result, fingerprint: fingerprint, pdfID: pdfID, epubID: epubID, title: resolvedTitle, bookPath: bookPath, index: &index, now: now)
             return result
@@ -274,7 +281,8 @@ public enum SidecarStore {
             directory: created.directory,
             placement: created.placement,
             notice: created.notice,
-            renamedFrom: renamedFrom
+            renamedFrom: renamedFrom,
+            hasSavedViewState: false
         )
         record(result, fingerprint: fingerprint, pdfID: pdfID, epubID: epubID, title: resolvedTitle, bookPath: bookPath, index: &index, now: now)
         return result
