@@ -155,6 +155,17 @@ final class VaultTests: XCTestCase {
         XCTAssertTrue(VaultSync.isOwnWrite(newDisk: first, lastWritten: first))
     }
 
+    func testClaudeSessionIDIsReadFromStreamJSON() {
+        let stdout = """
+        {"type":"assistant","session_id":"sess-9","message":{"content":[{"type":"text","text":"Why?"}]}}
+        {"type":"result","session_id":"sess-9","result":"Why?"}
+        """
+        XCTAssertEqual(CLIOutput.claudeSessionID(stdout), "sess-9")
+        XCTAssertEqual(try CLIOutput.parseClaude(stdout), "Why?")
+        let link = ReaderLink(path: "/book.pdf", location: "page=4&y=12", id: "h1")
+        XCTAssertEqual(ReaderLink.parse(link.url)?.pageNumber, 4)
+    }
+
     func testChapterTextFileNames() throws {
         let fs = MemoryFileSystem()
         try fs.createDirectory("/book/book")

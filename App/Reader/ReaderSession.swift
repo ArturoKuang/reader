@@ -560,6 +560,13 @@ final class ReaderSession: ObservableObject {
         }
     }
 
+    func askAboutConcept(_ concept: Concept) {
+        var question = "Ask about \(concept.id) \(concept.title)."
+        if let claim = concept.claim { question += " Claim: \(claim)" }
+        if let trap = concept.trap { question += " Trap: \(trap)" }
+        askTutor(command: nil, question: question)
+    }
+
     func askTutor(command: TutorCommand?, question: String) {
         guard let bookFolder, tutorAvailable else { return }
         let passage = selection?.text ?? ""
@@ -592,7 +599,12 @@ final class ReaderSession: ObservableObject {
                     Task { @MainActor in self?.answer = chunk }
                 }
                 let text = (try? CLIOutput.parseClaude(result.stdout)) ?? result.stdout
+                let resumed = CLIOutput.claudeSessionID(result.stdout)
                 await MainActor.run {
+                    if let resumed, !resumed.isEmpty {
+                        self?.claudeSessionID = resumed
+                        self?.onSaveVaultState?()
+                    }
                     self?.answer = text
                     self?.tutorLines.append(text)
                     self?.asking = false

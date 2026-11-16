@@ -126,7 +126,20 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         }
     }
 
-    func consumePendingJump() {}
+    func consumePendingJump() {
+        guard let link = session.pendingReaderLink else { return }
+        session.pendingReaderLink = nil
+        if let location = link.location, let cfi = EPUBCFI(value: location), let index = cfi.spineIndex {
+            session.page = index + 1
+            loadSpine()
+        }
+        let quote = session.highlights.first { $0.id == link.id }?.quote ?? session.notes.first { $0.id == link.id }?.quote ?? ""
+        guard !quote.isEmpty else { return }
+        let escaped = quote.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            self?.webView?.evaluateJavaScript("window.readerFlash && window.readerFlash('\(escaped)')")
+        }
+    }
 
     func currentPosition() -> ReadingPosition {
         let index = min(max(session.page - 1, 0), max((session.epub?.spine.count ?? 1) - 1, 0))
@@ -139,7 +152,22 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard let body = message.body as? [String: Any], let text = body["text"] as? String else { return }
+        guard let body = message.body as? [String: Any] else { return }
+        if body["kind"] as? String == "concept", let id = body["id"] as? String, let concept = session.concepts.first(where: { $0.id == id }) {
+            let alert = NSAlert()
+            alert.messageText = "\(concept.id) \(concept.title)"
+            var detail: [String] = []
+            if let claim = concept.claim { detail.append("Claim: \(claim)") }
+            if let trap = concept.trap { detail.append("Trap: \(trap)") }
+            alert.informativeText = detail.joined(separator: "\n")
+            alert.addButton(withTitle: "Ask tutor about this")
+            alert.addButton(withTitle: "Close")
+            if alert.runModal() == .alertFirstButtonReturn {
+                session.askAboutConcept(concept)
+            }
+            return
+        }
+        guard let text = body["text"] as? String else { return }
         session.selection = SelectionContext(
             text: text,
             cfi: body["cfi"] as? String,
@@ -149,6 +177,30 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             sentence: body["sentence"] as? String ?? text,
             rects: []
         )
+    }
+
+    private func conceptScript() -> String {
+        let chapter = ChapterFiles.number(in: session.sectionTitle)
+        let visible = session.concepts.filter { concept in
+            guard session.showConceptMarkers else { return false }
+            if session.continuous { return true }
+            return concept.chapter == nil || concept.chapter == chapter
+        }
+        let items = visible.map { concept -> String in
+            let terms = concept.findTerms.map { term in
+                let escaped = term.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+                return "\"\(escaped)\""
+            }.joined(separator: ",")
+            let color: String
+            switch MasteryFile.badge(session.mastery[concept.id]) {
+            case .notStarted: color = "#8e8e93"
+            case .learning: color = "#0a84ff"
+            case .known: color = "#30d158"
+            case .due: color = "#ff9f0a"
+            }
+            return "{\"id\":\"\(concept.id)\",\"color\":\"\(color)\",\"terms\":[\(terms)]}"
+        }
+        return "[\(items.joined(separator: ","))]"
     }
 
     private func loadSpine() {
@@ -176,6 +228,9 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         .reader-hl { background: #F2C94C59; }
         .reader-word { border-bottom: 1.5px dotted #666; }
         .reader-note { border-left: 3px solid #888; margin: 8px 0; padding: 8px 10px; background: rgba(0,0,0,0.04); }
+        .reader-concept { border-bottom: 1px solid #8e8e93; cursor: pointer; }
+        .reader-badge { font: 10px -apple-system, sans-serif; margin-left: 3px; color: #8e8e93; cursor: pointer; }
+        .reader-flash { background: #ffe08a; transition: background 1s; }
         """
         let marks = session.words.map(\.word).map { "\"\($0.replacingOccurrences(of: "\"", with: ""))\"" }.joined(separator: ",")
         let html = """
@@ -193,6 +248,63 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         document.addEventListener("mouseup", () => {
           const value = window.readerSelection();
           if (value && window.webkit && window.webkit.messageHandlers.reader) window.webkit.messageHandlers.reader.postMessage(value);
+        });
+        window.readerFlash = function(quote) {
+          if (!quote) return;
+          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+          while (walker.nextNode()) {
+            const node = walker.currentNode;
+            const at = (node.nodeValue || "").indexOf(quote);
+            if (at < 0 || !node.parentNode) continue;
+            const span = document.createElement("span");
+            span.className = "reader-flash";
+            span.textContent = quote;
+            const text = node.nodeValue;
+            node.parentNode.insertBefore(document.createTextNode(text.slice(0, at)), node);
+            node.parentNode.insertBefore(span, node);
+            node.parentNode.insertBefore(document.createTextNode(text.slice(at + quote.length)), node);
+            node.parentNode.removeChild(node);
+            span.scrollIntoView({block: "center"});
+            setTimeout(() => { span.className = ""; }, 1200);
+            break;
+          }
+        };
+        const concepts = \(conceptScript());
+        if (\(session.showConceptMarkers ? "true" : "false")) {
+          concepts.forEach(concept => {
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+            const nodes = [];
+            while (walker.nextNode()) nodes.push(walker.currentNode);
+            nodes.forEach(node => {
+              if (!node.nodeValue || !node.parentNode || node.parentNode.closest && node.parentNode.closest(".reader-concept")) return;
+              for (const term of concept.terms) {
+                const at = node.nodeValue.toLowerCase().indexOf(term.toLowerCase());
+                if (at < 0) continue;
+                const span = document.createElement("span");
+                span.className = "reader-concept";
+                span.dataset.id = concept.id;
+                span.style.borderBottomColor = concept.color;
+                span.textContent = node.nodeValue.slice(at, at + term.length);
+                const badge = document.createElement("sup");
+                badge.className = "reader-badge";
+                badge.dataset.id = concept.id;
+                badge.style.color = concept.color;
+                badge.textContent = concept.id;
+                const text = node.nodeValue;
+                node.parentNode.insertBefore(document.createTextNode(text.slice(0, at)), node);
+                node.parentNode.insertBefore(span, node);
+                node.parentNode.insertBefore(badge, node);
+                node.parentNode.insertBefore(document.createTextNode(text.slice(at + term.length)), node);
+                node.parentNode.removeChild(node);
+                break;
+              }
+            });
+          });
+        }
+        document.addEventListener("click", event => {
+          const el = event.target.closest && event.target.closest(".reader-concept, .reader-badge");
+          if (!el || !el.dataset.id || !window.webkit) return;
+          window.webkit.messageHandlers.reader.postMessage({kind: "concept", id: el.dataset.id});
         });
         const words = [\(marks)];
         if (words.length) {

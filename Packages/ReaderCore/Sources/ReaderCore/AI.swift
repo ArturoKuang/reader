@@ -140,6 +140,17 @@ public enum CodexCommand {
 }
 
 public enum CLIOutput {
+    /// Claude's stream-json events carry `session_id`. Reader stores it so the next tutor turn can `--resume`.
+    public static func claudeSessionID(_ stdout: String) -> String? {
+        var found: String?
+        for line in stdout.split(separator: "\n") {
+            let text = String(line).trimmingCharacters(in: .whitespaces)
+            guard let json = JSONValue.parse(text)?.object else { continue }
+            if let id = json["session_id"]?.string, !id.isEmpty { found = id }
+        }
+        return found
+    }
+
     public static func parseClaude(_ stdout: String) throws -> String {
         var assistant = ""
         var result: String?

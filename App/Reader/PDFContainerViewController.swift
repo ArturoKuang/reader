@@ -17,6 +17,7 @@ final class PDFContainerViewController: NSViewController {
     private var contactHost: NSHostingController<ContactSheetView>?
     private var annotations: [PDFAnnotation] = []
     private var highlightIDs: [ObjectIdentifier: String] = [:]
+    private var conceptIDs: [ObjectIdentifier: String] = [:]
     private var lookupPopover: NSPopover?
     private var didRestorePosition = false
     private var suppressScaleSave = false
@@ -74,6 +75,8 @@ final class PDFContainerViewController: NSViewController {
         pdfView.onMouseUp = { [weak self] in self?.captureSelection() }
         pdfView.highlightIDAt = { [weak self] point in self?.highlightID(atViewPoint: point) }
         pdfView.onRemoveHighlight = { [weak self] id in self?.session.deleteHighlight(id: id) }
+        pdfView.conceptAt = { [weak self] point in self?.conceptID(atViewPoint: point) }
+        pdfView.onConcept = { [weak self] id in self?.presentConcept(id) }
         session.onAnnotationsChanged = { [weak self] in self?.refreshAnnotations() }
         refreshAnnotations()
     }
@@ -300,6 +303,7 @@ final class PDFContainerViewController: NSViewController {
         }
         annotations.removeAll()
         highlightIDs.removeAll()
+        conceptIDs.removeAll()
         guard let document = pdfView.document else { return }
         for highlight in session.highlights {
             guard let pageNumber = highlight.page, let page = document.page(at: pageNumber - 1) else { continue }
@@ -339,11 +343,22 @@ final class PDFContainerViewController: NSViewController {
                 for term in concept.findTerms {
                     guard let range = string.range(of: term, options: .caseInsensitive),
                           let selection = page.selection(for: NSRange(range, in: string)) else { continue }
-                    let mark = PDFAnnotation(bounds: selection.bounds(for: page), forType: .underline, withProperties: nil)
+                    let bounds = selection.bounds(for: page)
+                    let mark = PDFAnnotation(bounds: bounds, forType: .underline, withProperties: nil)
                     mark.color = conceptColor(concept)
-                    mark.contents = "\(concept.id)\nClaim: \(concept.claim ?? "")\nTrap: \(concept.trap ?? "")"
+                    mark.contents = concept.id
                     page.addAnnotation(mark)
                     annotations.append(mark)
+                    conceptIDs[ObjectIdentifier(mark)] = concept.id
+                    let pageBounds = page.bounds(for: pdfView.displayBox)
+                    let badge = PDFAnnotation(bounds: NSRect(x: pageBounds.maxX - 42, y: bounds.minY, width: 38, height: max(bounds.height, 12)), forType: .freeText, withProperties: nil)
+                    badge.contents = concept.id
+                    badge.font = NSFont.systemFont(ofSize: 8)
+                    badge.color = conceptColor(concept).withAlphaComponent(0.18)
+                    badge.fontColor = conceptColor(concept)
+                    page.addAnnotation(badge)
+                    annotations.append(badge)
+                    conceptIDs[ObjectIdentifier(badge)] = concept.id
                     break
                 }
             }
@@ -373,7 +388,49 @@ final class PDFContainerViewController: NSViewController {
         pdfView.go(to: rect, on: page)
     }
 
-    func consumePendingJump() {}
+    func consumePendingJump() {
+        guard let link = session.pendingReaderLink else { return }
+        session.pendingReaderLink = nil
+        let quote = session.highlights.first { $0.id == link.id }?.quote ?? session.notes.first { $0.id == link.id }?.quote
+        let page = link.pageNumber ?? session.highlights.first { $0.id == link.id }?.page
+        guard let page, let document = pdfView.document, let pdfPage = document.page(at: page - 1) else { return }
+        if let quote, let string = pdfPage.string, let range = string.range(of: quote), let selection = pdfPage.selection(for: NSRange(range, in: string)) {
+            pdfView.go(to: selection)
+            pdfView.setCurrentSelection(selection, animate: true)
+            let flash = PDFAnnotation(bounds: selection.bounds(for: pdfPage), forType: .highlight, withProperties: nil)
+            flash.color = NSColor.systemYellow.withAlphaComponent(0.55)
+            pdfPage.addAnnotation(flash)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                pdfPage.removeAnnotation(flash)
+            }
+        } else {
+            reveal(ReadingPosition(page: page))
+        }
+    }
+
+    private func conceptID(atViewPoint point: NSPoint) -> String? {
+        let pagePoint = pdfView.convert(point, to: pdfView.currentPage)
+        guard let page = pdfView.page(for: point, nearest: true) else { return nil }
+        for annotation in page.annotations where annotation.bounds.contains(pagePoint) {
+            if let id = conceptIDs[ObjectIdentifier(annotation)] { return id }
+        }
+        return nil
+    }
+
+    private func presentConcept(_ id: String) {
+        guard let concept = session.concepts.first(where: { $0.id == id }) else { return }
+        let alert = NSAlert()
+        alert.messageText = "\(concept.id) \(concept.title)"
+        var detail: [String] = []
+        if let claim = concept.claim { detail.append("Claim: \(claim)") }
+        if let trap = concept.trap { detail.append("Trap: \(trap)") }
+        alert.informativeText = detail.joined(separator: "\n")
+        alert.addButton(withTitle: "Ask tutor about this")
+        alert.addButton(withTitle: "Close")
+        if alert.runModal() == .alertFirstButtonReturn {
+            session.askAboutConcept(concept)
+        }
+    }
 
     func currentPosition() -> ReadingPosition {
         guard let page = pdfView.currentPage, let document = pdfView.document else {
@@ -472,9 +529,16 @@ final class ReaderPDFView: PDFView {
     var onMouseUp: (() -> Void)?
     var highlightIDAt: ((NSPoint) -> String?)?
     var onRemoveHighlight: ((String) -> Void)?
+    var conceptAt: ((NSPoint) -> String?)?
+    var onConcept: ((String) -> Void)?
 
     override func mouseUp(with event: NSEvent) {
         super.mouseUp(with: event)
+        let point = convert(event.locationInWindow, from: nil)
+        if let id = conceptAt?(point) {
+            onConcept?(id)
+            return
+        }
         onMouseUp?()
     }
 

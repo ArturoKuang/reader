@@ -42,6 +42,16 @@ public struct ReaderLink: Equatable, Sendable {
         guard let path, !path.isEmpty else { return nil }
         return ReaderLink(path: path, location: location, id: id)
     }
+
+    /// `page=4` or `page=4&y=120` from a PDF deep link. EPUB locations stay CFIs.
+    public var pageNumber: Int? {
+        guard let location, !location.hasPrefix("epubcfi(") else { return nil }
+        for part in location.split(whereSeparator: { $0 == "&" || $0 == ";" }) {
+            let piece = String(part)
+            if piece.hasPrefix("page="), let number = Int(piece.dropFirst("page=".count)) { return number }
+        }
+        return nil
+    }
 }
 
 public enum ObsidianLink {

@@ -73,10 +73,14 @@ final class VaultCoordinator {
         var notes: [NoteEntry] = []
         var highlights: [HighlightEntry] = []
         var ids: Set<String> = []
+        let title = session.bookURL.deletingPathExtension().lastPathComponent
         if let files = try? fs.list(notesDir) {
             for name in files where name.hasSuffix(".md") {
                 let path = Paths.join(notesDir, name)
-                guard let text = try? fs.readString(path) else { continue }
+                guard var text = try? fs.readString(path) else { continue }
+                if mergePending, !VaultSync.isOwnWrite(newDisk: text, lastWritten: lastWritten[path]) {
+                    text = mergeExternal(text, path: path, fileName: name, title: title, session: session)
+                }
                 let chapter = ChapterFiles.number(in: name)
                 for block in VaultNoteFile.blocks(text) {
                     ids.insert(block.id)
@@ -145,6 +149,29 @@ final class VaultCoordinator {
         settings.notesFolder = notesFolder.isEmpty ? "notes" : notesFolder
         settings.vocabularyFile = vocabularyFile?.isEmpty == true ? nil : vocabularyFile
         try? settings.save(bookFolder: location.bookFolder, fs: fs)
+    }
+
+    private func mergeExternal(_ disk: String, path: String, fileName: String, title: String, session: ReaderSession) -> String {
+        let baseline = lastWritten[path] ?? disk
+        var pending: [String: String] = [:]
+        var written: [String: String] = [:]
+        func consider(id: String, body: String) {
+            pending[id] = body
+            if let previous = OwnedBlocks.body(id: id, in: baseline) { written[id] = previous }
+        }
+        for note in session.notes where ChapterFiles.notesFile(chapter: ChapterFiles.number(in: note.section ?? ""), bookTitle: title) == fileName {
+            consider(id: note.id, body: block(id: note.id, quote: note.quote, body: note.body, color: nil, session: session, chapter: ChapterFiles.number(in: note.section ?? "")).markdown())
+        }
+        for highlight in session.highlights where ChapterFiles.notesFile(chapter: ChapterFiles.number(in: highlight.section ?? ""), bookTitle: title) == fileName {
+            let note = highlight.noteID.flatMap { id in session.notes.first { $0.id == id }?.body } ?? ""
+            consider(id: highlight.id, body: block(id: highlight.id, quote: highlight.quote, body: note, color: highlight.color, session: session, chapter: ChapterFiles.number(in: highlight.section ?? "")).markdown())
+        }
+        let applied = VaultSync.applyExternal(VaultSyncState(disk: baseline, pending: pending, written: written), disk: disk)
+        if !applied.conflicts.isEmpty {
+            session.showToast("Kept both versions of a note")
+            writeIfChanged(path, applied.state.disk)
+        }
+        return applied.state.disk
     }
 
     private func writeNotes(_ session: ReaderSession) {
@@ -218,6 +245,7 @@ final class VaultCoordinator {
         applyingOwnWrite = true
         try? fs.writeString(path, text)
         lastWritten[path] = text
+        applyingOwnWrite = false
     }
 
     private func block(id: String, quote: String, body: String, color: Int?, session: ReaderSession, chapter: Int?) -> VaultNoteBlock {
