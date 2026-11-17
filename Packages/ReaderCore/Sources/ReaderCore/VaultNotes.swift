@@ -72,6 +72,24 @@ public enum VaultNoteFile {
         OwnedBlocks.upsert(text, id: block.id, body: block.markdown())
     }
 
+    /// Rewrites Reader blocks without copying one selection's location onto every earlier block.
+    /// An existing block keeps its stored `loc` while its quote is unchanged.
+    public static func upsertPreservingLocations(_ text: String, blocks: [VaultNoteBlock]) -> String {
+        let existing = Dictionary(uniqueKeysWithValues: Self.blocks(text).map { ($0.id, $0) })
+        var output = text
+        for block in blocks {
+            var next = block
+            if let prior = existing[block.id], prior.quote == block.quote {
+                let stored = prior.link.location
+                if let stored, !stored.isEmpty {
+                    next.link.location = stored
+                }
+            }
+            output = upsert(output, block: next)
+        }
+        return output
+    }
+
     public static func remove(_ text: String, id: String) -> String {
         OwnedBlocks.remove(text, id: id)
     }

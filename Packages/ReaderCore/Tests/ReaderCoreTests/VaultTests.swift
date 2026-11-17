@@ -67,6 +67,39 @@ final class VaultTests: XCTestCase {
         XCTAssertEqual(parsed.first { $0.id == "w1" }?.readerOwned, true)
     }
 
+    func testRewritingANoteKeepsEarlierBlockLocations() {
+        let path = "/books/beginning-of-infinity/book.epub"
+        let firstLocation = "epubcfi(/6/8!/4,/1:89,/1:130)"
+        let newest = "epubcfi(/6/10!/4,/1:211,/1:222)"
+        let first = VaultNoteBlock(
+            id: "h1",
+            quote: "hard to vary",
+            body: "",
+            color: 1,
+            link: ReaderLink(path: path, location: firstLocation, id: "h1")
+        )
+        let original = VaultNoteFile.upsert("", block: first)
+        let stamped = VaultNoteBlock(
+            id: "h1",
+            quote: "hard to vary",
+            body: "",
+            color: 1,
+            link: ReaderLink(path: path, location: newest, id: "h1")
+        )
+        let added = VaultNoteBlock(
+            id: "h2",
+            quote: "a later passage",
+            body: "note",
+            link: ReaderLink(path: path, location: newest, id: "h2")
+        )
+        let updated = VaultNoteFile.upsertPreservingLocations(original, blocks: [stamped, added])
+        let blocks = VaultNoteFile.blocks(updated)
+        XCTAssertEqual(blocks.first { $0.id == "h1" }?.quote, "hard to vary")
+        XCTAssertEqual(blocks.first { $0.id == "h1" }?.link.location, firstLocation)
+        XCTAssertFalse(blocks.first { $0.id == "h1" }?.link.url.contains("1:211") ?? true)
+        XCTAssertEqual(blocks.first { $0.id == "h2" }?.link.location, newest)
+    }
+
     func testHighlightAndNoteBlocksRoundTripLinks() {
         let link = ReaderLink(path: "/Users/arturokuang/Downloads/SecondBrain/books/beginning-of-infinity/book.epub", location: "epubcfi(/6/4!/4,/1:0,/1:12)", id: "h1")
         let block = VaultNoteBlock(id: "h1", quote: "hard to vary", body: "A note of mine.", color: 1, link: link, chapter: 4)

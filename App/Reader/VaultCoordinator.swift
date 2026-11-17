@@ -160,11 +160,11 @@ final class VaultCoordinator {
             if let previous = OwnedBlocks.body(id: id, in: baseline) { written[id] = previous }
         }
         for note in session.notes where ChapterFiles.notesFile(chapter: ChapterFiles.number(in: note.section ?? ""), bookTitle: title) == fileName {
-            consider(id: note.id, body: block(id: note.id, quote: note.quote, body: note.body, color: nil, session: session, chapter: ChapterFiles.number(in: note.section ?? "")).markdown())
+            consider(id: note.id, body: block(id: note.id, quote: note.quote, body: note.body, color: nil, path: session.bookURL.path, location: anchor(cfi: note.cfi, page: note.page), chapter: ChapterFiles.number(in: note.section ?? "")).markdown())
         }
         for highlight in session.highlights where ChapterFiles.notesFile(chapter: ChapterFiles.number(in: highlight.section ?? ""), bookTitle: title) == fileName {
             let note = highlight.noteID.flatMap { id in session.notes.first { $0.id == id }?.body } ?? ""
-            consider(id: highlight.id, body: block(id: highlight.id, quote: highlight.quote, body: note, color: highlight.color, session: session, chapter: ChapterFiles.number(in: highlight.section ?? "")).markdown())
+            consider(id: highlight.id, body: block(id: highlight.id, quote: highlight.quote, body: note, color: highlight.color, path: session.bookURL.path, location: anchor(cfi: highlight.cfi, page: highlight.page), chapter: ChapterFiles.number(in: highlight.section ?? "")).markdown())
         }
         let applied = VaultSync.applyExternal(VaultSyncState(disk: baseline, pending: pending, written: written), disk: disk)
         if !applied.conflicts.isEmpty {
@@ -182,23 +182,21 @@ final class VaultCoordinator {
         for note in session.notes {
             let chapter = ChapterFiles.number(in: note.section ?? "")
             let name = ChapterFiles.notesFile(chapter: chapter, bookTitle: title)
-            grouped[name, default: []].append(block(id: note.id, quote: note.quote, body: note.body, color: nil, session: session, chapter: chapter))
+            grouped[name, default: []].append(block(id: note.id, quote: note.quote, body: note.body, color: nil, path: session.bookURL.path, location: anchor(cfi: note.cfi, page: note.page), chapter: chapter))
         }
         for highlight in session.highlights {
             let chapter = ChapterFiles.number(in: highlight.section ?? "")
             let name = ChapterFiles.notesFile(chapter: chapter, bookTitle: title)
             let note = highlight.noteID.flatMap { id in session.notes.first { $0.id == id }?.body } ?? ""
-            grouped[name, default: []].append(block(id: highlight.id, quote: highlight.quote, body: note, color: highlight.color, session: session, chapter: chapter))
+            grouped[name, default: []].append(block(id: highlight.id, quote: highlight.quote, body: note, color: highlight.color, path: session.bookURL.path, location: anchor(cfi: highlight.cfi, page: highlight.page), chapter: chapter))
         }
         var touched: Set<String> = []
         for (name, blocks) in grouped {
             let path = Paths.join(directory, name)
-            var text = (try? fs.readString(path)) ?? ""
-            for item in blocks {
-                text = VaultNoteFile.upsert(text, block: item)
-                loadedBlockIDs.insert(item.id)
-            }
-            writeIfChanged(path, text)
+            let text = (try? fs.readString(path)) ?? ""
+            let written = VaultNoteFile.upsertPreservingLocations(text, blocks: blocks)
+            for item in blocks { loadedBlockIDs.insert(item.id) }
+            writeIfChanged(path, written)
             touched.insert(path)
         }
         if let names = try? fs.list(directory) {
@@ -248,10 +246,14 @@ final class VaultCoordinator {
         applyingOwnWrite = false
     }
 
-    private func block(id: String, quote: String, body: String, color: Int?, session: ReaderSession, chapter: Int?) -> VaultNoteBlock {
-        let location = session.selection?.cfi ?? session.selection?.page.map { "page=\($0)" }
-        let link = ReaderLink(path: session.bookURL.path, location: location, id: id)
-        return VaultNoteBlock(id: id, quote: quote, body: body, color: color, link: link, chapter: chapter)
+    private func anchor(cfi: String?, page: Int?) -> String? {
+        if let cfi, !cfi.isEmpty { return cfi }
+        if let page { return "page=\(page)" }
+        return nil
+    }
+
+    private func block(id: String, quote: String, body: String, color: Int?, path: String, location: String?, chapter: Int?) -> VaultNoteBlock {
+        VaultNoteBlock(id: id, quote: quote, body: body, color: color, link: ReaderLink(path: path, location: location, id: id), chapter: chapter)
     }
 
     private func loadVocabulary(title: String) -> [VocabEntry] {
