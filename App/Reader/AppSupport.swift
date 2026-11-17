@@ -145,6 +145,12 @@ struct OutlineRow: Identifiable, Equatable {
     var depth: Int
 }
 
+struct ReaderChatLine: Identifiable, Equatable {
+    var id: UUID
+    var mine: Bool
+    var text: String
+}
+
 struct ShortcutRow: Identifiable {
     var id: String { title }
     var title: String

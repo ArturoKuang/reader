@@ -50,6 +50,8 @@ final class ReaderSession: ObservableObject {
     @Published var lookup: LookupPresentation?
     @Published var question: String = ""
     @Published var answer: String = ""
+    @Published var chat: [ReaderChatLine] = []
+    private var chatQuote = ""
     @Published var answerLabel: String = ""
     @Published var asking: Bool = false
     @Published var findQuery: String = ""
@@ -458,6 +460,11 @@ final class ReaderSession: ObservableObject {
         showToast("Removed the lookup")
     }
 
+    func deleteWord(id: String) {
+        package.words.words.removeAll { $0.id == id }
+        dirty()
+    }
+
     func setLearned(id: String, learned: Bool) {
         WordStore.setLearned(words: &package.words.words, id: id, learned: learned)
         dirty()
@@ -470,7 +477,16 @@ final class ReaderSession: ObservableObject {
         }
         let chosen = override ?? provider
         asking = true
-        if panelTab != .askAI && word == nil { show(tab: .askAI) }
+        if word == nil {
+            let quote = selection?.text ?? ""
+            if quote != chatQuote {
+                chatQuote = quote
+                chat = []
+            }
+            chat.append(ReaderChatLine(id: UUID(), mine: true, text: chatLabel(purpose)))
+            chat.append(ReaderChatLine(id: UUID(), mine: false, text: ""))
+            show(tab: .askAI)
+        }
         let focus = selection.map { Focus(quote: $0.text, page: $0.page, section: $0.section, cfi: $0.cfi) }
         let directory = Paths.join(NSTemporaryDirectory(), "reader-ai-\(UUID().uuidString)")
         let router = AIRouter(
@@ -481,7 +497,10 @@ final class ReaderSession: ObservableObject {
             runner: runner
         ) { [weak self] partial in
             Task { @MainActor in
-                if word == nil { self?.answer = partial }
+                if word == nil {
+                    self?.answer = partial
+                    if let last = self?.chat.indices.last { self?.chat[last].text = partial }
+                }
             }
         }
         Task { @MainActor in
@@ -507,17 +526,29 @@ final class ReaderSession: ObservableObject {
                 } else {
                     answer = result.text
                     answerLabel = result.providerLabel
+                    if let last = chat.indices.last { chat[last].text = result.text }
                 }
             } catch {
                 if word != nil {
                     lookup?.explanation = "Couldn't explain this word."
                     lookup?.busy = false
                 } else {
-                    answer = error.localizedDescription
+                    answer = "The provider didn't answer."
                     answerLabel = ""
+                    if let last = chat.indices.last { chat[last].text = answer }
                 }
             }
             asking = false
+        }
+    }
+
+    private func chatLabel(_ purpose: AIPurpose) -> String {
+        switch purpose {
+        case .ask(let text): return text
+        case .explainWord(let word): return "Define \(word)"
+        case .explainSimply: return "Explain"
+        case .summarizeSection: return "Summarize"
+        case .suggestNote: return "Suggest a note"
         }
     }
 
@@ -625,6 +656,11 @@ final class ReaderSession: ObservableObject {
             date: isoDay(Date()),
             eventID: "reader-\(UUID().uuidString.lowercased())"
         )
+        let quote = selection?.text ?? ""
+        if quote != chatQuote {
+            chatQuote = quote
+            chat = []
+        }
         let spoken: String
         if let command {
             spoken = question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? command.slash : "\(command.slash) \(question.trimmingCharacters(in: .whitespacesAndNewlines))"
@@ -632,6 +668,7 @@ final class ReaderSession: ObservableObject {
             spoken = question
         }
         tutorLines.append("You: \(spoken)")
+        chat.append(ReaderChatLine(id: UUID(), mine: true, text: spoken))
         asking = true
         show(tab: .askAI)
         let executable = ClaudeExecutable.resolve(
@@ -663,6 +700,7 @@ final class ReaderSession: ObservableObject {
                     }
                     self.answer = text
                     self.tutorLines.append(text)
+                    self.chat.append(ReaderChatLine(id: UUID(), mine: false, text: text))
                     self.asking = false
                     self.answerLabel = "Answered by Claude Code in this vault"
                 }

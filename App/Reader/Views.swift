@@ -303,106 +303,71 @@ struct RightPanelView: View {
     }
 
     private var words: some View {
-        Group {
-            if session.words.isEmpty { Text("Looked-up words from this book land here.").foregroundStyle(.secondary) }
-            ForEach(session.words) { word in
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack {
-                        Text(word.word).font(.body.weight(.semibold))
-                        Spacer()
-                        Text(word.count > 1 ? "looked up \(word.count)×" : "once").font(.caption).foregroundStyle(.secondary)
-                    }
-                    Text(word.definition).font(.callout)
-                    if let sentence = word.lookups.first?.sentence {
-                        Text("“\(sentence)”").font(.caption).italic()
-                    }
-                    Button(word.learned ? "Learned" : "Mark as learned") { session.setLearned(id: word.id, learned: !word.learned) }
-                        .font(.caption)
-                }
-            }
-        }
-    }
-
-    private var highlights: some View {
-        Group {
-            if session.highlights.isEmpty {
-                Text("Six colors, numbered 1–6. ⌃⌘1 through ⌃⌘6. Select a row and press Delete to remove it.").foregroundStyle(.secondary)
-            } else {
-                List {
-                    ForEach(session.highlights) { highlight in
-                        HStack(alignment: .top) {
-                            RoundedRectangle(cornerRadius: 2).fill(Color(nsColor: ReaderColor.nsColor(highlight.color))).frame(width: 4)
-                            VStack(alignment: .leading) {
-                                Text("Color \(highlight.color) · \(highlight.page.map { "p. \($0)" } ?? "")").font(.caption).foregroundStyle(.secondary)
-                                Text(highlight.quote).font(.callout)
-                            }
-                        }
-                        .contextMenu {
-                            Button("Remove Highlight") { session.deleteHighlight(id: highlight.id) }
-                        }
-                    }
-                    .onDelete { offsets in
-                        let ids = offsets.map { session.highlights[$0].id }
-                        ids.forEach { session.deleteHighlight(id: $0) }
-                    }
-                }
-                .frame(minHeight: 220)
-            }
-        }
+        WordList(session: session)
     }
 
     private var ask: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let selection = session.selection {
-                Text("“\(selection.text)”").font(.callout).italic().padding(.leading, 8).overlay(alignment: .leading) { Rectangle().frame(width: 3).foregroundStyle(.secondary) }
-            }
-            Picker("Provider", selection: $session.provider) {
-                ForEach(ProviderID.allCases, id: \.self) { Text($0.label).tag($0) }
-            }
-            TextField("Ask about the selection", text: $session.question)
-                .textFieldStyle(.roundedBorder)
-                .onSubmit { session.withSelection { session.askCurrentQuestion() } }
-            HStack {
-                Button(session.asking ? "Asking…" : "Ask") { session.withSelection { session.askCurrentQuestion() } }.disabled(session.asking)
-                Button("Stop") { session.stopAsk() }.disabled(!session.asking)
-            }
-            if session.tutorAvailable {
+            if let selection = session.selection, !selection.text.isEmpty {
                 HStack {
+                    Text("“\(selection.text)”").font(.callout).italic().lineLimit(3)
+                    Spacer()
+                    Button("×") { session.selection = nil; session.chat = [] }
+                        .buttonStyle(.borderless)
+                }
+            }
+            HStack {
+                Button("Explain") { session.withSelection { session.ask(purpose: .explainSimply) } }
+                Button("Summarize") { session.withSelection { session.ask(purpose: .summarizeSection) } }
+                Button("Define Terms") { session.withSelection { session.ask(purpose: .ask("Define the difficult terms in this passage.")) } }
+                if session.tutorAvailable {
                     Button("Learn") { session.withSelection { session.askTutor(command: .learn, question: session.question) } }
                     Button("Review") { session.withSelection { session.askTutor(command: .review, question: session.question) } }
                     Button("Wrap") { session.withSelection { session.askTutor(command: .wrap, question: session.question) } }
                 }
-                ForEach(Array(session.tutorLines.enumerated()), id: \.offset) { _, line in
-                    Text(line).font(.callout).textSelection(.enabled)
-                }
-                if !session.answer.isEmpty {
-                    HStack {
-                        Button("Save as note") { session.saveAnswerAsNote() }
-                        Button("Copy") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(session.answer, forType: .string)
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    if session.chat.isEmpty {
+                        ContentUnavailableView("Ask about this passage", systemImage: "text.bubble", description: Text("Passages are sent to the chosen provider when you ask."))
+                    }
+                    ForEach(session.chat) { line in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(line.text).textSelection(.enabled).padding(8).background(line.mine ? Color.accentColor.opacity(0.15) : Color(nsColor: .quaternaryLabelColor).opacity(0.2)).clipShape(RoundedRectangle(cornerRadius: 8))
+                            if !line.mine, !line.text.isEmpty {
+                                HStack {
+                                    Button("Copy") {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(line.text, forType: .string)
+                                    }
+                                    Button("Save as Note") {
+                                        session.answer = line.text
+                                        session.saveAnswerAsNote()
+                                    }
+                                }
+                                .buttonStyle(.borderless)
+                            }
                         }
                     }
                 }
-                if !session.concepts.isEmpty {
-                    Text("Concepts in this passage").font(.caption).foregroundStyle(.secondary)
-                    ForEach(ConceptsFile.suggested(passage: session.selection?.text ?? "", concepts: session.concepts, chapter: ChapterFiles.number(in: session.selection?.section ?? session.sectionTitle))) { concept in
-                        Text(concept.wiki).font(.caption).help(conceptHelp(concept))
-                    }
-                }
             }
-            if !session.tutorAvailable, !session.answer.isEmpty {
-                Text(session.answer).textSelection(.enabled)
-                Text(session.answerLabel).font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    Button("Save as note") { session.saveAnswerAsNote() }
-                    Button("Copy") {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(session.answer, forType: .string)
-                    }
+            TextEditor(text: $session.question)
+                .font(.body)
+                .frame(minHeight: 44, maxHeight: 80)
+                .onKeyPress(.return) { press in
+                    if press.modifiers.contains(.shift) { return .ignored }
+                    session.withSelection { session.askCurrentQuestion() }
+                    return .handled
                 }
+            HStack {
+                Picker("Provider", selection: $session.provider) {
+                    ForEach(ProviderID.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                Spacer()
+                if session.asking { Button("Stop") { session.stopAsk() } }
             }
-            Text("Questions are sent as soon as you ask. Nothing is saved unless you choose Save as note.").font(.caption).foregroundStyle(.secondary)
         }
     }
 
@@ -414,6 +379,81 @@ struct RightPanelView: View {
     }
 }
 
+struct WordList: View {
+    @ObservedObject var session: ReaderSession
+    @State private var query = ""
+    @State private var sort = "recent"
+    @State private var filter = "all"
+
+    var body: some View {
+        let rows = ordered
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                TextField("Search words", text: $query).textFieldStyle(.roundedBorder)
+                Picker("Sort", selection: $sort) {
+                    Text("Recent").tag("recent")
+                    Text("A–Z").tag("alpha")
+                    Text("Page").tag("page")
+                }.labelsHidden()
+                Picker("Filter", selection: $filter) {
+                    Text("All").tag("all")
+                    Text("Learning").tag("learning")
+                    Text("Learned").tag("learned")
+                }.labelsHidden()
+            }
+            if rows.isEmpty {
+                ContentUnavailableView("No words yet", systemImage: "character.book.closed", description: Text("Look up a word with ⌃⌘D or Force Click. It lands here with its sentence."))
+            } else {
+                List {
+                    ForEach(rows) { word in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(word.word).font(.body.weight(.semibold))
+                            Text(word.definition).font(.callout).lineLimit(2)
+                            if let sentence = word.lookups.first?.sentence {
+                                Text(sentence).font(.caption).lineLimit(1)
+                            }
+                            Text(word.lookups.first?.page.map { "p. \($0)" } ?? word.lookups.first?.section ?? "").font(.caption).foregroundStyle(.secondary)
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            if let page = word.lookups.first?.page, let controller = NSApp.keyWindow?.windowController as? ReaderWindowController {
+                                controller.reveal(ReadingPosition(page: page, quote: word.lookups.first?.sentence))
+                            }
+                        }
+                        .contextMenu {
+                            Button("Copy") { copy(word.word) }
+                            Button("Copy with Sentence") { copy("\(word.word) — \(word.lookups.first?.sentence ?? "")") }
+                            Button(word.learned ? "Mark Learning" : "Mark Learned") { session.setLearned(id: word.id, learned: !word.learned) }
+                            Button("Remove") { session.deleteWord(id: word.id) }
+                        }
+                    }
+                    .onDelete { offsets in
+                        offsets.map { rows[$0].id }.forEach { session.deleteWord(id: $0) }
+                    }
+                }
+            }
+        }
+    }
+
+    private var ordered: [WordEntry] {
+        var rows = session.words.filter { word in
+            (query.isEmpty || word.word.localizedCaseInsensitiveContains(query) || word.definition.localizedCaseInsensitiveContains(query))
+                && (filter == "all" || (filter == "learned" ? word.learned : !word.learned))
+        }
+        switch sort {
+        case "alpha": rows.sort { $0.word.localizedCaseInsensitiveCompare($1.word) == .orderedAscending }
+        case "page": rows.sort { ($0.lookups.first?.page ?? Int.max) < ($1.lookups.first?.page ?? Int.max) }
+        default: break
+        }
+        return rows
+    }
+
+    private func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+}
+
 struct LookupCard: View {
     @ObservedObject var session: ReaderSession
     var dismiss: () -> Void
@@ -422,15 +462,24 @@ struct LookupCard: View {
         VStack(alignment: .leading, spacing: 8) {
             if let lookup = session.lookup {
                 Text(lookup.word).font(.title2.weight(.semibold))
+                if let times = session.words.first(where: { $0.word.caseInsensitiveCompare(lookup.word) == .orderedSame })?.count, times > 1 {
+                    Text("Looked up \(times)×").font(.caption).foregroundStyle(.secondary)
+                }
                 Text("Dictionary").font(.caption).foregroundStyle(.secondary)
                 Text(lookup.definition)
                 Text(lookup.busy ? "Explaining…" : "In this passage").font(.caption).foregroundStyle(.secondary)
                 Text(lookup.explanation.isEmpty ? " " : lookup.explanation)
                 Text("“\(lookup.sentence)” · \(lookup.location)").font(.caption).italic()
-                Text(lookup.providerLabel).font(.caption).foregroundStyle(.secondary)
                 HStack {
-                    Button("Undo save") { session.undoLookup(); dismiss() }
-                    Button("Close") { dismiss() }
+                    Text("Saved to Words").font(.caption).foregroundStyle(.secondary)
+                    Button("Undo") { session.undoLookup(); dismiss() }.buttonStyle(.borderless)
+                    Spacer()
+                    Button("Open in Dictionary") {
+                        if let url = URL(string: "dict://\(lookup.word.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? lookup.word)") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                    .buttonStyle(.borderless)
                 }
             }
         }
@@ -499,10 +548,20 @@ struct WordsBrowser: View {
     var books: [LibraryEntry]
     @State private var query = ""
     @State private var sort = "page"
+    @State private var book = "All"
     @State private var selected: String?
 
     var body: some View {
-        let rows = gathered.filter { query.isEmpty || $0.word.localizedCaseInsensitiveContains(query) || $0.definition.localizedCaseInsensitiveContains(query) }
+        let rows = gathered.filter { row in
+            (book == "All" || row.book == book) && (query.isEmpty || row.word.localizedCaseInsensitiveContains(query) || row.definition.localizedCaseInsensitiveContains(query))
+        }
+        VStack {
+        Picker("Book", selection: $book) {
+            Text("All books").tag("All")
+            ForEach(Array(Set(books.map(\.title))).sorted(), id: \.self) { title in
+                Text(title).tag(title)
+            }
+        }
         HSplitView {
             List(rows, id: \.word, selection: $selected) { row in
                 VStack(alignment: .leading) {
@@ -531,6 +590,7 @@ struct WordsBrowser: View {
                 Button("Export all books’ words…") { (NSApp.delegate as? AppDelegate)?.exportAllWords(nil) }
             }
             .padding(8)
+        }
         }
     }
 
