@@ -165,6 +165,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
             self?.acceptSpineReports = true
+            self?.session.finishViewRestore()
         }
     }
 

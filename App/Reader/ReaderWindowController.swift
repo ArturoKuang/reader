@@ -14,6 +14,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     private var sidebarItem: NSSplitViewItem?
     private var panelItem: NSSplitViewItem?
     private var slideshowTimer: Timer?
+    private var reappliedSavedFrame = false
     private var previousSidebar: SidebarMode = .thumbnails
     private let toastView = PassThroughView()
     private let toastLabel = NSTextField(labelWithString: "")
@@ -171,6 +172,13 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     private func storeWindowFrame() {
         guard let frame = window?.frame else { return }
         session.noteWindowFrame(x: frame.origin.x, y: frame.origin.y, width: frame.width, height: frame.height)
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        guard !reappliedSavedFrame else { return }
+        reappliedSavedFrame = true
+        guard let window else { return }
+        restoreWindowFrame(window)
     }
 
     func windowDidResize(_ notification: Notification) {

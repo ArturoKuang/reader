@@ -105,6 +105,7 @@ final class PDFContainerViewController: NSViewController {
         guard view.window != nil else { return }
         let bounds = pdfView.bounds
         guard bounds.width > 160, bounds.height > 160, pdfView.document != nil else { return }
+        let anchored = pdfView.currentDestination
         let mode: FitMode = session.hasSavedViewState ? session.fitMode : .fitPage
         switch mode {
         case .fitPage:
@@ -139,14 +140,24 @@ final class PDFContainerViewController: NSViewController {
             pdfView.scaleFactor = scale
             suppressScaleSave = false
         }
+        if let anchored {
+            suppressScaleSave = true
+            pdfView.go(to: anchored)
+            suppressScaleSave = false
+        }
+        restorePositionOnce()
     }
 
     private func restorePositionOnce() {
-        guard !didRestorePosition, session.hasSavedViewState else { return }
+        guard !didRestorePosition, session.hasSavedViewState else {
+            if !session.hasSavedViewState { session.finishViewRestore() }
+            return
+        }
         guard pdfView.bounds.width > 160 else { return }
         didRestorePosition = true
         let state = session.package.state
         reveal(ReadingPosition(page: state.page, scrollY: state.scrollY, zoom: nil))
+        session.finishViewRestore()
     }
 
     override func viewWillDisappear() {

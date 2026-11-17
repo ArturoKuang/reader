@@ -69,6 +69,8 @@ final class ReaderSession: ObservableObject {
     weak var undoManager: UndoManager?
     /// True when `state.json` already existed. A first open fits the page width.
     let hasSavedViewState: Bool
+    /// Stays true until the saved page and window frame have been applied, so layout cannot overwrite them.
+    var viewRestorePending: Bool
     var navigation = NavigationHistory()
     private var markChord = MarkChord.idle
     private var lastLookupUndo: WordUndo?
@@ -94,6 +96,7 @@ final class ReaderSession: ObservableObject {
         self.offerMoveTo = open.offerMoveTo
         self.needsReanchor = open.needsReanchor
         self.hasSavedViewState = open.hasSavedViewState
+        self.viewRestorePending = open.hasSavedViewState
         let state = open.package.state
         self.sidebar = state.sidebar
         self.panelVisible = state.panelVisible
@@ -162,7 +165,15 @@ final class ReaderSession: ObservableObject {
         try GlobalMarks.save(globalMarks, applicationSupport: AppPaths.support, fs: fs)
     }
 
+    func finishViewRestore() {
+        guard viewRestorePending else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.viewRestorePending = false
+        }
+    }
+
     func saveViewQuietly() {
+        guard !viewRestorePending else { return }
         captureState()
         if usesVault {
             onSaveVaultState?()
@@ -199,6 +210,7 @@ final class ReaderSession: ObservableObject {
     }
 
     func noteWindowFrame(x: Double, y: Double, width: Double, height: Double) {
+        guard !viewRestorePending else { return }
         guard width > 320, height > 240 else { return }
         package.state.windowFrame = StoredWindowFrame(x: x, y: y, width: width, height: height)
         scheduleViewStateSave()
