@@ -486,6 +486,8 @@ public struct AISettings: Codable, Equatable, Sendable {
     public var lookupProvider: ProviderID
     /// Suggested notes stay off until the reader turns them on.
     public var suggestedNotes: Bool
+    /// The small bar above a text selection. Preview-style reading can turn it off.
+    public var showSelectionBar: Bool
 
     public init(
         defaultProvider: ProviderID = .openai,
@@ -497,7 +499,8 @@ public struct AISettings: Codable, Equatable, Sendable {
         codexCLIPath: String? = nil,
         lookupUsesDefault: Bool = true,
         lookupProvider: ProviderID = .openai,
-        suggestedNotes: Bool = false
+        suggestedNotes: Bool = false,
+        showSelectionBar: Bool = true
     ) {
         self.defaultProvider = defaultProvider
         self.openAIModel = openAIModel
@@ -509,6 +512,42 @@ public struct AISettings: Codable, Equatable, Sendable {
         self.lookupUsesDefault = lookupUsesDefault
         self.lookupProvider = lookupProvider
         self.suggestedNotes = suggestedNotes
+        self.showSelectionBar = showSelectionBar
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case defaultProvider, openAIModel, anthropicModel, openAIContextTokens, anthropicContextTokens
+        case claudeCLIPath, codexCLIPath, lookupUsesDefault, lookupProvider, suggestedNotes, showSelectionBar
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        defaultProvider = try container.decodeIfPresent(ProviderID.self, forKey: .defaultProvider) ?? .openai
+        openAIModel = try container.decodeIfPresent(String.self, forKey: .openAIModel) ?? "gpt-4.1"
+        anthropicModel = try container.decodeIfPresent(String.self, forKey: .anthropicModel) ?? "claude-sonnet-4-5"
+        openAIContextTokens = try container.decodeIfPresent(Int.self, forKey: .openAIContextTokens) ?? 1_047_576
+        anthropicContextTokens = try container.decodeIfPresent(Int.self, forKey: .anthropicContextTokens) ?? 200_000
+        claudeCLIPath = try container.decodeIfPresent(String.self, forKey: .claudeCLIPath)
+        codexCLIPath = try container.decodeIfPresent(String.self, forKey: .codexCLIPath)
+        lookupUsesDefault = try container.decodeIfPresent(Bool.self, forKey: .lookupUsesDefault) ?? true
+        lookupProvider = try container.decodeIfPresent(ProviderID.self, forKey: .lookupProvider) ?? .openai
+        suggestedNotes = try container.decodeIfPresent(Bool.self, forKey: .suggestedNotes) ?? false
+        showSelectionBar = try container.decodeIfPresent(Bool.self, forKey: .showSelectionBar) ?? true
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(defaultProvider, forKey: .defaultProvider)
+        try container.encode(openAIModel, forKey: .openAIModel)
+        try container.encode(anthropicModel, forKey: .anthropicModel)
+        try container.encode(openAIContextTokens, forKey: .openAIContextTokens)
+        try container.encode(anthropicContextTokens, forKey: .anthropicContextTokens)
+        try container.encodeIfPresent(claudeCLIPath, forKey: .claudeCLIPath)
+        try container.encodeIfPresent(codexCLIPath, forKey: .codexCLIPath)
+        try container.encode(lookupUsesDefault, forKey: .lookupUsesDefault)
+        try container.encode(lookupProvider, forKey: .lookupProvider)
+        try container.encode(suggestedNotes, forKey: .suggestedNotes)
+        try container.encode(showSelectionBar, forKey: .showSelectionBar)
     }
 
     public static let `default` = AISettings()

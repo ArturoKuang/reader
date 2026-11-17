@@ -292,6 +292,36 @@ public enum AnnotationExport {
     }
 }
 
+public enum HighlightAppearance {
+    public static let blendMode = "multiply"
+    public static let opacity = 0.38
+    /// Dark Aqua uses deeper swatches so a multiply blend stays visible on a black page.
+    public static let darkHex = ["E0B400", "3DDC84", "3DB7E8", "E86A9A", "C46BE0", "E8873A"]
+
+    public static func components(color: Int, dark: Bool) -> (r: Double, g: Double, b: Double, a: Double)? {
+        let source = dark ? darkHex : HighlightPalette.hex
+        guard HighlightPalette.isValid(color), let value = Int(source[color - 1], radix: 16) else { return nil }
+        return (
+            Double((value >> 16) & 0xff) / 255,
+            Double((value >> 8) & 0xff) / 255,
+            Double(value & 0xff) / 255,
+            opacity
+        )
+    }
+}
+
+public enum CopyLink {
+    /// A reader:// link for the current selection, including the quote so the passage can be found again.
+    public static func make(path: String, page: Int?, cfi: String?, quote: String) -> ReaderLink {
+        var location = cfi ?? page.map { "page=\($0)" } ?? ""
+        let trimmed = quote.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            location = location.isEmpty ? "quote=\(trimmed)" : location + "&quote=\(trimmed)"
+        }
+        return ReaderLink(path: path, location: location.isEmpty ? nil : location)
+    }
+}
+
 public enum VaultAnnotationSync {
     /// One block per highlight, using the highlight's id, with the linked note's body inside it.
     /// A note that has no highlight keeps its own id. `removeIDs` are Reader blocks to drop.

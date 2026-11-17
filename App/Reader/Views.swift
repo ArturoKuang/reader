@@ -447,6 +447,9 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            Section("General") {
+                Toggle("Show the annotation bar when selecting text", isOn: $settings.showSelectionBar)
+            }
             Section("Default") {
                 Picker("Provider", selection: $settings.defaultProvider) {
                     ForEach(ProviderID.allCases, id: \.self) { Text($0.label).tag($0) }

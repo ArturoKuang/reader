@@ -63,6 +63,19 @@ final class AnnotationTests: XCTestCase {
         XCTAssertTrue(package.notes.notes.isEmpty)
     }
 
+    func testCopyLinkAndHighlightPalette() {
+        let link = CopyLink.make(path: "/Book.pdf", page: 4, cfi: nil, quote: "hard to vary")
+        let parsed = ReaderLink.parse(link.url)
+        XCTAssertEqual(parsed?.path, "/Book.pdf")
+        XCTAssertEqual(parsed?.location, "page=4&quote=hard to vary")
+        let light = HighlightAppearance.components(color: 1, dark: false)
+        let dark = HighlightAppearance.components(color: 1, dark: true)
+        XCTAssertEqual(light?.a, HighlightAppearance.opacity)
+        XCTAssertEqual(HighlightAppearance.blendMode, "multiply")
+        XCTAssertNotEqual(light?.r, dark?.r)
+        XCTAssertNil(HighlightAppearance.components(color: 9, dark: false))
+    }
+
     func testExportMatchesVaultCallout() {
         let highlight = HighlightEntry(id: "h1", color: 1, page: 4, cfi: "page=4", quote: "hard to vary", section: "Chapter 4", noteID: "n1")
         let note = NoteEntry(id: "n1", page: 4, quote: "hard to vary", section: "Chapter 4", body: "A note of mine.")

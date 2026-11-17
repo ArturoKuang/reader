@@ -316,6 +316,15 @@ final class PDFContainerViewController: NSViewController {
             sentence: span?.sentence ?? text,
             rects: rects
         )
+        if session.settings.showSelectionBar, let page = pdfView.currentPage {
+            let rect: NSRect
+            if let first = rects.first, first.count >= 4 {
+                rect = pdfView.convert(NSRect(x: first[0], y: first[1], width: max(first[2] - first[0], 8), height: max(first[3] - first[1], 8)), from: page)
+            } else {
+                rect = pdfView.bounds
+            }
+            (view.window?.windowController as? ReaderWindowController)?.showSelectionBar(relativeTo: rect)
+        }
     }
 
     func refreshAnnotations() {
@@ -332,7 +341,12 @@ final class PDFContainerViewController: NSViewController {
             for rect in rects {
                 let bounds = NSRect(x: rect[0], y: rect.count > 1 ? rect[1] : 0, width: max((rect.count > 2 ? rect[2] : rect[0]) - rect[0], 4), height: max((rect.count > 3 ? rect[3] : rect[1]) - (rect.count > 1 ? rect[1] : 0), 4))
                 let annotation = PDFAnnotation(bounds: bounds, forType: .highlight, withProperties: nil)
-                annotation.color = ReaderColor.nsColor(highlight.color).withAlphaComponent(0.35)
+                let dark = view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                if let parts = HighlightAppearance.components(color: highlight.color, dark: dark) {
+                    annotation.color = NSColor(calibratedRed: parts.r, green: parts.g, blue: parts.b, alpha: parts.a)
+                } else {
+                    annotation.color = ReaderColor.nsColor(highlight.color).withAlphaComponent(HighlightAppearance.opacity)
+                }
                 page.addAnnotation(annotation)
                 annotations.append(annotation)
                 highlightIDs[ObjectIdentifier(annotation)] = highlight.id
@@ -513,6 +527,7 @@ final class PDFContainerViewController: NSViewController {
 
     @objc private func scrolled() {
         session.rememberScroll(currentPosition())
+        (view.window?.windowController as? ReaderWindowController)?.dismissSelectionBar()
     }
 
     @objc private func scaleChanged() {
@@ -585,14 +600,114 @@ final class ReaderPDFView: PDFView {
         let point = convert(event.locationInWindow, from: nil)
         if let id = highlightIDAt?(point) {
             let menu = NSMenu()
-            let item = NSMenuItem(title: "Remove Highlight", action: #selector(removeHighlightClicked(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = id
-            menu.addItem(item)
+            let color = NSMenuItem(title: "Color", action: nil, keyEquivalent: "")
+            let colors = NSMenu()
+            for index in 1...6 {
+                let item = NSMenuItem(title: "Color \(index)", action: #selector(recolorClicked(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = id
+                item.tag = index
+                colors.addItem(item)
+            }
+            color.submenu = colors
+            menu.addItem(color)
+            let note = NSMenuItem(title: "Add/Edit Note", action: #selector(noteClicked(_:)), keyEquivalent: "")
+            note.target = self
+            note.representedObject = id
+            menu.addItem(note)
+            let copy = NSMenuItem(title: "Copy", action: #selector(copyHighlightClicked(_:)), keyEquivalent: "")
+            copy.target = self
+            copy.representedObject = id
+            menu.addItem(copy)
+            let link = NSMenuItem(title: "Copy Link", action: #selector(copyLinkClicked(_:)), keyEquivalent: "")
+            link.target = self
+            link.representedObject = id
+            menu.addItem(link)
+            if session.annotations.first(where: { $0.id == id })?.hasNote == true {
+                let removeNote = NSMenuItem(title: "Remove Note", action: #selector(removeNoteClicked(_:)), keyEquivalent: "")
+                removeNote.target = self
+                removeNote.representedObject = id
+                menu.addItem(removeNote)
+            }
+            let remove = NSMenuItem(title: "Remove Highlight & Note", action: #selector(removeHighlightClicked(_:)), keyEquivalent: "")
+            remove.target = self
+            remove.representedObject = id
+            menu.addItem(remove)
             NSMenu.popUpContextMenu(menu, with: event, for: self)
             return
         }
         super.rightMouseDown(with: event)
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = NSMenu()
+        let point = convert(event.locationInWindow, from: nil)
+        if highlightIDAt?(point) != nil { return nil }
+        captureSelection()
+        guard let text = session.selection?.text, !text.isEmpty else { return super.menu(for: event) }
+        for title in ["Highlight", "Note", "Look Up", "Ask AI", "Copy"] {
+            let item = NSMenuItem(title: title, action: #selector(selectionMenu(_:)), keyEquivalent: "")
+            item.target = self
+            menu.addItem(item)
+        }
+        let word = text.split(separator: " ").first.map(String.init) ?? text
+        let lookup = NSMenuItem(title: "Look Up “\(word)”", action: #selector(selectionMenu(_:)), keyEquivalent: "")
+        lookup.target = self
+        menu.addItem(lookup)
+        let link = NSMenuItem(title: "Copy Link to Selection", action: #selector(selectionMenu(_:)), keyEquivalent: "")
+        link.target = self
+        menu.addItem(link)
+        let search = NSMenuItem(title: "Search for “\(text.prefix(40))”", action: #selector(selectionMenu(_:)), keyEquivalent: "")
+        search.target = self
+        menu.addItem(search)
+        return menu
+    }
+
+    @objc private func selectionMenu(_ sender: NSMenuItem) {
+        let title = sender.title
+        if title == "Highlight" { session.highlight(color: session.package.state.lastHighlightColor) }
+        else if title == "Note" { session.addNote() }
+        else if title.hasPrefix("Look Up") { session.lookUp() }
+        else if title == "Ask AI" { session.show(tab: .askAI) }
+        else if title == "Copy" {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(session.selection?.text ?? "", forType: .string)
+        } else if title == "Copy Link to Selection" {
+            let link = CopyLink.make(path: session.bookURL.path, page: session.selection?.page, cfi: session.selection?.cfi, quote: session.selection?.text ?? "")
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(link.url, forType: .string)
+        } else if title.hasPrefix("Search") {
+            session.findQuery = session.selection?.text ?? ""
+            toggleFind()
+        }
+    }
+
+    @objc private func recolorClicked(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        session.recolorAnnotation(id: id, color: sender.tag)
+    }
+
+    @objc private func noteClicked(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        session.openAnnotation(id)
+    }
+
+    @objc private func copyHighlightClicked(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String, let quote = session.annotations.first(where: { $0.id == id })?.quote else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(quote, forType: .string)
+    }
+
+    @objc private func copyLinkClicked(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String, let item = session.annotations.first(where: { $0.id == id }) else { return }
+        let link = CopyLink.make(path: session.bookURL.path, page: item.page, cfi: item.cfi, quote: item.quote)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(link.url, forType: .string)
+    }
+
+    @objc private func removeNoteClicked(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        session.removeNoteOnly(id: id)
     }
 
     @objc private func removeHighlightClicked(_ sender: NSMenuItem) {

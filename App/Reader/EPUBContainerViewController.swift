@@ -228,6 +228,9 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             sentence: body["sentence"] as? String ?? text,
             rects: []
         )
+        if session.settings.showSelectionBar {
+            (view.window?.windowController as? ReaderWindowController)?.showSelectionBar(relativeTo: NSRect(x: view.bounds.midX, y: view.bounds.midY, width: 2, height: 2))
+        }
     }
 
     private func showSpine(index: Int) {

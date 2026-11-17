@@ -17,6 +17,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     private var slideshowTimer: Timer?
     private var reappliedSavedFrame = false
     private let notePopover = NotePopoverController()
+    private let selectionBar = SelectionBarController()
     private var previousSidebar: SidebarMode = .thumbnails
     private let toastView = PassThroughView()
     private let toastLabel = NSTextField(labelWithString: "")
@@ -154,6 +155,9 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     private func installMonitor() {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, event.window === self.window else { return event }
+            if event.keyCode == 53 {
+                self.dismissSelectionBar()
+            }
             if self.slideshowTimer != nil, event.keyCode == 53 {
                 self.stopSlideshow()
                 return nil
@@ -236,11 +240,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     // MARK: Toolbar
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .flexibleSpace, .search, .inspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .flexibleSpace, .search, .inspector]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .flexibleSpace, .search, .inspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .flexibleSpace, .search, .inspector]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
@@ -260,6 +264,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             return item
         case .sidebarTrackingSeparator:
             return nil
+        case .highlight:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.view = highlightControl()
+            item.label = "Highlight"
+            return item
         case .search:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "Find")
@@ -293,6 +302,48 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         control.target = self
         control.action = #selector(sidebarSegmentClicked(_:))
         return control
+    }
+
+    private func highlightControl() -> NSSegmentedControl {
+        let control = NSSegmentedControl()
+        control.segmentCount = 2
+        control.trackingMode = .momentary
+        control.segmentStyle = .separated
+        control.setImage(NSImage(systemSymbolName: "highlighter", accessibilityDescription: "Highlight"), forSegment: 0)
+        control.setImage(NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "Highlight color"), forSegment: 1)
+        control.setWidth(32, forSegment: 0)
+        control.setWidth(18, forSegment: 1)
+        control.target = self
+        control.action = #selector(highlightSegment(_:))
+        return control
+    }
+
+    @objc private func highlightSegment(_ sender: NSSegmentedControl) {
+        if sender.selectedSegment == 0 {
+            highlightLast(sender)
+            return
+        }
+        let menu = NSMenu()
+        for index in 1...6 {
+            let item = NSMenuItem(title: "Color \(index)", action: #selector(highlightFromMenu(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let remove = NSMenuItem(title: "Remove Highlight", action: #selector(removeHighlightUnderSelection(_:)), keyEquivalent: "")
+        remove.target = self
+        menu.addItem(remove)
+        let origin = NSPoint(x: sender.width(forSegment: 0), y: sender.bounds.minY)
+        menu.popUp(positioning: nil, at: origin, in: sender)
+    }
+
+    @objc private func highlightFromMenu(_ sender: NSMenuItem) { highlight(sender.tag) }
+
+    @objc private func removeHighlightUnderSelection(_ sender: Any?) {
+        if let id = session.lastAnnotationHit {
+            session.removeAnnotationCompletely(id: id)
+        }
     }
 
     private func backForwardControl() -> NSSegmentedControl {
@@ -428,6 +479,13 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(session.annotationMarkdown(session.annotations), forType: .string)
     }
+
+    func showSelectionBar(relativeTo rect: NSRect) {
+        guard let host = pdfController?.noteHostView ?? epubController?.view else { return }
+        selectionBar.show(session: session, relativeTo: rect, of: host)
+    }
+
+    func dismissSelectionBar() { selectionBar.dismiss() }
 
     func presentNote(_ id: String) {
         let host = (pdfController?.view ?? epubController?.view) ?? window?.contentView
@@ -626,5 +684,6 @@ private extension NSToolbarItem.Identifier {
     static let sidebarModes = NSToolbarItem.Identifier("sidebarModes")
     static let backForward = NSToolbarItem.Identifier("backForward")
     static let search = NSToolbarItem.Identifier("search")
+    static let highlight = NSToolbarItem.Identifier("highlight")
     static let inspector = NSToolbarItem.Identifier("inspector")
 }
