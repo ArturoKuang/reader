@@ -191,6 +191,11 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let body = message.body as? [String: Any] else { return }
+        if body["kind"] as? String == "note", let id = body["id"] as? String {
+            session.lastAnnotationHit = id
+            session.openAnnotation(id)
+            return
+        }
         if body["kind"] as? String == "spine" {
             guard acceptSpineReports, let index = integer(body["index"]), let epub = session.epub, epub.spine.indices.contains(index) else { return }
             applySpine(index, count: epub.spine.count)
@@ -272,6 +277,16 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         return nil
     }
 
+    private func marginNoteScript() -> String {
+        let items = session.annotations.filter(\.hasNote).map { item -> String in
+            let quote = item.quote.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+            let body = item.body.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+            let color = String(format: "#%02X%02X%02X", Int((HighlightPalette.rgb(item.color)?.r ?? 0) * 255), Int((HighlightPalette.rgb(item.color)?.g ?? 0) * 255), Int((HighlightPalette.rgb(item.color)?.b ?? 0) * 255))
+            return "{\"id\":\"\(item.id)\",\"quote\":\"\(quote)\",\"body\":\"\(body)\",\"color\":\"\(color)\"}"
+        }
+        return "[\(items.joined(separator: ","))]"
+    }
+
     private func highlightScript() -> String {
         let items = session.highlights.compactMap { highlight -> String? in
             let quote = highlight.quote.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
@@ -343,7 +358,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         .reader-hl-6 { background: #F2994A59; }
         h2 { overflow-wrap: anywhere; }
         .reader-word { border-bottom: 1.5px dotted #666; }
-        .reader-note { border-left: 3px solid #888; margin: 8px 0; padding: 8px 10px; background: rgba(0,0,0,0.04); }
+        .reader-glyph { float: right; clear: right; border: 0; background: transparent; font-size: 14px; cursor: pointer; width: 16px; }
         .reader-concept { border-bottom: 1px solid #8e8e93; cursor: pointer; }
         .reader-badge { font: 10px -apple-system, sans-serif; margin-left: 3px; color: #8e8e93; cursor: pointer; }
         .reader-flash { background: #ffe08a; transition: background 1s; }
@@ -439,6 +454,27 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
           });
         };
         window.readerPaint(\(highlightScript()));
+        window.readerMarginNotes = function(notes) {
+          document.querySelectorAll(".reader-glyph").forEach(node => node.remove());
+          (notes || []).forEach(note => {
+            if (!note.quote) return;
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+            while (walker.nextNode()) {
+              const node = walker.currentNode;
+              if (!node.nodeValue || node.nodeValue.indexOf(note.quote) < 0 || !node.parentElement) continue;
+              const section = node.parentElement.closest("section") || document.body;
+              const mark = document.createElement("button");
+              mark.className = "reader-glyph";
+              mark.dataset.id = note.id;
+              mark.textContent = "●";
+              mark.style.color = note.color || "#888";
+              mark.title = (note.body || "").split("\\n")[0];
+              section.appendChild(mark);
+              break;
+            }
+          });
+        };
+        window.readerMarginNotes(\(marginNoteScript()));
         const concepts = \(conceptScript());
         if (\(session.showConceptMarkers ? "true" : "false")) {
           concepts.forEach(concept => {
@@ -475,6 +511,11 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
           });
         }
         document.addEventListener("click", event => {
+          const glyph = event.target.closest && event.target.closest(".reader-glyph");
+          if (glyph && glyph.dataset.id && window.webkit) {
+            window.webkit.messageHandlers.reader.postMessage({kind: "note", id: glyph.dataset.id});
+            return;
+          }
           const el = event.target.closest && event.target.closest(".reader-concept, .reader-badge");
           if (!el || !el.dataset.id || !window.webkit) return;
           window.webkit.messageHandlers.reader.postMessage({kind: "concept", id: el.dataset.id});

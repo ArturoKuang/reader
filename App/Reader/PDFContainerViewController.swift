@@ -75,6 +75,10 @@ final class PDFContainerViewController: NSViewController {
         pdfView.onMouseUp = { [weak self] in self?.captureSelection() }
         pdfView.highlightIDAt = { [weak self] point in self?.highlightID(atViewPoint: point) }
         pdfView.onRemoveHighlight = { [weak self] id in self?.session.deleteHighlight(id: id) }
+        pdfView.onOpenHighlight = { [weak self] id in
+            self?.session.lastAnnotationHit = id
+            self?.session.openAnnotation(id)
+        }
         pdfView.conceptAt = { [weak self] point in self?.conceptID(atViewPoint: point) }
         pdfView.onConcept = { [weak self] id in self?.presentConcept(id) }
         session.onAnnotationsChanged = { [weak self] in self?.refreshAnnotations() }
@@ -406,6 +410,18 @@ final class PDFContainerViewController: NSViewController {
         pdfView.go(to: rect, on: page)
     }
 
+    var noteHostView: NSView { pdfView }
+
+    func noteRect(for id: String) -> NSRect? {
+        guard let item = session.annotations.first(where: { $0.id == id || $0.highlight?.id == id || $0.note?.id == id }),
+              let pageNumber = item.page,
+              let page = pdfView.document?.page(at: pageNumber - 1) else { return nil }
+        if let string = page.string, let range = string.range(of: item.quote), let selection = page.selection(for: NSRange(range, in: string)) {
+            return pdfView.convert(selection.bounds(for: page), from: page)
+        }
+        return pdfView.convert(page.bounds(for: pdfView.displayBox), from: page)
+    }
+
     func consumePendingJump() {
         guard let link = session.pendingReaderLink else { return }
         session.pendingReaderLink = nil
@@ -547,12 +563,17 @@ final class ReaderPDFView: PDFView {
     var onMouseUp: (() -> Void)?
     var highlightIDAt: ((NSPoint) -> String?)?
     var onRemoveHighlight: ((String) -> Void)?
+    var onOpenHighlight: ((String) -> Void)?
     var conceptAt: ((NSPoint) -> String?)?
     var onConcept: ((String) -> Void)?
 
     override func mouseUp(with event: NSEvent) {
         super.mouseUp(with: event)
         let point = convert(event.locationInWindow, from: nil)
+        if let id = highlightIDAt?(point) {
+            onOpenHighlight?(id)
+            return
+        }
         if let id = conceptAt?(point) {
             onConcept?(id)
             return
@@ -588,7 +609,8 @@ final class ReaderPDFView: PDFView {
 final class NoteOverlay: NSView {
     weak var pdfView: PDFView?
     weak var session: ReaderSession?
-    private var markers: [NSButton] = []
+    private var glyphs: [String: NSImageView] = [:]
+    private var cards: [String: NSTextField] = [:]
 
     override var tag: Int { 77 }
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -599,51 +621,64 @@ final class NoteOverlay: NSView {
     override func layout() {
         super.layout()
         guard let pdfView, let session, let document = pdfView.document else { return }
-        markers.forEach { $0.removeFromSuperview() }
-        markers.removeAll()
-        subviews.filter { $0 is NSBox }.forEach { $0.removeFromSuperview() }
-        for note in session.notes {
-            guard let pageNumber = note.page, let page = document.page(at: pageNumber - 1) else { continue }
-            guard let string = page.string, let range = string.range(of: note.quote), let selection = page.selection(for: NSRange(range, in: string)) else { continue }
-            let bounds = pdfView.convert(selection.bounds(for: page), from: page)
-            let button = NSButton(title: session.expandedNotes.contains(note.id) ? "▾" : "▸", target: self, action: #selector(toggle(_:)))
-            button.identifier = NSUserInterfaceItemIdentifier(note.id)
-            button.bezelStyle = .inline
-            button.font = .systemFont(ofSize: 11)
-            button.frame = NSRect(x: bounds.maxX + 4, y: bounds.maxY - 16, width: 22, height: 18)
-            addSubview(button)
-            markers.append(button)
-            if session.expandedNotes.contains(note.id) {
-                let box = NSBox(frame: NSRect(x: bounds.minX, y: bounds.minY - 78, width: min(bounds.width, 420), height: 72))
-                box.boxType = .custom
-                box.fillColor = .controlBackgroundColor
-                box.borderColor = .controlAccentColor
-                box.borderWidth = 1
-                box.cornerRadius = 6
-                let text = NSTextField(frame: box.bounds.insetBy(dx: 8, dy: 8))
-                text.stringValue = note.body.isEmpty ? "Write a note…" : note.body
-                text.isEditable = true
-                text.isBordered = false
-                text.drawsBackground = false
-                text.font = .systemFont(ofSize: 12)
-                text.identifier = NSUserInterfaceItemIdentifier(note.id)
-                text.delegate = self
-                box.addSubview(text)
-                addSubview(box)
+        let notes = session.annotations.filter(\.hasNote)
+        let live = Set(notes.map(\.id))
+        for (id, view) in glyphs where !live.contains(id) { view.removeFromSuperview(); glyphs[id] = nil }
+        for (id, view) in cards where !live.contains(id) { view.removeFromSuperview(); cards[id] = nil }
+        for item in notes {
+            guard let pageNumber = item.page, let page = document.page(at: pageNumber - 1) else { continue }
+            let passage = rect(for: item, on: page, pdfView: pdfView) ?? pdfView.convert(page.bounds(for: pdfView.displayBox), from: page)
+            let pageRect = pdfView.convert(page.bounds(for: pdfView.displayBox), from: page)
+            let margin = bounds.maxX - pageRect.maxX
+            let showCard = session.showMarginNotes && margin >= 180
+            let glyph = glyphs[item.id] ?? makeGlyph(item)
+            glyphs[item.id] = glyph
+            let x = min(pageRect.maxX + 4, bounds.maxX - 18)
+            glyph.frame = NSRect(x: x, y: passage.maxY - 16, width: 14, height: 14)
+            glyph.toolTip = item.body.split(whereSeparator: \.isNewline).first.map(String.init) ?? item.quote
+            if showCard {
+                let card = cards[item.id] ?? makeCard(item)
+                cards[item.id] = card
+                card.stringValue = item.body
+                card.frame = NSRect(x: pageRect.maxX + 22, y: passage.maxY - 58, width: min(margin - 28, 220), height: 54)
+            } else {
+                cards[item.id]?.removeFromSuperview()
+                cards[item.id] = nil
             }
         }
     }
 
-    @objc private func toggle(_ sender: NSButton) {
-        guard let id = sender.identifier?.rawValue else { return }
-        session?.toggleNote(id)
-        needsLayout = true
+    private func makeGlyph(_ item: Annotation) -> NSImageView {
+        let image = NSImageView()
+        image.image = NSImage(systemSymbolName: "text.bubble.fill", accessibilityDescription: "Note")
+        image.contentTintColor = ReaderColor.nsColor(item.color)
+        image.imageScaling = .scaleProportionallyUpOrDown
+        image.identifier = NSUserInterfaceItemIdentifier(item.id)
+        let click = NSClickGestureRecognizer(target: self, action: #selector(open(_:)))
+        image.addGestureRecognizer(click)
+        addSubview(image)
+        return image
     }
-}
 
-extension NoteOverlay: NSTextFieldDelegate {
-    func controlTextDidEndEditing(_ obj: Notification) {
-        guard let field = obj.object as? NSTextField, let id = field.identifier?.rawValue else { return }
-        session?.updateNote(id: id, body: field.stringValue)
+    private func makeCard(_ item: Annotation) -> NSTextField {
+        let field = NSTextField(labelWithString: item.body)
+        field.font = .systemFont(ofSize: 11)
+        field.maximumNumberOfLines = 3
+        field.lineBreakMode = .byTruncatingTail
+        field.textColor = .labelColor
+        field.identifier = NSUserInterfaceItemIdentifier(item.id)
+        addSubview(field)
+        return field
+    }
+
+    private func rect(for item: Annotation, on page: PDFPage, pdfView: PDFView) -> NSRect? {
+        guard let string = page.string, let range = string.range(of: item.quote), let selection = page.selection(for: NSRange(range, in: string)) else { return nil }
+        return pdfView.convert(selection.bounds(for: page), from: page)
+    }
+
+    @objc private func open(_ sender: NSClickGestureRecognizer) {
+        guard let id = (sender.view as? NSImageView)?.identifier?.rawValue else { return }
+        session?.lastAnnotationHit = id
+        session?.openAnnotation(id)
     }
 }

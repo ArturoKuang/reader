@@ -85,7 +85,11 @@ final class VaultCoordinator {
                 for block in VaultNoteFile.blocks(text) {
                     ids.insert(block.id)
                     if let color = block.color {
-                        highlights.append(HighlightEntry(id: block.id, color: color, page: nil, cfi: block.link.location, quote: block.quote, section: chapter.map { "Chapter \($0)" }, noteID: block.body.isEmpty ? nil : block.id))
+                        let linked = !block.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        highlights.append(HighlightEntry(id: block.id, color: color, page: nil, cfi: block.link.location, quote: block.quote, section: chapter.map { "Chapter \($0)" }, noteID: linked ? block.id : nil))
+                        if linked {
+                            notes.append(NoteEntry(id: block.id, cfi: block.link.location, quote: block.quote, section: chapter.map { "Chapter \($0)" }, body: block.body))
+                        }
                     } else {
                         notes.append(NoteEntry(id: block.id, cfi: block.link.location, quote: block.quote, section: chapter.map { "Chapter \($0)" }, body: block.body))
                     }
@@ -178,26 +182,17 @@ final class VaultCoordinator {
         let directory = VaultPaths.notesDirectory(bookFolder: location.bookFolder, settings: settings)
         try? fs.createDirectory(directory)
         let title = session.bookURL.deletingPathExtension().lastPathComponent
-        var grouped: [String: [VaultNoteBlock]] = [:]
-        for note in session.notes {
-            let chapter = ChapterFiles.number(in: note.section ?? "")
+        var grouped: [String: [Annotation]] = [:]
+        for item in AnnotationIndex.items(highlights: session.highlights, notes: session.notes) {
+            let chapter = ChapterFiles.number(in: item.section ?? "")
             let name = ChapterFiles.notesFile(chapter: chapter, bookTitle: title)
-            grouped[name, default: []].append(block(id: note.id, quote: note.quote, body: note.body, color: nil, path: session.bookURL.path, location: anchor(cfi: note.cfi, page: note.page), chapter: chapter))
+            grouped[name, default: []].append(item)
         }
-        for highlight in session.highlights {
-            let chapter = ChapterFiles.number(in: highlight.section ?? "")
-            let name = ChapterFiles.notesFile(chapter: chapter, bookTitle: title)
-            let note = highlight.noteID.flatMap { id in session.notes.first { $0.id == id }?.body } ?? ""
-            grouped[name, default: []].append(block(id: highlight.id, quote: highlight.quote, body: note, color: highlight.color, path: session.bookURL.path, location: anchor(cfi: highlight.cfi, page: highlight.page), chapter: chapter))
-        }
-        var touched: Set<String> = []
-        for (name, blocks) in grouped {
+        for (name, items) in grouped {
             let path = Paths.join(directory, name)
             let text = (try? fs.readString(path)) ?? ""
-            let written = VaultNoteFile.upsertPreservingLocations(text, blocks: blocks)
-            for item in blocks { loadedBlockIDs.insert(item.id) }
+            let written = VaultAnnotationSync.render(existing: text, bookPath: session.bookURL.path, annotations: items)
             writeIfChanged(path, written)
-            touched.insert(path)
         }
         if let names = try? fs.list(directory) {
             for name in names where name.hasSuffix(".md") {

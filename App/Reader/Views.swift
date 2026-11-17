@@ -118,34 +118,13 @@ struct SidebarView: View {
     }
 
     private var annotationList: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 10) {
-                ForEach(session.highlights) { highlight in
-                    HStack(alignment: .top, spacing: 8) {
-                        RoundedRectangle(cornerRadius: 2).fill(Color(nsColor: ReaderColor.nsColor(highlight.color))).frame(width: 4)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(highlight.page.map { "p. \($0)" } ?? highlight.section ?? "").font(.caption).foregroundStyle(.secondary)
-                            Text(highlight.quote).font(.callout).lineLimit(4)
-                        }
-                    }
-                    .onTapGesture { if let page = highlight.page { jump(page: page) } }
-                    .contextMenu {
-                        Button("Remove Highlight") { session.deleteHighlight(id: highlight.id) }
-                    }
-                }
-                ForEach(session.notes) { note in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(note.page.map { "Note · p. \($0)" } ?? "Note").font(.caption).foregroundStyle(.secondary)
-                        Text(note.body.isEmpty ? note.quote : note.body).font(.callout).lineLimit(4)
-                    }
-                    .onTapGesture { if let page = note.page { jump(page: page) } }
-                }
-                if session.highlights.isEmpty && session.notes.isEmpty {
-                    Text("No highlights or notes yet.").font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            .padding(10)
-        }
+        AnnotationBrowser(session: session) { item in jumpAnnotation(item) }
+            .padding(8)
+    }
+
+    private func jumpAnnotation(_ item: Annotation) {
+        guard let controller = NSApp.keyWindow?.windowController as? ReaderWindowController else { return }
+        controller.reveal(ReadingPosition(page: item.page, cfi: item.cfi, section: item.section, quote: item.quote))
     }
 
     private var bookmarkList: some View {
@@ -290,14 +269,12 @@ struct EPUBContactSheet: View {
 
 struct RightPanelView: View {
     @ObservedObject var session: ReaderSession
-    @FocusState private var noteFieldFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Picker("Panel", selection: $session.panelTab) {
-                Text("Notes \(session.notes.count)").tag(PanelTab.notes)
+                Text("Notes \(session.annotations.count)").tag(PanelTab.notes)
                 Text("Words \(session.words.count)").tag(PanelTab.words)
-                Text("Highlights \(session.highlights.count)").tag(PanelTab.highlights)
                 Text("Ask AI").tag(PanelTab.askAI)
             }
             .pickerStyle(.segmented)
@@ -307,9 +284,10 @@ struct RightPanelView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     switch session.panelTab {
-                    case .notes: notes
+                    case .notes, .highlights:
+                        AnnotationBrowser(session: session) { item in jumpAnnotation(item) }
+                            .frame(minHeight: 280)
                     case .words: words
-                    case .highlights: highlights
                     case .askAI: ask
                     }
                 }
@@ -319,76 +297,9 @@ struct RightPanelView: View {
         }
     }
 
-    private var notes: some View {
-        Group {
-            if session.notes.isEmpty { Text("Select a passage and press ⇧⌘N.").foregroundStyle(.secondary) }
-            ForEach(session.notes) { note in
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(note.page.map { "p. \($0)" } ?? note.section ?? "").font(.caption).foregroundStyle(.secondary)
-                    Text("“\(note.quote)”").font(.callout).italic().foregroundStyle(.secondary)
-                    Text(note.body).font(.body)
-                    if note.ai { Text("AI suggestion").font(.caption) }
-                }
-                .onTapGesture { session.toggleNote(note.id) }
-            }
-            if session.usesVault {
-                vaultMapping
-                conceptComposer
-            }
-        }
-    }
-
-    private var vaultMapping: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Toggle("Write notes into this vault", isOn: $session.vaultEnabled)
-                .onChange(of: session.vaultEnabled) { _, _ in session.onSaveVaultState?() }
-            TextField("Notes folder", text: $session.vaultNotesFolder)
-                .textFieldStyle(.roundedBorder)
-                .onSubmit { session.onSaveVaultState?() }
-            TextField("Vocabulary file", text: $session.vaultVocabularyFile)
-                .textFieldStyle(.roundedBorder)
-                .onSubmit { session.onSaveVaultState?() }
-        }
-    }
-
-    private var conceptComposer: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            TextField("Write a note. Type [[ for a concept", text: $session.noteDraft)
-                .textFieldStyle(.roundedBorder)
-                .focused($noteFieldFocused)
-                .onSubmit { session.commitNoteDraft() }
-                .onKeyPress(.return, phases: .down) { press in
-                    if press.modifiers.contains(.command) {
-                        session.commitNoteDraft()
-                        return .handled
-                    }
-                    return .ignored
-                }
-                .onChange(of: noteFieldFocused) { _, focused in
-                    if !focused {
-                        DispatchQueue.main.async { session.commitNoteDraft() }
-                    }
-                }
-            if let query = conceptQuery(session.noteDraft) {
-                ForEach(Array(ConceptsFile.autocomplete(prefix: query, concepts: session.concepts).prefix(6))) { concept in
-                    Button(concept.wiki) {
-                        session.onInsertConcept?(concept)
-                        if let range = session.noteDraft.range(of: "[[", options: .backwards) {
-                            session.noteDraft.replaceSubrange(range.lowerBound..<session.noteDraft.endIndex, with: concept.wiki)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .help(conceptHelp(concept))
-                }
-            }
-        }
-    }
-
-    private func conceptQuery(_ text: String) -> String? {
-        guard let range = text.range(of: "[[", options: .backwards) else { return nil }
-        let rest = String(text[range.upperBound...])
-        if rest.contains("]]") { return nil }
-        return rest
+    private func jumpAnnotation(_ item: Annotation) {
+        guard let controller = NSApp.keyWindow?.windowController as? ReaderWindowController else { return }
+        controller.reveal(ReadingPosition(page: item.page, cfi: item.cfi, section: item.section, quote: item.quote))
     }
 
     private var words: some View {

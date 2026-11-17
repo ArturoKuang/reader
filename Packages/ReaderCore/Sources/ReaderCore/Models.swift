@@ -93,6 +93,8 @@ public struct ViewState: Codable, Equatable, Sendable {
     public var lastHighlightColor: Int
     /// Window frame in screen points. Older sidecars omit this.
     public var windowFrame: StoredWindowFrame?
+    /// When true, notes draw as margin cards if the page has room. Older sidecars omit this.
+    public var showMarginNotes: Bool
 
     public init(
         version: Int = 1,
@@ -108,7 +110,8 @@ public struct ViewState: Codable, Equatable, Sendable {
         rotations: [String: Int] = [:],
         bookmarks: [Bookmark] = [],
         lastHighlightColor: Int = 1,
-        windowFrame: StoredWindowFrame? = nil
+        windowFrame: StoredWindowFrame? = nil,
+        showMarginNotes: Bool = false
     ) {
         self.version = version
         self.page = page
@@ -124,13 +127,14 @@ public struct ViewState: Codable, Equatable, Sendable {
         self.bookmarks = bookmarks
         self.lastHighlightColor = lastHighlightColor
         self.windowFrame = windowFrame
+        self.showMarginNotes = showMarginNotes
     }
 
     public static var fresh: ViewState { ViewState() }
 
     private enum CodingKeys: String, CodingKey {
         case version, page, scrollY, zoom, fitMode, continuous, twoPages
-        case sidebar, panelVisible, panelTab, rotations, bookmarks, lastHighlightColor, windowFrame
+        case sidebar, panelVisible, panelTab, rotations, bookmarks, lastHighlightColor, windowFrame, showMarginNotes
     }
 
     public init(from decoder: Decoder) throws {
@@ -149,6 +153,26 @@ public struct ViewState: Codable, Equatable, Sendable {
         bookmarks = try container.decodeIfPresent([Bookmark].self, forKey: .bookmarks) ?? []
         lastHighlightColor = try container.decodeIfPresent(Int.self, forKey: .lastHighlightColor) ?? 1
         windowFrame = try container.decodeIfPresent(StoredWindowFrame.self, forKey: .windowFrame)
+        showMarginNotes = try container.decodeIfPresent(Bool.self, forKey: .showMarginNotes) ?? false
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(version, forKey: .version)
+        try container.encode(page, forKey: .page)
+        try container.encodeIfPresent(scrollY, forKey: .scrollY)
+        try container.encode(zoom, forKey: .zoom)
+        try container.encode(fitMode, forKey: .fitMode)
+        try container.encode(continuous, forKey: .continuous)
+        try container.encode(twoPages, forKey: .twoPages)
+        try container.encode(sidebar, forKey: .sidebar)
+        try container.encode(panelVisible, forKey: .panelVisible)
+        try container.encode(panelTab, forKey: .panelTab)
+        try container.encode(rotations, forKey: .rotations)
+        try container.encode(bookmarks, forKey: .bookmarks)
+        try container.encode(lastHighlightColor, forKey: .lastHighlightColor)
+        try container.encodeIfPresent(windowFrame, forKey: .windowFrame)
+        try container.encode(showMarginNotes, forKey: .showMarginNotes)
     }
 }
 

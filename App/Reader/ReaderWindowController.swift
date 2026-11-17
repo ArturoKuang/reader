@@ -1,6 +1,7 @@
 import AppKit
 import ReaderCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWindowDelegate {
     let session: ReaderSession
@@ -15,6 +16,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     private var panelItem: NSSplitViewItem?
     private var slideshowTimer: Timer?
     private var reappliedSavedFrame = false
+    private let notePopover = NotePopoverController()
     private var previousSidebar: SidebarMode = .thumbnails
     private let toastView = PassThroughView()
     private let toastLabel = NSTextField(labelWithString: "")
@@ -51,6 +53,12 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         installToast()
         session.onToast = { [weak self] text in
             self?.presentToast(text)
+        }
+        session.onPresentNote = { [weak self] id in
+            self?.presentNote(id)
+        }
+        session.onRevealInObsidian = { [weak self] in
+            self?.revealInObsidian(nil)
         }
         session.onCaptureSelection = { [weak self] done in
             guard let self else { done(); return }
@@ -406,8 +414,28 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     @objc func showWordsTab(_ sender: Any?) { session.show(tab: .words); applyChrome() }
     @objc func showHighlightsTab(_ sender: Any?) { session.show(tab: .highlights); applyChrome() }
     @objc func showAskTab(_ sender: Any?) { session.show(tab: .askAI); applyChrome() }
-    @objc func expandAllNotes(_ sender: Any?) { session.expandAllNotes(); pdfController?.refreshAnnotations(); applyChrome() }
-    @objc func collapseAllNotes(_ sender: Any?) { session.collapseAllNotes(); pdfController?.refreshAnnotations(); applyChrome() }
+    @objc func showMarginNotes(_ sender: Any?) { session.toggleMarginNotes(); applyChrome() }
+    @objc func exportNotes(_ sender: Any?) {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.plainText]
+        panel.nameFieldStringValue = session.bookURL.deletingPathExtension().lastPathComponent + " notes.md"
+        panel.begin { [weak self] response in
+            guard response == .OK, let self, let url = panel.url else { return }
+            try? self.session.annotationMarkdown(self.session.annotations).write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+    @objc func copyAllNotes(_ sender: Any?) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(session.annotationMarkdown(session.annotations), forType: .string)
+    }
+
+    func presentNote(_ id: String) {
+        let host = (pdfController?.view ?? epubController?.view) ?? window?.contentView
+        guard let host else { return }
+        let hostView = pdfController?.noteHostView ?? host
+        let rect = pdfController?.noteRect(for: id) ?? NSRect(x: hostView.bounds.midX, y: hostView.bounds.midY, width: 1, height: 1)
+        notePopover.show(id: id, session: session, relativeTo: rect, of: hostView)
+    }
     @objc func slideshow(_ sender: Any?) {
         if slideshowTimer != nil { stopSlideshow(); return }
         window?.toggleFullScreen(nil)
@@ -470,7 +498,13 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     @objc func addNote(_ sender: Any?) {
         session.withSelection { [weak self] in
             guard let self else { return }
-            self.session.addNote()
+            if self.session.selection?.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                self.session.addNote()
+            } else if let hit = self.session.lastAnnotationHit {
+                self.session.openAnnotation(hit)
+            } else {
+                NSSound.beep()
+            }
             self.pdfController?.refreshAnnotations()
             self.applyChrome()
         }
@@ -546,6 +580,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         case #selector(showContactSheet(_:)): menuItem.state = readingLayout == .contact ? .on : .off
         case #selector(togglePanel(_:)): menuItem.state = session.panelVisible ? .on : .off
         case #selector(toggleConceptMarkers(_:)): menuItem.state = session.showConceptMarkers ? .on : .off
+        case #selector(showMarginNotes(_:)): menuItem.state = session.showMarginNotes ? .on : .off
         default: break
         }
         return true

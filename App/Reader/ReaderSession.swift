@@ -55,6 +55,15 @@ final class ReaderSession: ObservableObject {
     @Published var findQuery: String = ""
     @Published var findMatches: [String] = []
     @Published var expandedNotes: Set<String> = []
+    @Published var annotationQuery = ""
+    @Published var annotationFilter = "all"
+    @Published var annotationSortRecent = false
+    @Published var annotationRevision = 0
+    @Published var showMarginNotes = false
+    var onPresentNote: ((String) -> Void)?
+    var onRevealInObsidian: (() -> Void)?
+    private var noteSaveTimer: Timer?
+    private var pendingNoteBodies: [String: String] = [:]
     @Published var provider: ProviderID
     @Published var settings: AISettings
 
@@ -106,6 +115,7 @@ final class ReaderSession: ObservableObject {
         self.fitMode = state.fitMode
         self.zoom = state.zoom
         self.page = max(state.page, 1)
+        self.showMarginNotes = state.showMarginNotes
         self.pageCount = 1
         self.sectionTitle = ""
         self.outline = []
@@ -286,13 +296,7 @@ final class ReaderSession: ObservableObject {
     }
 
     func deleteHighlight(id: String) {
-        guard let removed = package.highlights.removeHighlight(id: id) else { return }
-        undoManager?.registerUndo(withTarget: self) { session in
-            session.restoreHighlight(removed)
-        }
-        undoManager?.setActionName("Remove Highlight")
-        onAnnotationsChanged?()
-        dirty()
+        removeAnnotationCompletely(id: id)
     }
 
     func restoreHighlight(_ entry: HighlightEntry) {
@@ -330,39 +334,36 @@ final class ReaderSession: ObservableObject {
         guard let selection, !selection.text.isEmpty else { return }
         let typed = noteDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         let text = body.isEmpty ? typed : body
-        let entry = NoteEntry(
-            id: IDs.make("n"),
-            page: selection.page,
-            cfi: selection.cfi,
-            quote: selection.text,
-            prefix: selection.prefix,
-            suffix: selection.suffix,
-            section: selection.section,
-            created: ISO8601DateFormatter().string(from: Date()),
-            ai: ai,
-            provider: provider,
-            scope: "passage",
-            body: text
-        )
-        if body.isEmpty { noteDraft = "" }
-        package.notes.notes.append(entry)
-        expandedNotes.insert(entry.id)
+        let anchor = AnnotationAnchor(text: selection.text, page: selection.page, cfi: selection.cfi, section: selection.section ?? sectionTitle, prefix: selection.prefix, suffix: selection.suffix, rects: selection.rects)
+        var opened: String?
+        editAnnotations("Add Note") {
+            let created = AnnotationEdit.addNote(toSelection: anchor, color: package.state.lastHighlightColor, highlightID: IDs.make("h"), noteID: IDs.make("n"), now: ISO8601DateFormatter().string(from: Date()), package: &package)
+            if let noteID = created.note?.id, !text.isEmpty {
+                AnnotationEdit.updateNoteBody(id: noteID, body: text, now: ISO8601DateFormatter().string(from: Date()), package: &package)
+                if let index = package.notes.notes.firstIndex(where: { $0.id == noteID }) {
+                    package.notes.notes[index].ai = ai
+                    package.notes.notes[index].provider = provider
+                }
+            }
+            opened = created.highlight?.id ?? created.note?.id
+        }
+        noteDraft = ""
         show(tab: .notes)
-        dirty()
+        if let opened {
+            lastAnnotationHit = opened
+            onPresentNote?(opened)
+        }
     }
 
     func updateNote(id: String, body: String) {
-        guard let index = package.notes.notes.firstIndex(where: { $0.id == id }) else { return }
-        package.notes.notes[index].body = body
-        package.notes.notes[index].updated = ISO8601DateFormatter().string(from: Date())
-        dirty()
+        queueNoteBody(id: id, body: body)
     }
 
     func deleteNote(id: String) {
-        package.notes.notes.removeAll { $0.id == id }
-        expandedNotes.remove(id)
-        dirty()
+        removeNoteOnly(id: id)
     }
+
+    var lastAnnotationHit: String?
 
     func toggleNote(_ id: String) {
         if expandedNotes.contains(id) { expandedNotes.remove(id) } else { expandedNotes.insert(id) }
@@ -700,6 +701,129 @@ final class ReaderSession: ObservableObject {
         package.state.sidebar = sidebar
         package.state.panelVisible = panelVisible
         package.state.panelTab = panelTab
+        package.state.showMarginNotes = showMarginNotes
+    }
+
+    var annotations: [Annotation] {
+        AnnotationIndex.items(highlights: highlights, notes: notes)
+    }
+
+    var visibleAnnotations: [Annotation] {
+        let kind: AnnotationKind
+        if annotationFilter == "notes" {
+            kind = .notes
+        } else if let color = Int(annotationFilter) {
+            kind = .color(color)
+        } else {
+            kind = .all
+        }
+        let filtered = AnnotationIndex.filter(AnnotationIndex.filter(annotations, kind: kind), query: annotationQuery)
+        return AnnotationIndex.sort(filtered, annotationSortRecent ? .recentlyEdited : .position)
+    }
+
+    func editAnnotations(_ name: String, _ change: () -> Void) {
+        let previousHighlights = package.highlights.highlights
+        let previousNotes = package.notes.notes
+        let previousColor = package.state.lastHighlightColor
+        change()
+        undoManager?.registerUndo(withTarget: self) { session in
+            session.editAnnotations(name) {
+                session.package.highlights.highlights = previousHighlights
+                session.package.notes.notes = previousNotes
+                session.package.state.lastHighlightColor = previousColor
+            }
+        }
+        undoManager?.setActionName(name)
+        annotationRevision += 1
+        onAnnotationsChanged?()
+        dirty()
+    }
+
+    @discardableResult
+    func addAnnotationNote() -> Bool {
+        guard let selection, !selection.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        let anchor = AnnotationAnchor(text: selection.text, page: selection.page, cfi: selection.cfi, section: selection.section ?? sectionTitle, prefix: selection.prefix, suffix: selection.suffix, rects: selection.rects)
+        var opened: String?
+        editAnnotations("Add Note") {
+            let created = AnnotationEdit.addNote(toSelection: anchor, color: package.state.lastHighlightColor, highlightID: IDs.make("h"), noteID: IDs.make("n"), now: ISO8601DateFormatter().string(from: Date()), package: &package)
+            opened = created.highlight?.id ?? created.note?.id
+        }
+        if let opened { onPresentNote?(opened) }
+        show(tab: .notes)
+        return opened != nil
+    }
+
+    func openAnnotation(_ id: String) {
+        if let highlight = highlights.first(where: { $0.id == id }), highlight.noteID == nil {
+            onPresentNote?(id)
+            return
+        }
+        onPresentNote?(id)
+    }
+
+    func queueNoteBody(id: String, body: String) {
+        pendingNoteBodies[id] = body
+        noteSaveTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.3, repeats: false) { [weak self] _ in
+            self?.flushNoteBodies()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        noteSaveTimer = timer
+    }
+
+    func flushNoteBodies() {
+        noteSaveTimer?.invalidate()
+        let pending = pendingNoteBodies
+        pendingNoteBodies = [:]
+        guard !pending.isEmpty else { return }
+        editAnnotations("Edit Note") {
+            for (id, body) in pending {
+                if notes.contains(where: { $0.id == id }) {
+                    AnnotationEdit.updateNoteBody(id: id, body: body, now: ISO8601DateFormatter().string(from: Date()), package: &package)
+                } else if let highlight = highlights.first(where: { $0.id == id || $0.noteID == id }), !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let noteID = highlight.noteID ?? IDs.make("n")
+                    AnnotationEdit.addNote(toHighlight: highlight.id, noteID: noteID, now: ISO8601DateFormatter().string(from: Date()), package: &package)
+                    AnnotationEdit.updateNoteBody(id: noteID, body: body, now: ISO8601DateFormatter().string(from: Date()), package: &package)
+                }
+            }
+        }
+    }
+
+    func recolorAnnotation(id: String, color: Int) {
+        editAnnotations("Recolor Highlight") {
+            AnnotationEdit.recolor(id: id, color: color, package: &package)
+        }
+    }
+
+    func removeNoteOnly(id: String) {
+        editAnnotations("Remove Note") {
+            if let highlight = highlights.first(where: { $0.id == id }), let noteID = highlight.noteID {
+                AnnotationEdit.removeNote(id: noteID, package: &package)
+            } else {
+                AnnotationEdit.removeNote(id: id, package: &package)
+            }
+        }
+    }
+
+    func removeAnnotationCompletely(id: String) {
+        editAnnotations("Remove Highlight") {
+            if highlights.contains(where: { $0.id == id }) {
+                AnnotationEdit.removeHighlightAndNote(id: id, package: &package)
+            } else {
+                AnnotationEdit.removeNote(id: id, package: &package)
+            }
+        }
+    }
+
+    func toggleMarginNotes() {
+        showMarginNotes.toggle()
+        package.state.showMarginNotes = showMarginNotes
+        onAnnotationsChanged?()
+        saveViewQuietly()
+    }
+
+    func annotationMarkdown(_ items: [Annotation]) -> String {
+        AnnotationExport.markdown(book: bookURL.deletingPathExtension().lastPathComponent, items: items, path: bookURL.path)
     }
 
     private func locationLabel(_ selection: SelectionContext) -> String {
