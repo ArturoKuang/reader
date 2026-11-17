@@ -383,7 +383,7 @@ struct RightPanelView: View {
             TextEditor(text: $session.question)
                 .font(.body)
                 .frame(minHeight: 44, maxHeight: 80)
-                .onKeyPress(.return) { press in
+                .onKeyPress(keys: [.return], phases: .down) { press in
                     if press.modifiers.contains(.shift) { return .ignored }
                     session.withSelection { session.askCurrentQuestion() }
                     return .handled
