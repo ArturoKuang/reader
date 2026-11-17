@@ -270,7 +270,7 @@ struct EPUBContactSheet: View {
 
 struct RightPanelView: View {
     @ObservedObject var session: ReaderSession
-    @State private var noteDraft = ""
+    @FocusState private var noteFieldFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -333,14 +333,28 @@ struct RightPanelView: View {
 
     private var conceptComposer: some View {
         VStack(alignment: .leading, spacing: 4) {
-            TextField("Write a note. Type [[ for a concept", text: $noteDraft)
+            TextField("Write a note. Type [[ for a concept", text: $session.noteDraft)
                 .textFieldStyle(.roundedBorder)
-            if let query = conceptQuery(noteDraft) {
+                .focused($noteFieldFocused)
+                .onSubmit { session.commitNoteDraft() }
+                .onKeyPress(.return, phases: .down) { press in
+                    if press.modifiers.contains(.command) {
+                        session.commitNoteDraft()
+                        return .handled
+                    }
+                    return .ignored
+                }
+                .onChange(of: noteFieldFocused) { _, focused in
+                    if !focused {
+                        DispatchQueue.main.async { session.commitNoteDraft() }
+                    }
+                }
+            if let query = conceptQuery(session.noteDraft) {
                 ForEach(Array(ConceptsFile.autocomplete(prefix: query, concepts: session.concepts).prefix(6))) { concept in
                     Button(concept.wiki) {
                         session.onInsertConcept?(concept)
-                        if let range = noteDraft.range(of: "[[", options: .backwards) {
-                            noteDraft.replaceSubrange(range.lowerBound..<noteDraft.endIndex, with: concept.wiki)
+                        if let range = session.noteDraft.range(of: "[[", options: .backwards) {
+                            session.noteDraft.replaceSubrange(range.lowerBound..<session.noteDraft.endIndex, with: concept.wiki)
                         }
                     }
                     .buttonStyle(.plain)

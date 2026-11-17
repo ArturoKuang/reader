@@ -33,6 +33,7 @@ final class ReaderSession: ObservableObject {
     @Published var vaultNotesFolder = "notes"
     @Published var vaultVocabularyFile = ""
     @Published var vaultEnabled = true
+    @Published var noteDraft = ""
     var pendingReaderLink: ReaderLink?
     @Published var sidebar: SidebarMode
     @Published var panelVisible: Bool
@@ -304,8 +305,18 @@ final class ReaderSession: ObservableObject {
         highlight(color: package.state.lastHighlightColor)
     }
 
+    func commitNoteDraft() {
+        let text = noteDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        let before = package.notes.notes.count
+        addNote(body: text)
+        if package.notes.notes.count != before { noteDraft = "" }
+    }
+
     func addNote(body: String = "", ai: Bool = false, provider: String? = nil) {
         guard let selection, !selection.text.isEmpty else { return }
+        let typed = noteDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = body.isEmpty ? typed : body
         let entry = NoteEntry(
             id: IDs.make("n"),
             page: selection.page,
@@ -318,8 +329,9 @@ final class ReaderSession: ObservableObject {
             ai: ai,
             provider: provider,
             scope: "passage",
-            body: body
+            body: text
         )
+        if body.isEmpty { noteDraft = "" }
         package.notes.notes.append(entry)
         expandedNotes.insert(entry.id)
         show(tab: .notes)
