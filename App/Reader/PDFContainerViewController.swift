@@ -81,6 +81,9 @@ final class PDFContainerViewController: NSViewController {
         }
         pdfView.conceptAt = { [weak self] point in self?.conceptID(atViewPoint: point) }
         pdfView.onConcept = { [weak self] id in self?.presentConcept(id) }
+        pdfView.session = session
+        pdfView.prepareSelection = { [weak self] in self?.captureSelection(showBar: false) }
+        pdfView.beginFind = { [weak self] in self?.toggleFind() }
         session.onAnnotationsChanged = { [weak self] in self?.refreshAnnotations() }
         refreshAnnotations()
     }
@@ -304,7 +307,7 @@ final class PDFContainerViewController: NSViewController {
         pdfView.scrollSelectionToVisible(nil)
     }
 
-    func captureSelection() {
+    func captureSelection(showBar: Bool = true) {
         guard let selection = pdfView.currentSelection, let text = selection.string?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return }
         let page = selection.pages.first
         let pageNumber = page.flatMap { pdfView.document?.index(for: $0) }.map { $0 + 1 }
@@ -326,7 +329,7 @@ final class PDFContainerViewController: NSViewController {
             sentence: span?.sentence ?? text,
             rects: rects
         )
-        if session.settings.showSelectionBar, let page = pdfView.currentPage {
+        if showBar, session.settings.showSelectionBar, let page = pdfView.currentPage {
             let rect: NSRect
             if let first = rects.first, first.count >= 4 {
                 rect = pdfView.convert(NSRect(x: first[0], y: first[1], width: max(first[2] - first[0], 8), height: max(first[3] - first[1], 8)), from: page)
@@ -585,12 +588,15 @@ final class PDFContainerViewController: NSViewController {
 }
 
 final class ReaderPDFView: PDFView {
+    weak var session: ReaderSession?
     var onMouseUp: (() -> Void)?
     var highlightIDAt: ((NSPoint) -> String?)?
     var onRemoveHighlight: ((String) -> Void)?
     var onOpenHighlight: ((String) -> Void)?
     var conceptAt: ((NSPoint) -> String?)?
     var onConcept: ((String) -> Void)?
+    var prepareSelection: (() -> Void)?
+    var beginFind: (() -> Void)?
 
     override func mouseUp(with event: NSEvent) {
         super.mouseUp(with: event)
@@ -633,7 +639,7 @@ final class ReaderPDFView: PDFView {
             link.target = self
             link.representedObject = id
             menu.addItem(link)
-            if session.annotations.first(where: { $0.id == id })?.hasNote == true {
+            if session?.annotations.first(where: { $0.id == id })?.hasNote == true {
                 let removeNote = NSMenuItem(title: "Remove Note", action: #selector(removeNoteClicked(_:)), keyEquivalent: "")
                 removeNote.target = self
                 removeNote.representedObject = id
@@ -653,8 +659,8 @@ final class ReaderPDFView: PDFView {
         let menu = NSMenu()
         let point = convert(event.locationInWindow, from: nil)
         if highlightIDAt?(point) != nil { return nil }
-        captureSelection()
-        guard let text = session.selection?.text, !text.isEmpty else { return super.menu(for: event) }
+        prepareSelection?()
+        guard let session, let text = session.selection?.text, !text.isEmpty else { return super.menu(for: event) }
         for title in ["Highlight", "Note", "Look Up", "Ask AI", "Copy"] {
             let item = NSMenuItem(title: title, action: #selector(selectionMenu(_:)), keyEquivalent: "")
             item.target = self
@@ -674,6 +680,7 @@ final class ReaderPDFView: PDFView {
     }
 
     @objc private func selectionMenu(_ sender: NSMenuItem) {
+        guard let session else { return }
         let title = sender.title
         if title == "Highlight" { session.highlight(color: session.package.state.lastHighlightColor) }
         else if title == "Note" { session.addNote() }
@@ -688,35 +695,35 @@ final class ReaderPDFView: PDFView {
             NSPasteboard.general.setString(link.url, forType: .string)
         } else if title.hasPrefix("Search") {
             session.findQuery = session.selection?.text ?? ""
-            toggleFind()
+            beginFind?()
         }
     }
 
     @objc private func recolorClicked(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String else { return }
+        guard let session, let id = sender.representedObject as? String else { return }
         session.recolorAnnotation(id: id, color: sender.tag)
     }
 
     @objc private func noteClicked(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String else { return }
+        guard let session, let id = sender.representedObject as? String else { return }
         session.openAnnotation(id)
     }
 
     @objc private func copyHighlightClicked(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String, let quote = session.annotations.first(where: { $0.id == id })?.quote else { return }
+        guard let session, let id = sender.representedObject as? String, let quote = session.annotations.first(where: { $0.id == id })?.quote else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(quote, forType: .string)
     }
 
     @objc private func copyLinkClicked(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String, let item = session.annotations.first(where: { $0.id == id }) else { return }
+        guard let session, let id = sender.representedObject as? String, let item = session.annotations.first(where: { $0.id == id }) else { return }
         let link = CopyLink.make(path: session.bookURL.path, page: item.page, cfi: item.cfi, quote: item.quote)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(link.url, forType: .string)
     }
 
     @objc private func removeNoteClicked(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String else { return }
+        guard let session, let id = sender.representedObject as? String else { return }
         session.removeNoteOnly(id: id)
     }
 
