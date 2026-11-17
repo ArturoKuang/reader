@@ -41,7 +41,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         findBar.action = #selector(submitFind)
         findBar.isHidden = true
         view.addSubview(findBar)
-        let findConstraint = findBar.topAnchor.constraint(equalTo: view.topAnchor, constant: -40)
+        let findConstraint = findBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: -40)
         findTop = findConstraint
         NSLayoutConstraint.activate([
             webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -53,6 +53,10 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             findConstraint,
         ])
         fontScale = session.zoom
+        session.onAnnotationsChanged = { [weak self] in
+            guard let self else { return }
+            self.webView?.evaluateJavaScript("window.readerPaint && window.readerPaint(\(self.highlightScript()))")
+        }
         loadSpine()
     }
 
@@ -91,9 +95,15 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     func nextPage() { showSpine(index: min(session.page, max(session.pageCount - 1, 0))) }
     func previousPage() { showSpine(index: max(session.page - 2, 0)) }
     func toggleFind() {
-        findBar.isHidden.toggle()
-        findTop?.constant = findBar.isHidden ? -40 : 8
-        if !findBar.isHidden { view.window?.makeFirstResponder(findBar) }
+        findBar.isHidden = false
+        findTop?.constant = 8
+        if findBar.stringValue.isEmpty { findBar.stringValue = session.findQuery }
+        view.layoutSubtreeIfNeeded()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.view.window?.makeFirstResponder(self.findBar)
+            self.findBar.currentEditor()?.selectAll(nil)
+        }
     }
     @objc private func submitFind() { find(forward: true) }
     func find(forward: Bool) {
@@ -262,6 +272,15 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         return nil
     }
 
+    private func highlightScript() -> String {
+        let items = session.highlights.compactMap { highlight -> String? in
+            let quote = highlight.quote.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+            guard !quote.isEmpty else { return nil }
+            return "{\"quote\":\"\(quote)\",\"color\":\(highlight.color)}"
+        }
+        return "[\(items.joined(separator: ","))]"
+    }
+
     private func conceptScript() -> String {
         let chapter = ChapterFiles.number(in: session.sectionTitle)
         let visible = session.concepts.filter { concept in
@@ -281,7 +300,8 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             case .known: color = "#30d158"
             case .due: color = "#ff9f0a"
             }
-            return "{\"id\":\"\(concept.id)\",\"color\":\"\(color)\",\"terms\":[\(terms)]}"
+            let chapterField = concept.chapter.map(String.init) ?? ""
+            return "{\"id\":\"\(concept.id)\",\"color\":\"\(color)\",\"chapter\":\"\(chapterField)\",\"terms\":[\(terms)]}"
         }
         return "[\(items.joined(separator: ","))]"
     }
@@ -315,6 +335,13 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         let css = """
         body { font: \(16 * fontScale)px Georgia, serif; line-height: 1.6; margin: 48px auto; max-width: \(session.twoPages ? 920 : 680)px; \(columns) }
         .reader-hl { background: #F2C94C59; }
+        .reader-hl-1 { background: #F2C94C59; }
+        .reader-hl-2 { background: #6FCF9759; }
+        .reader-hl-3 { background: #56CCF259; }
+        .reader-hl-4 { background: #F299C859; }
+        .reader-hl-5 { background: #BB6BD959; }
+        .reader-hl-6 { background: #F2994A59; }
+        h2 { overflow-wrap: anywhere; }
         .reader-word { border-bottom: 1.5px dotted #666; }
         .reader-note { border-left: 3px solid #888; margin: 8px 0; padding: 8px 10px; background: rgba(0,0,0,0.04); }
         .reader-concept { border-bottom: 1px solid #8e8e93; cursor: pointer; }
@@ -371,6 +398,47 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             break;
           }
         };
+        function tokenAt(text, at, length) {
+          const word = /[0-9A-Za-z'’]/;
+          if (at > 0 && word.test(text[at - 1])) return false;
+          if (at + length < text.length && word.test(text[at + length])) return false;
+          return true;
+        }
+        function findTerm(text, term) {
+          const lower = text.toLowerCase();
+          const needle = term.toLowerCase();
+          let from = 0;
+          while (from < lower.length) {
+            const at = lower.indexOf(needle, from);
+            if (at < 0) return -1;
+            if (tokenAt(text, at, needle.length)) return at;
+            from = at + needle.length;
+          }
+          return -1;
+        }
+        window.readerPaint = function(marks) {
+          (marks || []).forEach(mark => {
+            if (!mark.quote) return;
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+            while (walker.nextNode()) {
+              const node = walker.currentNode;
+              if (!node.nodeValue || !node.parentNode) continue;
+              if (node.parentNode.closest && node.parentNode.closest("[class*='reader-hl']")) continue;
+              const at = node.nodeValue.indexOf(mark.quote);
+              if (at < 0) continue;
+              const span = document.createElement("span");
+              span.className = "reader-hl-" + (mark.color || 1);
+              span.textContent = mark.quote;
+              const text = node.nodeValue;
+              node.parentNode.insertBefore(document.createTextNode(text.slice(0, at)), node);
+              node.parentNode.insertBefore(span, node);
+              node.parentNode.insertBefore(document.createTextNode(text.slice(at + mark.quote.length)), node);
+              node.parentNode.removeChild(node);
+              break;
+            }
+          });
+        };
+        window.readerPaint(\(highlightScript()));
         const concepts = \(conceptScript());
         if (\(session.showConceptMarkers ? "true" : "false")) {
           concepts.forEach(concept => {
@@ -379,8 +447,11 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             while (walker.nextNode()) nodes.push(walker.currentNode);
             nodes.forEach(node => {
               if (!node.nodeValue || !node.parentNode || node.parentNode.closest && node.parentNode.closest(".reader-concept")) return;
+              const section = node.parentElement && node.parentElement.closest && node.parentElement.closest("section[data-chapter]");
+              const sectionChapter = section ? (section.dataset.chapter || "") : "";
+              if (concept.chapter && sectionChapter !== concept.chapter) return;
               for (const term of concept.terms) {
-                const at = node.nodeValue.toLowerCase().indexOf(term.toLowerCase());
+                const at = findTerm(node.nodeValue, term);
                 if (at < 0) continue;
                 const span = document.createElement("span");
                 span.className = "reader-concept";

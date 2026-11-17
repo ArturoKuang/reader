@@ -27,6 +27,16 @@ final class ReaderDocument: NSDocument {
                 session.page = max(session.package.state.page, 1)
             }
             coordinator.attach(session)
+            var index = LibraryIndex.load(from: AppPaths.indexFile, fs: fs)
+            SidecarStore.noteVaultBook(
+                bookPath: opened.url.path,
+                directory: coordinator.location.bookFolder,
+                title: opened.url.deletingPathExtension().lastPathComponent,
+                fingerprint: identity.fingerprint,
+                index: &index,
+                now: ISO8601DateFormatter().string(from: Date())
+            )
+            try? index.save(to: AppPaths.indexFile, fs: fs)
             session.onPageChange = { [weak self] in self?.refreshSubtitle() }
             self.vault = coordinator
             self.session = session

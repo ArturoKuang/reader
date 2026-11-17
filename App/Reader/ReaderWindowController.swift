@@ -86,7 +86,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         content.allowsFullHeightLayout = true
         let inspector = NSSplitViewItem(viewController: panelHost)
         inspector.minimumThickness = 280
-        inspector.maximumThickness = 460
+        inspector.maximumThickness = 320
         inspector.canCollapse = true
         inspector.allowsFullHeightLayout = true
         split.splitView.dividerStyle = .thin
@@ -327,7 +327,6 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             ("Table of Contents", #selector(showContents(_:)), .tableOfContents),
             ("Highlights and Notes", #selector(showHighlightsAndNotes(_:)), .highlightsAndNotes),
             ("Bookmarks", #selector(showBookmarks(_:)), .bookmarks),
-            ("Contact Sheet", #selector(showContactSheet(_:)), .contactSheet),
         ]
         for entry in entries {
             let item = NSMenuItem(title: entry.0, action: entry.1, keyEquivalent: "")
@@ -336,18 +335,12 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             menu.addItem(item)
         }
         menu.addItem(.separator())
-        let continuous = NSMenuItem(title: "Continuous Scroll", action: #selector(toggleContinuous(_:)), keyEquivalent: "")
-        continuous.target = self
-        continuous.state = session.continuous ? .on : .off
-        menu.addItem(continuous)
-        let single = NSMenuItem(title: "Single Page", action: #selector(singlePage(_:)), keyEquivalent: "")
-        single.target = self
-        single.state = session.twoPages ? .off : .on
-        menu.addItem(single)
-        let two = NSMenuItem(title: "Two Pages", action: #selector(twoPages(_:)), keyEquivalent: "")
-        two.target = self
-        two.state = session.twoPages ? .on : .off
-        menu.addItem(two)
+        for mode in ReadingLayout.allCases {
+            let item = NSMenuItem(title: mode.title, action: mode.action, keyEquivalent: "")
+            item.target = self
+            item.state = readingLayout == mode ? .on : .off
+            menu.addItem(item)
+        }
         return menu
     }
 
@@ -374,20 +367,28 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         }
         applyChrome()
     }
-    @objc func toggleContinuous(_ sender: Any?) {
-        session.setContinuous(!session.continuous)
-        pdfController?.applyDisplayMode()
-        epubController?.applyDisplayMode()
-        applyChrome()
-    }
-    @objc func singlePage(_ sender: Any?) {
-        session.setTwoPages(false)
-        pdfController?.applyDisplayMode()
-        epubController?.applyDisplayMode()
-        applyChrome()
-    }
-    @objc func twoPages(_ sender: Any?) {
-        session.setTwoPages(true)
+    @objc func toggleContinuous(_ sender: Any?) { chooseLayout(.continuous) }
+    @objc func singlePage(_ sender: Any?) { chooseLayout(.single) }
+    @objc func twoPages(_ sender: Any?) { chooseLayout(.twoPages) }
+
+    private func chooseLayout(_ layout: ReadingLayout) {
+        if session.sidebar == .contactSheet {
+            let back = previousSidebar == .hidden || previousSidebar == .contactSheet ? SidebarMode.thumbnails : previousSidebar
+            session.setSidebar(back)
+        }
+        switch layout {
+        case .continuous:
+            session.setTwoPages(false)
+            session.setContinuous(true)
+        case .single:
+            session.setTwoPages(false)
+            session.setContinuous(false)
+        case .twoPages:
+            session.setContinuous(false)
+            session.setTwoPages(true)
+        case .contact:
+            break
+        }
         pdfController?.applyDisplayMode()
         epubController?.applyDisplayMode()
         applyChrome()
@@ -539,15 +540,46 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         case #selector(showContents(_:)): menuItem.state = session.sidebar == .tableOfContents ? .on : .off
         case #selector(showHighlightsAndNotes(_:)): menuItem.state = session.sidebar == .highlightsAndNotes ? .on : .off
         case #selector(showBookmarks(_:)): menuItem.state = session.sidebar == .bookmarks ? .on : .off
-        case #selector(showContactSheet(_:)): menuItem.state = session.sidebar == .contactSheet ? .on : .off
-        case #selector(toggleContinuous(_:)): menuItem.state = session.continuous ? .on : .off
-        case #selector(singlePage(_:)): menuItem.state = session.twoPages ? .off : .on
-        case #selector(twoPages(_:)): menuItem.state = session.twoPages ? .on : .off
+        case #selector(toggleContinuous(_:)): menuItem.state = readingLayout == .continuous ? .on : .off
+        case #selector(singlePage(_:)): menuItem.state = readingLayout == .single ? .on : .off
+        case #selector(twoPages(_:)): menuItem.state = readingLayout == .twoPages ? .on : .off
+        case #selector(showContactSheet(_:)): menuItem.state = readingLayout == .contact ? .on : .off
         case #selector(togglePanel(_:)): menuItem.state = session.panelVisible ? .on : .off
         case #selector(toggleConceptMarkers(_:)): menuItem.state = session.showConceptMarkers ? .on : .off
         default: break
         }
         return true
+    }
+}
+
+private enum ReadingLayout: CaseIterable {
+    case continuous, single, twoPages, contact
+
+    var title: String {
+        switch self {
+        case .continuous: return "Continuous Scroll"
+        case .single: return "Single Page"
+        case .twoPages: return "Two Pages"
+        case .contact: return "Contact Sheet"
+        }
+    }
+
+    var action: Selector {
+        switch self {
+        case .continuous: return #selector(ReaderWindowController.toggleContinuous(_:))
+        case .single: return #selector(ReaderWindowController.singlePage(_:))
+        case .twoPages: return #selector(ReaderWindowController.twoPages(_:))
+        case .contact: return #selector(ReaderWindowController.showContactSheet(_:))
+        }
+    }
+}
+
+private extension ReaderWindowController {
+    var readingLayout: ReadingLayout {
+        if session.sidebar == .contactSheet { return .contact }
+        if session.twoPages { return .twoPages }
+        if session.continuous { return .continuous }
+        return .single
     }
 }
 

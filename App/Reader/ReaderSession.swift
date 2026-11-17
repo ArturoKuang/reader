@@ -266,6 +266,7 @@ final class ReaderSession: ObservableObject {
 
     func highlight(color: Int) {
         guard HighlightPalette.isValid(color), let selection, !selection.text.isEmpty else { return }
+        if package.highlights.containsSameRange(quote: selection.text, page: selection.page, cfi: selection.cfi) { return }
         let entry = HighlightEntry(
             id: IDs.make("h"),
             color: color,
@@ -405,7 +406,10 @@ final class ReaderSession: ObservableObject {
         let word = selection.text.split(whereSeparator: { !$0.isLetter && $0 != "'" && $0 != "’" }).first.map(String.init) ?? selection.text
         let term = word.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !term.isEmpty else { return }
-        let definition = ReaderDictionaryDefinition(term) ?? "No dictionary entry."
+        let rawDefinition = ReaderDictionaryDefinition(term) ?? ""
+        let definition = rawDefinition.isEmpty || rawDefinition.hasPrefix("Error") || rawDefinition.contains("ReaderFailure")
+            ? "No dictionary entry."
+            : VocabularyFile.shortMeaning(rawDefinition)
         let occurrence = LookupEntry(
             id: IDs.make("l"),
             page: selection.page,
@@ -436,7 +440,7 @@ final class ReaderSession: ObservableObject {
             explanation: "",
             sentence: occurrence.sentence,
             location: locationLabel(selection),
-            providerLabel: "Saved to words.md",
+            providerLabel: usesVault ? "Saved to the vocabulary file" : "Saved to words.md",
             undo: undo,
             busy: true
         )
@@ -505,7 +509,7 @@ final class ReaderSession: ObservableObject {
                 }
             } catch {
                 if word != nil {
-                    lookup?.explanation = error.localizedDescription
+                    lookup?.explanation = "Couldn't explain this word."
                     lookup?.busy = false
                 } else {
                     answer = error.localizedDescription

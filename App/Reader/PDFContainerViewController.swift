@@ -53,7 +53,7 @@ final class PDFContainerViewController: NSViewController {
         findBar.action = #selector(findFromBar)
         findBar.isHidden = true
         view.addSubview(findBar)
-        let findConstraint = findBar.topAnchor.constraint(equalTo: view.topAnchor, constant: -40)
+        let findConstraint = findBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: -40)
         findTop = findConstraint
         NSLayoutConstraint.activate([
             pdfView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -257,9 +257,15 @@ final class PDFContainerViewController: NSViewController {
     }
 
     func toggleFind() {
-        findBar.isHidden.toggle()
-        findTop?.constant = findBar.isHidden ? -40 : 8
-        if !findBar.isHidden { view.window?.makeFirstResponder(findBar) }
+        findBar.isHidden = false
+        findTop?.constant = 8
+        if findBar.stringValue.isEmpty { findBar.stringValue = session.findQuery }
+        view.layoutSubtreeIfNeeded()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.view.window?.makeFirstResponder(self.findBar)
+            self.findBar.currentEditor()?.selectAll(nil)
+        }
     }
 
     @objc private func findFromBar() { runFind(forward: true) }
@@ -352,7 +358,8 @@ final class PDFContainerViewController: NSViewController {
             let chapter = ChapterFiles.number(in: section)
             for concept in session.concepts where concept.chapter == nil || concept.chapter == chapter {
                 for term in concept.findTerms {
-                    guard let range = string.range(of: term, options: .caseInsensitive),
+                    guard concept.chapter == nil || concept.chapter == chapter,
+                          let range = ConceptMatching.range(of: term, in: string),
                           let selection = page.selection(for: NSRange(range, in: string)) else { continue }
                     let bounds = selection.bounds(for: page)
                     let mark = PDFAnnotation(bounds: bounds, forType: .underline, withProperties: nil)

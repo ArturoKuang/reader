@@ -225,8 +225,21 @@ final class ThumbView: NSView {
         NSColor.windowBackgroundColor.setFill()
         bounds.fill()
         guard let page else { return }
-        let image = page.thumbnail(of: bounds.insetBy(dx: 4, dy: 4).size, for: .mediaBox)
-        image.draw(in: bounds.insetBy(dx: 4, dy: 4))
+        let pageBox = page.bounds(for: .mediaBox)
+        guard pageBox.width > 0, pageBox.height > 0 else { return }
+        let aspect = pageBox.width / pageBox.height
+        var target = bounds.insetBy(dx: 4, dy: 4)
+        if target.width / max(target.height, 1) > aspect {
+            let width = target.height * aspect
+            target.origin.x += (target.width - width) / 2
+            target.size.width = width
+        } else {
+            let height = target.width / aspect
+            target.origin.y += (target.height - height) / 2
+            target.size.height = height
+        }
+        let image = page.thumbnail(of: target.size, for: .mediaBox)
+        image.draw(in: target)
     }
 }
 
@@ -240,7 +253,9 @@ struct ContactSheetView: View {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 16)], spacing: 16) {
                 ForEach(0..<document.pageCount, id: \.self) { index in
                     VStack {
-                        PageThumb(document: document, index: index).frame(height: 180)
+                        PageThumb(document: document, index: index)
+                            .aspectRatio(pageAspect(index), contentMode: .fit)
+                            .frame(height: 180)
                         Text("\(index + 1)").font(.caption)
                     }
                     .onTapGesture { select(index + 1) }
@@ -249,6 +264,11 @@ struct ContactSheetView: View {
             .padding(20)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func pageAspect(_ index: Int) -> CGFloat {
+        let box = document.page(at: index)?.bounds(for: .mediaBox) ?? CGRect(x: 0, y: 0, width: 612, height: 792)
+        return box.width / max(box.height, 1)
     }
 }
 
@@ -495,7 +515,6 @@ struct LookupCard: View {
                 Text(lookup.definition)
                 Text(lookup.busy ? "Explaining…" : "In this passage").font(.caption).foregroundStyle(.secondary)
                 Text(lookup.explanation.isEmpty ? " " : lookup.explanation)
-                Text("Saved automatically to words.md").font(.caption)
                 Text("“\(lookup.sentence)” · \(lookup.location)").font(.caption).italic()
                 Text(lookup.providerLabel).font(.caption).foregroundStyle(.secondary)
                 HStack {

@@ -224,7 +224,7 @@ final class VaultCoordinator {
                 id: word.id,
                 word: word.word,
                 chapter: word.lookups.first?.section.flatMap { ChapterFiles.number(in: $0) },
-                meaning: word.definition,
+                meaning: VocabularyFile.shortMeaning(word.definition),
                 bookContext: word.lookups.first?.sentence ?? word.lookups.first?.quote ?? word.word,
                 plainLanguage: word.explanation,
                 example: nil,

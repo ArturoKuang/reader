@@ -246,12 +246,11 @@ enum WordLibrary {
         var books: [ExportBook] = []
         var missing: [String] = []
         for entry in index.documents {
-            guard fs.isDirectory(entry.sidecarPath),
-                  let package = try? SidecarPackage.read(from: entry.sidecarPath, fs: fs) else {
+            guard fs.isDirectory(entry.sidecarPath) else {
                 missing.append(entry.title)
                 continue
             }
-            books.append(ExportBook(title: entry.title, words: package.words.words))
+            books.append(ExportBook(title: entry.title, words: words(in: entry.sidecarPath, fs: fs)))
         }
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
@@ -259,5 +258,26 @@ enum WordLibrary {
         let date = formatter.string(from: Date())
         let text = csv ? WordExport.csv(books: books) : WordExport.markdown(books: books, date: date)
         return (text, missing)
+    }
+
+    private static func words(in directory: String, fs: FileSystem) -> [WordEntry] {
+        if let package = try? SidecarPackage.read(from: directory, fs: fs), !package.words.words.isEmpty {
+            return package.words.words
+        }
+        for relative in ["learner/vocabulary.md", "words.md"] {
+            guard let text = try? fs.readString(Paths.join(directory, relative)) else { continue }
+            let entries = VocabularyFile.parse(text)
+            if entries.isEmpty { continue }
+            return entries.map { entry in
+                WordEntry(
+                    id: entry.readerOwned ? entry.id : "hand_\(entry.word.lowercased())",
+                    word: entry.word,
+                    definition: entry.meaning,
+                    explanation: entry.plainLanguage,
+                    lookups: [LookupEntry(id: "l_\(entry.id)", section: entry.chapter.map { "Chapter \($0)" }, quote: entry.word, sentence: entry.bookContext, date: entry.added)]
+                )
+            }
+        }
+        return []
     }
 }
