@@ -7,23 +7,39 @@ struct WelcomeView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Reader").font(.largeTitle.weight(.semibold))
-            Text("Open a PDF or EPUB. Notes, words, and highlights stay in a .reader package next to the book.")
+            Text("Open a PDF or EPUB. Drop a book here, or press Return on a recent one.")
                 .foregroundStyle(.secondary)
             Button("Open…") { NSDocumentController.shared.openDocument(nil) }
-                .keyboardShortcut("o")
-            if !NSDocumentController.shared.recentDocumentURLs.isEmpty {
-                Text("Recent").font(.headline)
-                ForEach(NSDocumentController.shared.recentDocumentURLs.prefix(6), id: \.path) { url in
-                    Button(url.deletingPathExtension().lastPathComponent) {
-                        NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { _, _, _ in }
+            let urls = NSDocumentController.shared.recentDocumentURLs
+            if urls.isEmpty {
+                ContentUnavailableView("No recent books", systemImage: "books.vertical", description: Text("Open a PDF or EPUB to start reading."))
+            } else {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 16)], spacing: 16) {
+                    ForEach(urls.prefix(12), id: \.path) { url in
+                        Button(url.deletingPathExtension().lastPathComponent) {
+                            NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { _, _, _ in }
+                        }
+                        .buttonStyle(.plain)
+                        .frame(maxWidth: .infinity, minHeight: 88)
+                        .padding(8)
+                        .background(Color(nsColor: .quaternaryLabelColor).opacity(0.15))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
-                    .buttonStyle(.plain)
                 }
             }
-            Spacer()
         }
         .padding(28)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            guard let provider = providers.first else { return false }
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url else { return }
+                DispatchQueue.main.async {
+                    NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { _, _, _ in }
+                }
+            }
+            return true
+        }
     }
 }
 
@@ -59,6 +75,8 @@ struct SidebarView: View {
                 annotationList
             case .bookmarks:
                 bookmarkList
+            case .searchResults:
+                searchList
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -114,6 +132,17 @@ struct SidebarView: View {
                 }
             }
             .padding(10)
+        }
+    }
+
+    private var searchList: some View {
+        List(session.searchHits) { hit in
+            VStack(alignment: .leading, spacing: 2) {
+                Text(hit.snippet).font(.callout).lineLimit(3)
+                Text("\(hit.section) · p. \(hit.page)").font(.caption).foregroundStyle(.secondary)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { jump(page: hit.page) }
         }
     }
 

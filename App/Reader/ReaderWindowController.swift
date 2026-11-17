@@ -157,6 +157,12 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             guard let self, event.window === self.window else { return event }
             if event.keyCode == 53 {
                 self.dismissSelectionBar()
+                if self.session.sidebar == .searchResults {
+                    self.session.sidebar = self.session.sidebarBeforeSearch ?? .thumbnails
+                    self.session.searchHits = []
+                    self.applyChrome()
+                    return nil
+                }
             }
             if self.slideshowTimer != nil, event.keyCode == 53 {
                 self.stopSlideshow()
@@ -240,11 +246,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     // MARK: Toolbar
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .flexibleSpace, .search, .inspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .flexibleSpace, .search, .inspector]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .flexibleSpace, .search, .inspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .flexibleSpace, .search, .inspector]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
@@ -264,6 +270,27 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             return item
         case .sidebarTrackingSeparator:
             return nil
+        case .addNote:
+            let note = NSToolbarItem(itemIdentifier: itemIdentifier)
+            note.image = NSImage(systemSymbolName: "note.text.badge.plus", accessibilityDescription: "Add Note")
+            note.action = #selector(addNote(_:))
+            note.target = self
+            note.label = "Add Note"
+            return note
+        case .zoomIn:
+            let zoom = NSToolbarItem(itemIdentifier: itemIdentifier)
+            zoom.image = NSImage(systemSymbolName: "plus.magnifyingglass", accessibilityDescription: "Zoom In")
+            zoom.action = #selector(zoomIn(_:))
+            zoom.target = self
+            zoom.label = "Zoom In"
+            return zoom
+        case .zoomOut:
+            let zoom = NSToolbarItem(itemIdentifier: itemIdentifier)
+            zoom.image = NSImage(systemSymbolName: "minus.magnifyingglass", accessibilityDescription: "Zoom Out")
+            zoom.action = #selector(zoomOut(_:))
+            zoom.target = self
+            zoom.label = "Zoom Out"
+            return zoom
         case .highlight:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.view = highlightControl()
@@ -455,8 +482,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     @objc func actualSize(_ sender: Any?) { pdfController?.actualSize(); epubController?.actualSize() }
     @objc func zoomToFit(_ sender: Any?) { pdfController?.zoomToFit(); epubController?.zoomToFit() }
     @objc func fitWidth(_ sender: Any?) { pdfController?.fitWidth(); epubController?.fitWidth() }
-    @objc func zoomIn(_ sender: Any?) { pdfController?.zoomIn(); epubController?.zoom(by: 1.15) }
-    @objc func zoomOut(_ sender: Any?) { pdfController?.zoomOut(); epubController?.zoom(by: 1 / 1.15) }
+    @objc func zoomIn(_ sender: Any?) { pdfController?.zoomIn(); epubController?.zoom(by: 1.15); session.showToast("\(Int((session.zoom * 100).rounded()))%") }
+    @objc func zoomOut(_ sender: Any?) { pdfController?.zoomOut(); epubController?.zoom(by: 1 / 1.15); session.showToast("\(Int((session.zoom * 100).rounded()))%") }
     @objc func zoomToSelection(_ sender: Any?) { pdfController?.zoomToSelection() }
     @objc func rotateLeft(_ sender: Any?) { session.rotate(clockwise: false); pdfController?.refreshAnnotations() }
     @objc func rotateRight(_ sender: Any?) { session.rotate(clockwise: true); pdfController?.refreshAnnotations() }
@@ -685,5 +712,8 @@ private extension NSToolbarItem.Identifier {
     static let backForward = NSToolbarItem.Identifier("backForward")
     static let search = NSToolbarItem.Identifier("search")
     static let highlight = NSToolbarItem.Identifier("highlight")
+    static let addNote = NSToolbarItem.Identifier("addNote")
+    static let zoomIn = NSToolbarItem.Identifier("zoomIn")
+    static let zoomOut = NSToolbarItem.Identifier("zoomOut")
     static let inspector = NSToolbarItem.Identifier("inspector")
 }

@@ -55,6 +55,9 @@ final class ReaderSession: ObservableObject {
     @Published var answerLabel: String = ""
     @Published var asking: Bool = false
     @Published var findQuery: String = ""
+    @Published var searchHits: [SearchHit] = []
+    @Published var searchIndex = 0
+    var sidebarBeforeSearch: SidebarMode?
     @Published var findMatches: [String] = []
     @Published var expandedNotes: Set<String> = []
     @Published var annotationQuery = ""

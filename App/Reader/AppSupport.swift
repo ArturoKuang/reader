@@ -145,6 +145,13 @@ struct OutlineRow: Identifiable, Equatable {
     var depth: Int
 }
 
+struct SearchHit: Identifiable, Equatable {
+    var id: Int
+    var page: Int
+    var snippet: String
+    var section: String
+}
+
 struct ReaderChatLine: Identifiable, Equatable {
     var id: UUID
     var mine: Bool

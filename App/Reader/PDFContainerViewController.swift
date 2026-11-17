@@ -283,12 +283,22 @@ final class PDFContainerViewController: NSViewController {
         if matches.isEmpty || matches.first?.string?.localizedCaseInsensitiveContains(query) != true {
             matches = document.findString(query, withOptions: [.caseInsensitive])
             matchIndex = 0
+            session.searchHits = matches.enumerated().map { index, selection in
+                let page = selection.pages.first.flatMap { document.index(for: $0) + 1 } ?? 1
+                let snippet = selection.string ?? query
+                return SearchHit(id: index, page: page, snippet: snippet, section: session.outline.last { ($0.page ?? 0) <= page }?.title ?? "")
+            }
+            session.searchIndex = 0
+            if session.sidebar != .searchResults { session.sidebarBeforeSearch = session.sidebar }
+            session.sidebar = .searchResults
         } else if forward {
             matchIndex = matches.isEmpty ? 0 : (matchIndex + 1) % matches.count
         } else {
             matchIndex = matches.isEmpty ? 0 : (matchIndex - 1 + matches.count) % matches.count
         }
         guard matches.indices.contains(matchIndex) else { return }
+        session.searchIndex = matchIndex
+        findBar.placeholderString = "\(matchIndex + 1) of \(matches.count)"
         let selection = matches[matchIndex]
         pdfView.setCurrentSelection(selection, animate: true)
         pdfView.scrollSelectionToVisible(nil)

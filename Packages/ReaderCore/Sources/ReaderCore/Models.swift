@@ -29,6 +29,7 @@ public enum SidebarMode: String, Codable, Equatable, Sendable, CaseIterable {
     case highlightsAndNotes
     case bookmarks
     case contactSheet
+    case searchResults
 }
 
 public enum PanelTab: String, Codable, Equatable, Sendable, CaseIterable {
