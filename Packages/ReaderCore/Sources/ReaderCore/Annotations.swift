@@ -260,6 +260,31 @@ public enum AnnotationEdit {
         }
     }
 
+    /// Drops every selected annotation. Remaining highlights and notes keep their relative order.
+    /// A highlight takes its linked note with it. Passing the previous arrays to `restore` puts the batch back.
+    public static func remove(ids: Set<String>, package: inout SidecarPackage) {
+        guard !ids.isEmpty else { return }
+        var linkedNotes = Set<String>()
+        for highlight in package.highlights.highlights where ids.contains(highlight.id) {
+            if let noteID = highlight.noteID { linkedNotes.insert(noteID) }
+        }
+        package.highlights.highlights.removeAll { ids.contains($0.id) }
+        package.notes.notes.removeAll { ids.contains($0.id) || linkedNotes.contains($0.id) }
+    }
+
+    public static func restore(highlights: [HighlightEntry], notes: [NoteEntry], package: inout SidecarPackage) {
+        package.highlights.highlights = highlights
+        package.notes.notes = notes
+    }
+
+    public static func recolor(ids: Set<String>, color: Int, package: inout SidecarPackage) {
+        guard HighlightPalette.isValid(color) else { return }
+        for index in package.highlights.highlights.indices where ids.contains(package.highlights.highlights[index].id) {
+            package.highlights.highlights[index].color = color
+        }
+        package.state.lastHighlightColor = color
+    }
+
     public static func recolor(id: String, color: Int, package: inout SidecarPackage) {
         guard HighlightPalette.isValid(color), let index = package.highlights.highlights.firstIndex(where: { $0.id == id }) else { return }
         package.highlights.highlights[index].color = color

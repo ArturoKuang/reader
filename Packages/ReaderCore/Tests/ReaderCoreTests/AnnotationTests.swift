@@ -76,6 +76,47 @@ final class AnnotationTests: XCTestCase {
         XCTAssertNil(HighlightAppearance.components(color: 9, dark: false))
     }
 
+    func testBatchRemovalRestoresIdsColorsAndOrder() {
+        var package = SidecarPackage.empty(identity: FrontMatter(kind: "notes", document: "Book.pdf", fingerprint: "sha256:x"))
+        let anchors = [
+            AnnotationAnchor(text: "alpha", page: 1, section: "Chapter 1", rects: [[0, 10, 4, 14]]),
+            AnnotationAnchor(text: "beta", page: 1, section: "Chapter 1", rects: [[0, 20, 4, 24]]),
+            AnnotationAnchor(text: "gamma", page: 2, section: "Chapter 2", rects: [[0, 8, 4, 12]]),
+        ]
+        for (index, anchor) in anchors.enumerated() {
+            _ = AnnotationEdit.addNote(toSelection: anchor, color: index + 1, highlightID: "h\(index + 1)", noteID: "n\(index + 1)", now: "2026-10-13T00:00:00Z", package: &package)
+            AnnotationEdit.updateNoteBody(id: "n\(index + 1)", body: "Note \(index + 1)", now: "2026-10-13T00:00:00Z", package: &package)
+        }
+        let originalHighlights = package.highlights.highlights
+        let originalNotes = package.notes.notes
+        AnnotationEdit.remove(ids: ["h1", "h3"], package: &package)
+        XCTAssertEqual(package.highlights.highlights.map(\.id), ["h2"])
+        XCTAssertEqual(package.notes.notes.map(\.id), ["n2"])
+        XCTAssertEqual(package.highlights.highlights.first?.color, 2)
+        AnnotationEdit.restore(highlights: originalHighlights, notes: originalNotes, package: &package)
+        XCTAssertEqual(package.highlights.highlights.map(\.id), ["h1", "h2", "h3"])
+        XCTAssertEqual(package.highlights.highlights.map(\.color), [1, 2, 3])
+        XCTAssertEqual(package.notes.notes.map(\.id), ["n1", "n2", "n3"])
+        XCTAssertEqual(package.notes.notes.map(\.body), ["Note 1", "Note 2", "Note 3"])
+
+        let user = "freeform outline\n\t- a typo here\n"
+        let items = AnnotationIndex.items(highlights: originalHighlights, notes: originalNotes)
+        let file = VaultAnnotationSync.render(existing: user, bookPath: "/book.epub", annotations: items)
+        XCTAssertTrue(file.hasPrefix(user))
+        let kept = items.filter { $0.id == "h2" }
+        let stripped = VaultAnnotationSync.render(existing: file, bookPath: "/book.epub", annotations: kept, removeIDs: ["h1", "h3"])
+        XCTAssertTrue(stripped.hasPrefix(user))
+        XCTAssertEqual(VaultNoteFile.blocks(stripped).map(\.id), ["h2"])
+        XCTAssertFalse(stripped.contains("id=h1"))
+        XCTAssertFalse(stripped.contains("id=h3"))
+        let restored = VaultAnnotationSync.render(existing: stripped, bookPath: "/book.epub", annotations: items, removeIDs: [])
+        XCTAssertTrue(restored.hasPrefix(user))
+        let blocks = VaultNoteFile.blocks(restored)
+        XCTAssertEqual(blocks.map(\.id), ["h2", "h1", "h3"])
+        XCTAssertEqual(blocks.map(\.color), [2, 1, 3])
+        XCTAssertEqual(blocks.map(\.body), ["Note 2", "Note 1", "Note 3"])
+    }
+
     func testExportMatchesVaultCallout() {
         let highlight = HighlightEntry(id: "h1", color: 1, page: 4, cfi: "page=4", quote: "hard to vary", section: "Chapter 4", noteID: "n1")
         let note = NoteEntry(id: "n1", page: 4, quote: "hard to vary", section: "Chapter 4", body: "A note of mine.")

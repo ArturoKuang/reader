@@ -1,6 +1,7 @@
 import AppKit
 import PDFKit
 import ReaderCore
+import UniformTypeIdentifiers
 
 final class ReaderSession: ObservableObject {
     let bookURL: URL
@@ -63,6 +64,8 @@ final class ReaderSession: ObservableObject {
     @Published var annotationQuery = ""
     @Published var annotationFilter = "all"
     @Published var annotationSortRecent = false
+    @Published var annotationSelection = Set<String>()
+    private var deletingAnnotations = false
     @Published var annotationRevision = 0
     @Published var showMarginNotes = false
     var onPresentNote: ((String) -> Void)?
@@ -843,6 +846,48 @@ final class ReaderSession: ObservableObject {
             } else {
                 AnnotationEdit.removeNote(id: id, package: &package)
             }
+        }
+    }
+
+    func deleteSelectedAnnotations() {
+        deleteAnnotations(ids: annotationSelection)
+    }
+
+    func deleteAnnotations(ids: Set<String>) {
+        if deletingAnnotations { return }
+        let chosen = annotations.filter { ids.contains($0.id) }
+        guard !chosen.isEmpty else { return }
+        deletingAnnotations = true
+        defer { deletingAnnotations = false }
+        let typed = chosen.filter { !$0.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        if typed.count > 1 {
+            let alert = NSAlert()
+            alert.messageText = "Delete \(typed.count) notes?"
+            alert.addButton(withTitle: "Delete")
+            alert.addButton(withTitle: "Cancel")
+            alert.buttons.first?.hasDestructiveAction = true
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        editAnnotations(chosen.count == 1 ? "Delete" : "Delete Annotations") {
+            AnnotationEdit.remove(ids: ids, package: &package)
+        }
+        annotationSelection.subtract(ids)
+    }
+
+    func recolorAnnotations(ids: Set<String>, color: Int) {
+        editAnnotations("Recolor") {
+            AnnotationEdit.recolor(ids: ids, color: color, package: &package)
+        }
+    }
+
+    func exportAnnotations(_ items: [Annotation]) {
+        guard !items.isEmpty else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.plainText]
+        panel.nameFieldStringValue = "Notes.md"
+        panel.begin { [weak self] response in
+            guard response == .OK, let self, let url = panel.url else { return }
+            try? self.annotationMarkdown(items).write(to: url, atomically: true, encoding: .utf8)
         }
     }
 

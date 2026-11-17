@@ -188,24 +188,22 @@ final class VaultCoordinator {
             let name = ChapterFiles.notesFile(chapter: chapter, bookTitle: title)
             grouped[name, default: []].append(item)
         }
-        for (name, items) in grouped {
+        var names = Set(grouped.keys)
+        if let existing = try? fs.list(directory) {
+            for name in existing where name.hasSuffix(".md") { names.insert(name) }
+        }
+        for name in names {
             let path = Paths.join(directory, name)
             let text = (try? fs.readString(path)) ?? ""
-            let written = VaultAnnotationSync.render(existing: text, bookPath: session.bookURL.path, annotations: items)
+            let items = grouped[name] ?? []
+            let keep = Set(items.map(\.id))
+            let present = Set(OwnedBlocks.parse(text).compactMap(\.id))
+            let remove = present.intersection(loadedBlockIDs).subtracting(keep)
+            if items.isEmpty, remove.isEmpty { continue }
+            let written = VaultAnnotationSync.render(existing: text, bookPath: session.bookURL.path, annotations: items, removeIDs: remove)
+            loadedBlockIDs.subtract(remove)
+            for item in items { loadedBlockIDs.insert(item.id) }
             writeIfChanged(path, written)
-        }
-        if let names = try? fs.list(directory) {
-            for name in names where name.hasSuffix(".md") {
-                let path = Paths.join(directory, name)
-                var text = (try? fs.readString(path)) ?? ""
-                let keep = Set((grouped[name] ?? []).map(\.id))
-                var changed = false
-                for id in OwnedBlocks.parse(text).compactMap(\.id) where loadedBlockIDs.contains(id) && !keep.contains(id) {
-                    text = OwnedBlocks.remove(text, id: id)
-                    changed = true
-                }
-                if changed { writeIfChanged(path, text) }
-            }
         }
     }
 

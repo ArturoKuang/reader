@@ -5,7 +5,6 @@ import SwiftUI
 struct AnnotationBrowser: View {
     @ObservedObject var session: ReaderSession
     var onJump: (Annotation) -> Void
-    @State private var selection = Set<String>()
     @State private var editing: String?
     @State private var vaultSettings = false
     @State private var suppressJump = false
@@ -31,6 +30,9 @@ struct AnnotationBrowser: View {
                 .menuStyle(.borderlessButton)
                 .fixedSize()
             }
+            if session.annotationSelection.count > 1 {
+                selectionStrip
+            }
             if session.visibleAnnotations.isEmpty {
                 if session.annotationQuery.isEmpty && session.annotationFilter == "all" {
                     ContentUnavailableView("No highlights or notes yet", systemImage: "highlighter", description: Text("Select text, then press ⌃⌘1–6 to highlight or ⇧⌘N to add a note."))
@@ -38,7 +40,7 @@ struct AnnotationBrowser: View {
                     ContentUnavailableView.search(text: session.annotationQuery)
                 }
             } else {
-                List(selection: $selection) {
+                List(selection: $session.annotationSelection) {
                     ForEach(AnnotationIndex.grouped(session.visibleAnnotations)) { group in
                         Section(group.title) {
                             ForEach(group.items) { item in
@@ -49,23 +51,41 @@ struct AnnotationBrowser: View {
                         }
                     }
                 }
-                .onChange(of: selection) { _, ids in
-                    guard !suppressJump, let id = ids.first, let item = session.visibleAnnotations.first(where: { $0.id == id }) else { return }
+                .onChange(of: session.annotationSelection) { _, ids in
+                    guard !suppressJump, ids.count == 1, let id = ids.first, let item = session.visibleAnnotations.first(where: { $0.id == id }) else { return }
                     onJump(item)
                 }
                 .onCopyCommand {
-                    let chosen = session.visibleAnnotations.filter { selection.contains($0.id) }
+                    let chosen = session.visibleAnnotations.filter { session.annotationSelection.contains($0.id) }
                     return [NSItemProvider(object: session.annotationMarkdown(chosen) as NSString)]
                 }
-                .onExitCommand { editing = nil }
-                .onDeleteCommand { deleteSelection() }
+                .onExitCommand {
+                    if editing != nil {
+                        editing = nil
+                        session.flushNoteBodies()
+                    } else {
+                        session.annotationSelection = []
+                    }
+                }
+                .onDeleteCommand { session.deleteSelectedAnnotations() }
+                .onKeyPress(phases: .down) { press in
+                    if press.key == KeyEquivalent("a"), press.modifiers.contains(.command), !press.modifiers.contains(.shift) {
+                        session.annotationSelection = Set(session.visibleAnnotations.map(\.id))
+                        return .handled
+                    }
+                    if press.key == .delete || press.characters == "\u{8}" || press.characters == "\u{7F}" {
+                        session.deleteSelectedAnnotations()
+                        return .handled
+                    }
+                    return .ignored
+                }
             }
             vaultFooter
         }
         .onAppear {
             suppressJump = true
-            if let nearest = AnnotationIndex.nearest(session.annotations, to: session.page) {
-                selection = [nearest.id]
+            if session.annotationSelection.isEmpty, let nearest = AnnotationIndex.nearest(session.annotations, to: session.page) {
+                session.annotationSelection = [nearest.id]
             }
             DispatchQueue.main.async { suppressJump = false }
         }
@@ -136,21 +156,33 @@ struct AnnotationBrowser: View {
         if session.usesVault {
             Button("Reveal in Obsidian") { session.onRevealInObsidian?() }
         }
-        if item.hasNote {
-            Button("Remove Note") { session.removeNoteOnly(id: item.id) }
+        if session.annotationSelection.count > 1, session.annotationSelection.contains(item.id) {
+            Button("Delete \(session.annotationSelection.count) Items") { session.deleteSelectedAnnotations() }
+        } else {
+            Button("Remove Highlight & Note") { session.deleteAnnotations(ids: [item.id]) }
         }
-        Button("Remove Highlight & Note") { session.removeAnnotationCompletely(id: item.id) }
     }
 
-    private func deleteSelection() {
-        for id in selection {
-            guard let item = session.annotations.first(where: { $0.id == id }) else { continue }
-            if item.hasNote {
-                session.removeNoteOnly(id: id)
-            } else {
-                session.removeAnnotationCompletely(id: id)
+    private var selectionStrip: some View {
+        HStack(spacing: 10) {
+            Text("\(session.annotationSelection.count) selected")
+            Button("Delete") { session.deleteSelectedAnnotations() }
+            Menu("Recolor") {
+                ForEach(1...6, id: \.self) { color in
+                    Button(HighlightCallout.name(for: color).capitalized) {
+                        session.recolorAnnotations(ids: session.annotationSelection, color: color)
+                    }
+                }
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            Button("Export") {
+                let items = session.visibleAnnotations.filter { session.annotationSelection.contains($0.id) }
+                session.exportAnnotations(items)
             }
         }
+        .font(.caption)
+        .buttonStyle(.borderless)
     }
 
     private func paste(_ text: String) {

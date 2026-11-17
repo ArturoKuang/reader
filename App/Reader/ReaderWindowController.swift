@@ -541,6 +541,27 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             try? self.session.annotationMarkdown(self.session.annotations).write(to: url, atomically: true, encoding: .utf8)
         }
     }
+    @objc func selectAll(_ sender: Any?) {
+        if let text = window?.firstResponder as? NSTextView, text.isEditable || text.isFieldEditor {
+            text.selectAll(sender)
+            return
+        }
+        let showingNotes = session.panelTab == .notes || session.panelTab == .highlights || session.sidebar == .highlightsAndNotes
+        guard showingNotes else {
+            (window?.firstResponder as? NSText)?.selectAll(sender)
+            return
+        }
+        session.annotationSelection = Set(session.visibleAnnotations.map(\.id))
+    }
+
+    @objc func delete(_ sender: Any?) {
+        if let text = window?.firstResponder as? NSTextView, text.isEditable {
+            text.deleteToBeginningOfLine(sender)
+            return
+        }
+        session.deleteSelectedAnnotations()
+    }
+
     @objc func copyAllNotes(_ sender: Any?) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(session.annotationMarkdown(session.annotations), forType: .string)
@@ -704,6 +725,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         case #selector(togglePanel(_:)): menuItem.state = session.panelVisible ? .on : .off
         case #selector(toggleConceptMarkers(_:)): menuItem.state = session.showConceptMarkers ? .on : .off
         case #selector(showMarginNotes(_:)): menuItem.state = session.showMarginNotes ? .on : .off
+        case #selector(delete(_:)): return !session.annotationSelection.isEmpty
         default: break
         }
         return true
