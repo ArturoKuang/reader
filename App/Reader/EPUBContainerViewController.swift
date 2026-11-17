@@ -299,6 +299,29 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         return "[\(items.joined(separator: ","))]"
     }
 
+    private func epubAppearance() -> (font: String, line: String, margin: Int, background: String, foreground: String, align: String) {
+        let state = session.package.state
+        let font: String
+        switch state.epubFont {
+        case "New York": font = "\"New York\", serif"
+        case "San Francisco": font = "-apple-system, sans-serif"
+        case "Georgia": font = "Georgia, serif"
+        case "Charter": font = "Charter, serif"
+        case "Iowan": font = "\"Iowan Old Style\", serif"
+        default: font = "Georgia, serif"
+        }
+        let lines = ["1.4", "1.6", "1.9"]
+        let margins = [24, 48, 80]
+        let line = lines[min(max(state.epubLine, 0), 2)]
+        let margin = margins[min(max(state.epubMargin, 0), 2)]
+        switch state.epubTheme {
+        case "paper": return (font, line, margin, "#f4ecd8", "#2b2118", state.epubJustify ? "justify" : "start")
+        case "quiet": return (font, line, margin, "#ececec", "#1c1c1e", state.epubJustify ? "justify" : "start")
+        case "night": return (font, line, margin, "#1c1c1e", "#f2f2f7", state.epubJustify ? "justify" : "start")
+        default: return (font, line, margin, "transparent", "inherit", state.epubJustify ? "justify" : "start")
+        }
+    }
+
     private func conceptScript() -> String {
         let chapter = ChapterFiles.number(in: session.sectionTitle)
         let visible = session.concepts.filter { concept in
@@ -350,8 +373,9 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         }
         let target = min(max(session.page - 1, 0), max(epub.spine.count - 1, 0))
         applySpine(target, count: epub.spine.count)
+        let appearance = epubAppearance()
         let css = """
-        body { font: \(16 * fontScale)px Georgia, serif; line-height: 1.6; margin: 48px auto; max-width: \(session.twoPages ? 920 : 680)px; \(columns) }
+        body { font: \(16 * fontScale)px \(appearance.font); line-height: \(appearance.line); margin: \(appearance.margin)px auto; max-width: \(session.twoPages ? 920 : 680)px; \(columns) background: \(appearance.background); color: \(appearance.foreground); text-align: \(appearance.align); }
         .reader-hl { background: #F2C94C59; }
         .reader-hl-1 { background: #F2C94C59; }
         .reader-hl-2 { background: #6FCF9759; }

@@ -96,6 +96,11 @@ public struct ViewState: Codable, Equatable, Sendable {
     public var windowFrame: StoredWindowFrame?
     /// When true, notes draw as margin cards if the page has room. Older sidecars omit this.
     public var showMarginNotes: Bool
+    public var epubTheme: String
+    public var epubFont: String
+    public var epubLine: Int
+    public var epubMargin: Int
+    public var epubJustify: Bool
 
     public init(
         version: Int = 1,
@@ -112,7 +117,12 @@ public struct ViewState: Codable, Equatable, Sendable {
         bookmarks: [Bookmark] = [],
         lastHighlightColor: Int = 1,
         windowFrame: StoredWindowFrame? = nil,
-        showMarginNotes: Bool = false
+        showMarginNotes: Bool = false,
+        epubTheme: String = "original",
+        epubFont: String = "Original",
+        epubLine: Int = 1,
+        epubMargin: Int = 1,
+        epubJustify: Bool = false
     ) {
         self.version = version
         self.page = page
@@ -129,6 +139,11 @@ public struct ViewState: Codable, Equatable, Sendable {
         self.lastHighlightColor = lastHighlightColor
         self.windowFrame = windowFrame
         self.showMarginNotes = showMarginNotes
+        self.epubTheme = epubTheme
+        self.epubFont = epubFont
+        self.epubLine = epubLine
+        self.epubMargin = epubMargin
+        self.epubJustify = epubJustify
     }
 
     public static var fresh: ViewState { ViewState() }
@@ -136,6 +151,7 @@ public struct ViewState: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case version, page, scrollY, zoom, fitMode, continuous, twoPages
         case sidebar, panelVisible, panelTab, rotations, bookmarks, lastHighlightColor, windowFrame, showMarginNotes
+        case epubTheme, epubFont, epubLine, epubMargin, epubJustify
     }
 
     public init(from decoder: Decoder) throws {
@@ -155,6 +171,11 @@ public struct ViewState: Codable, Equatable, Sendable {
         lastHighlightColor = try container.decodeIfPresent(Int.self, forKey: .lastHighlightColor) ?? 1
         windowFrame = try container.decodeIfPresent(StoredWindowFrame.self, forKey: .windowFrame)
         showMarginNotes = try container.decodeIfPresent(Bool.self, forKey: .showMarginNotes) ?? false
+        epubTheme = try container.decodeIfPresent(String.self, forKey: .epubTheme) ?? "original"
+        epubFont = try container.decodeIfPresent(String.self, forKey: .epubFont) ?? "Original"
+        epubLine = try container.decodeIfPresent(Int.self, forKey: .epubLine) ?? 1
+        epubMargin = try container.decodeIfPresent(Int.self, forKey: .epubMargin) ?? 1
+        epubJustify = try container.decodeIfPresent(Bool.self, forKey: .epubJustify) ?? false
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -174,6 +195,11 @@ public struct ViewState: Codable, Equatable, Sendable {
         try container.encode(lastHighlightColor, forKey: .lastHighlightColor)
         try container.encodeIfPresent(windowFrame, forKey: .windowFrame)
         try container.encode(showMarginNotes, forKey: .showMarginNotes)
+        try container.encode(epubTheme, forKey: .epubTheme)
+        try container.encode(epubFont, forKey: .epubFont)
+        try container.encode(epubLine, forKey: .epubLine)
+        try container.encode(epubMargin, forKey: .epubMargin)
+        try container.encode(epubJustify, forKey: .epubJustify)
     }
 }
 

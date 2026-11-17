@@ -246,11 +246,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     // MARK: Toolbar
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .flexibleSpace, .search, .inspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .inspector]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .flexibleSpace, .search, .inspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .inspector]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
@@ -270,6 +270,13 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             return item
         case .sidebarTrackingSeparator:
             return nil
+        case .appearance:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.image = NSImage(systemSymbolName: "textformat.size", accessibilityDescription: "Appearance")
+            item.action = #selector(showAppearance(_:))
+            item.target = self
+            item.label = "Appearance"
+            return item
         case .addNote:
             let note = NSToolbarItem(itemIdentifier: itemIdentifier)
             note.image = NSImage(systemSymbolName: "note.text.badge.plus", accessibilityDescription: "Add Note")
@@ -492,6 +499,38 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     @objc func showWordsTab(_ sender: Any?) { session.show(tab: .words); applyChrome() }
     @objc func showHighlightsTab(_ sender: Any?) { session.show(tab: .highlights); applyChrome() }
     @objc func showAskTab(_ sender: Any?) { session.show(tab: .askAI); applyChrome() }
+    @objc func showAppearance(_ sender: Any?) {
+        let menu = NSMenu()
+        for theme in ["original", "paper", "quiet", "night"] {
+            let item = NSMenuItem(title: theme.capitalized, action: #selector(chooseTheme(_:)), keyEquivalent: "")
+            item.target = self
+            item.state = session.package.state.epubTheme == theme ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        for font in ["Original", "New York", "San Francisco", "Georgia", "Charter", "Iowan"] {
+            let item = NSMenuItem(title: font, action: #selector(chooseFont(_:)), keyEquivalent: "")
+            item.target = self
+            item.state = session.package.state.epubFont == font ? .on : .off
+            menu.addItem(item)
+        }
+        if let event = NSApp.currentEvent, let view = window?.contentView {
+            NSMenu.popUpContextMenu(menu, with: event, for: view)
+        }
+    }
+
+    @objc private func chooseTheme(_ sender: NSMenuItem) {
+        session.package.state.epubTheme = sender.title.lowercased()
+        session.saveViewQuietly()
+        epubController?.applyDisplayMode()
+    }
+
+    @objc private func chooseFont(_ sender: NSMenuItem) {
+        session.package.state.epubFont = sender.title
+        session.saveViewQuietly()
+        epubController?.applyDisplayMode()
+    }
+
     @objc func showMarginNotes(_ sender: Any?) { session.toggleMarginNotes(); applyChrome() }
     @objc func exportNotes(_ sender: Any?) {
         let panel = NSSavePanel()
@@ -715,5 +754,6 @@ private extension NSToolbarItem.Identifier {
     static let addNote = NSToolbarItem.Identifier("addNote")
     static let zoomIn = NSToolbarItem.Identifier("zoomIn")
     static let zoomOut = NSToolbarItem.Identifier("zoomOut")
+    static let appearance = NSToolbarItem.Identifier("appearance")
     static let inspector = NSToolbarItem.Identifier("inspector")
 }

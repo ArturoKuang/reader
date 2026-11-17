@@ -120,7 +120,7 @@ struct SidebarView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 4) {
                 if session.outline.isEmpty {
-                    Text("This document has no table of contents.").font(.caption).foregroundStyle(.secondary)
+                    ContentUnavailableView("No table of contents", systemImage: "list.bullet", description: Text("This book has no contents to open."))
                 }
                 ForEach(session.outline) { row in
                     Text(row.title)
@@ -161,7 +161,7 @@ struct SidebarView: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Bookmarks").font(.headline)
                 if session.bookmarks.isEmpty {
-                    Text("Press ⌘D to bookmark this page.").font(.caption).foregroundStyle(.secondary)
+                    ContentUnavailableView("No bookmarks", systemImage: "bookmark", description: Text("Press ⌘D to bookmark this page."))
                 }
                 ForEach(session.bookmarks) { bookmark in
                     VStack(alignment: .leading) {
@@ -461,6 +461,11 @@ struct WordList: View {
                     }
                 }
             }
+            if session.usesVault {
+                Text(session.vaultEnabled ? "Obsidian · learner/vocabulary.md" : "Not saving vocabulary to the vault")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -521,7 +526,6 @@ struct SettingsView: View {
     @State private var settings = SettingsStore.load()
     @State private var openAIKey = KeychainStore.load(account: "openai") ?? ""
     @State private var anthropicKey = KeychainStore.load(account: "anthropic") ?? ""
-    @State private var saved = false
 
     var body: some View {
         Form {
@@ -536,8 +540,10 @@ struct SettingsView: View {
             }
             Section("API keys") {
                 SecureField("OpenAI API key", text: $openAIKey)
+                    .onSubmit { if !openAIKey.isEmpty { KeychainStore.save(account: "openai", secret: openAIKey) } }
                 TextField("OpenAI model", text: $settings.openAIModel)
                 SecureField("Anthropic API key", text: $anthropicKey)
+                    .onSubmit { if !anthropicKey.isEmpty { KeychainStore.save(account: "anthropic", secret: anthropicKey) } }
                 TextField("Anthropic model", text: $settings.anthropicModel)
                 Text("Keys are stored in the login keychain under \(KeychainStore.service). They are not written into settings.json.").font(.caption).foregroundStyle(.secondary)
             }
@@ -560,14 +566,11 @@ struct SettingsView: View {
                 Toggle("Suggested notes", isOn: $settings.suggestedNotes)
                 Text("Suggested notes stay off until you turn them on. Reader does not write a suggestion unless you ask.").font(.caption).foregroundStyle(.secondary)
             }
-            Button(saved ? "Saved" : "Save") {
-                if !openAIKey.isEmpty { KeychainStore.save(account: "openai", secret: openAIKey) }
-                if !anthropicKey.isEmpty { KeychainStore.save(account: "anthropic", secret: anthropicKey) }
-                SettingsStore.save(settings)
-                saved = true
-            }
         }
         .formStyle(.grouped)
+        .onChange(of: settings) { _, newValue in
+            SettingsStore.save(newValue)
+        }
         .padding()
         .frame(minWidth: 520, minHeight: 560)
     }
@@ -644,10 +647,14 @@ private struct WordRow {
 }
 
 struct ShortcutsView: View {
+    @State private var query = ""
+
     var body: some View {
+        let rows = ShortcutCatalog.rows.filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) || $0.keys.localizedCaseInsensitiveContains(query) }
         VStack(alignment: .leading, spacing: 8) {
             Text("Viewing shortcuts match Preview. Notes, words, and Ask AI use the Reader shortcuts. ⌘1–⌘3 stay with Continuous Scroll, Single Page, and Two Pages, so the side panel uses ⌃1–⌃4.").font(.callout).foregroundStyle(.secondary)
-            List(ShortcutCatalog.rows) { row in
+            TextField("Search shortcuts", text: $query).textFieldStyle(.roundedBorder)
+            List(rows) { row in
                 HStack {
                     Text(row.title)
                     Spacer()
