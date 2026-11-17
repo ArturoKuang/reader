@@ -43,6 +43,10 @@ public enum ChapterFiles {
             let digits = rest.prefix { $0.isNumber }
             if let value = Int(digits), !digits.isEmpty { return value }
         }
+        let trimmed = heading.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if trimmed == "introduction" || trimmed.hasPrefix("introduction ") || trimmed.hasPrefix("introduction:") || trimmed == "intro" || trimmed.hasPrefix("preface") {
+            return 0
+        }
         return nil
     }
 

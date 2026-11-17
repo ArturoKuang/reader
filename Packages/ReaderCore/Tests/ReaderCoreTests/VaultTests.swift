@@ -208,5 +208,23 @@ final class VaultTests: XCTestCase {
         XCTAssertEqual(ChapterFiles.chapterTextFile(bookFolder: "/book", chapter: 4, fs: fs), "book/04-explanations.md")
         XCTAssertEqual(ChapterFiles.notesFile(chapter: 4, bookTitle: "Ignored"), "Chapter 4.md")
         XCTAssertEqual(ChapterFiles.number(in: "Chapter 4 · Explanations"), 4)
+        XCTAssertEqual(ChapterFiles.number(in: "Introduction"), 0)
+        let spine = [
+            EPUBSpineItem(id: "cover", href: "cover.xhtml", mediaType: "application/xhtml+xml", title: "cover.xhtml"),
+            EPUBSpineItem(id: "intro", href: "text/intro.xhtml", mediaType: "application/xhtml+xml", title: "intro.xhtml"),
+            EPUBSpineItem(id: "c1", href: "text/ch01.xhtml", mediaType: "application/xhtml+xml", title: "ch01.xhtml"),
+            EPUBSpineItem(id: "c1b", href: "text/ch01b.xhtml", mediaType: "application/xhtml+xml", title: "ch01b.xhtml"),
+            EPUBSpineItem(id: "c18", href: "text/ch18.xhtml", mediaType: "application/xhtml+xml", title: "ch18.xhtml"),
+        ]
+        let toc = [
+            EPUBTOCItem(title: "Cover", href: "cover.xhtml", depth: 0),
+            EPUBTOCItem(title: "Introduction", href: "text/intro.xhtml", depth: 0),
+            EPUBTOCItem(title: "Chapter 1. The Reach of Explanations", href: "text/ch01.xhtml#start", depth: 0),
+            EPUBTOCItem(title: "Chapter 18. The Beginning", href: "text/ch18.xhtml", depth: 0),
+        ]
+        let placed = SpineChapters.placements(spine: spine, toc: toc)
+        XCTAssertEqual(placed.map(\.chapter), [nil, 0, 1, 1, 18])
+        XCTAssertEqual(placed[2].title, "Chapter 1. The Reach of Explanations")
+        XCTAssertEqual(ChapterFiles.notesFile(chapter: placed[2].chapter, bookTitle: "book.epub"), "Chapter 1.md")
     }
 }

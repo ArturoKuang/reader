@@ -14,6 +14,9 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     private var findTop: NSLayoutConstraint?
     private var fontScale: Double = 1
     private var contactHost: NSHostingController<EPUBContactSheet>?
+    private var spineLoaded = false
+    private var acceptSpineReports = false
+    private var pendingFlash: String?
 
     init(session: ReaderSession) {
         self.session = session
@@ -85,8 +88,8 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         session.rememberZoom(fontScale, fit: .custom)
         loadSpine()
     }
-    func nextPage() { session.page = min(session.page + 1, session.pageCount); loadSpine() }
-    func previousPage() { session.page = max(session.page - 1, 1); loadSpine() }
+    func nextPage() { showSpine(index: min(session.page, max(session.pageCount - 1, 0))) }
+    func previousPage() { showSpine(index: max(session.page - 2, 0)) }
     func toggleFind() {
         findBar.isHidden.toggle()
         findTop?.constant = findBar.isHidden ? -40 : 8
@@ -118,26 +121,36 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     }
 
     func reveal(_ position: ReadingPosition) {
-        if let page = position.page { session.page = page }
-        loadSpine()
-        if let quote = position.quote, !quote.isEmpty {
-            let escaped = quote.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
-            webView?.evaluateJavaScript("window.find('\(escaped)')")
+        if let cfi = position.cfi, let parsed = EPUBCFI(value: cfi), let index = parsed.spineIndex {
+            showSpine(index: index)
+        } else if let page = position.page {
+            showSpine(index: page - 1)
         }
+        if let quote = position.quote, !quote.isEmpty { flash(quote) }
     }
 
     func consumePendingJump() {
-        guard let link = session.pendingReaderLink else { return }
+        guard spineLoaded, let link = session.pendingReaderLink else { return }
         session.pendingReaderLink = nil
-        if let location = link.location, let cfi = EPUBCFI(value: location), let index = cfi.spineIndex {
-            session.page = index + 1
-            loadSpine()
-        }
         let quote = session.highlights.first { $0.id == link.id }?.quote ?? session.notes.first { $0.id == link.id }?.quote ?? ""
-        guard !quote.isEmpty else { return }
-        let escaped = quote.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-            self?.webView?.evaluateJavaScript("window.readerFlash && window.readerFlash('\(escaped)')")
+        if !quote.isEmpty { pendingFlash = quote }
+        if let location = link.location, let cfi = EPUBCFI(value: location), let index = cfi.spineIndex {
+            showSpine(index: index)
+        } else {
+            scrollToCurrentSpine()
+        }
+        if let pendingFlash { flash(pendingFlash) }
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        spineLoaded = true
+        if session.pendingReaderLink != nil {
+            consumePendingJump()
+        } else {
+            scrollToCurrentSpine()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+            self?.acceptSpineReports = true
         }
     }
 
@@ -153,6 +166,11 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let body = message.body as? [String: Any] else { return }
+        if body["kind"] as? String == "spine" {
+            guard acceptSpineReports, let index = integer(body["index"]), let epub = session.epub, epub.spine.indices.contains(index) else { return }
+            applySpine(index, count: epub.spine.count)
+            return
+        }
         if body["kind"] as? String == "concept", let id = body["id"] as? String, let concept = session.concepts.first(where: { $0.id == id }) {
             let alert = NSAlert()
             alert.messageText = "\(concept.id) \(concept.title)"
@@ -168,6 +186,9 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             return
         }
         guard let text = body["text"] as? String else { return }
+        if let index = integer(body["index"]), let epub = session.epub, epub.spine.indices.contains(index) {
+            applySpine(index, count: epub.spine.count)
+        }
         session.selection = SelectionContext(
             text: text,
             cfi: body["cfi"] as? String,
@@ -177,6 +198,53 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             sentence: body["sentence"] as? String ?? text,
             rects: []
         )
+    }
+
+    private func showSpine(index: Int) {
+        guard let epub = session.epub, epub.spine.indices.contains(index) else { return }
+        applySpine(index, count: epub.spine.count)
+        if session.continuous && spineLoaded {
+            scrollToSpine(epub.spine[index].id)
+        } else {
+            loadSpine()
+        }
+    }
+
+    private func scrollToCurrentSpine() {
+        guard session.continuous, let epub = session.epub, !epub.spine.isEmpty else { return }
+        let index = min(max(session.page - 1, 0), epub.spine.count - 1)
+        applySpine(index, count: epub.spine.count)
+        scrollToSpine(epub.spine[index].id)
+    }
+
+    private func scrollToSpine(_ id: String) {
+        acceptSpineReports = false
+        let escaped = id.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+        webView?.evaluateJavaScript("document.getElementById('spine-\(escaped)')?.scrollIntoView({block:'start'})")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+            self?.acceptSpineReports = true
+        }
+    }
+
+    private func applySpine(_ index: Int, count: Int) {
+        guard let epub = session.epub, epub.spine.indices.contains(index) else { return }
+        let placements = SpineChapters.placements(spine: epub.spine, toc: epub.toc)
+        let placement = placements[index]
+        let title = placement.title.isEmpty ? epub.spine[index].title : placement.title
+        session.updatePage(index + 1, count: count, section: title)
+    }
+
+    private func flash(_ quote: String) {
+        let escaped = quote.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.webView?.evaluateJavaScript("window.readerFlash && window.readerFlash('\(escaped)')")
+        }
+    }
+
+    private func integer(_ value: Any?) -> Int? {
+        if let number = value as? Int { return number }
+        if let number = value as? NSNumber { return number.intValue }
+        return nil
     }
 
     private func conceptScript() -> String {
@@ -218,11 +286,17 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             session.updatePage(index + 1, count: epub.spine.count, section: epub.spine[index].title)
         }
         let columns = session.twoPages && !session.continuous ? "column-count: 2; column-gap: 32px; height: 100vh;" : ""
+        acceptSpineReports = false
+        let placements = SpineChapters.placements(spine: epub.spine, toc: epub.toc)
         var body = ""
         for item in items {
+            let index = epub.spine.firstIndex(where: { $0.id == item.id }) ?? 0
+            let chapter = placements.indices.contains(index) ? placements[index].chapter : nil
             let html = epub.xhtml(for: item.href) ?? "<p>Missing \(item.href)</p>"
-            body += "<section id=\"spine-\(item.id)\"><h2>\(item.title)</h2>\(html)</section>"
+            body += "<section id=\"spine-\(item.id)\" data-index=\"\(index)\" data-chapter=\"\(chapter.map(String.init) ?? "")\"><h2>\(item.title)</h2>\(html)</section>"
         }
+        let target = min(max(session.page - 1, 0), max(epub.spine.count - 1, 0))
+        applySpine(target, count: epub.spine.count)
         let css = """
         body { font: \(16 * fontScale)px Georgia, serif; line-height: 1.6; margin: 48px auto; max-width: \(session.twoPages ? 920 : 680)px; \(columns) }
         .reader-hl { background: #F2C94C59; }
@@ -243,8 +317,21 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
           const text = sel.toString();
           const node = sel.anchorNode ? sel.anchorNode.textContent || "" : "";
           const start = Math.max(0, node.indexOf(text));
-          return { text, prefix: node.slice(Math.max(0, start - 40), start), suffix: node.slice(start + text.length, start + text.length + 40), sentence: node.trim(), cfi: "epubcfi(/6/\((max(session.page - 1, 0) + 1) * 2)!/4,/1:" + start + ",/1:" + (start + text.length) + ")" };
+          const host = sel.anchorNode && (sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement);
+          const section = host && host.closest ? host.closest("section[id^='spine-']") : null;
+          const index = section ? Number(section.dataset.index || 0) : 0;
+          return { text, index, prefix: node.slice(Math.max(0, start - 40), start), suffix: node.slice(start + text.length, start + text.length + 40), sentence: node.trim(), cfi: "epubcfi(/6/" + ((index + 1) * 2) + "!/4,/1:" + start + ",/1:" + (start + text.length) + ")" };
         };
+        const sections = [...document.querySelectorAll("section[id^='spine-']")];
+        if (sections.length) {
+          const observer = new IntersectionObserver(entries => {
+            const visible = entries.filter(entry => entry.isIntersecting).sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+            if (!visible) return;
+            const index = Number(visible.target.dataset.index || 0);
+            if (window.webkit && window.webkit.messageHandlers.reader) window.webkit.messageHandlers.reader.postMessage({kind: "spine", index});
+          }, { root: null, threshold: [0.2, 0.5] });
+          sections.forEach(section => observer.observe(section));
+        }
         document.addEventListener("mouseup", () => {
           const value = window.readerSelection();
           if (value && window.webkit && window.webkit.messageHandlers.reader) window.webkit.messageHandlers.reader.postMessage(value);

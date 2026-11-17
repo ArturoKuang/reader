@@ -26,6 +26,52 @@ public struct EPUBTOCItem: Equatable, Sendable {
     }
 }
 
+public struct SpinePlacement: Equatable, Sendable {
+    public var title: String
+    public var chapter: Int?
+
+    public init(title: String, chapter: Int?) {
+        self.title = title
+        self.chapter = chapter
+    }
+}
+
+public enum SpineChapters {
+    /// One placement per spine item. Chapter numbers come from TOC titles
+    /// (`Chapter N`, or the introduction as chapter 0). A spine item with no
+    /// TOC entry of its own keeps the previous chapter.
+    public static func placements(spine: [EPUBSpineItem], toc: [EPUBTOCItem]) -> [SpinePlacement] {
+        var placements: [SpinePlacement] = []
+        var carried = SpinePlacement(title: "", chapter: nil)
+        for item in spine {
+            if let match = toc.last(where: { hrefsMatch(item.href, $0.href) }) {
+                let chapter = ChapterFiles.number(in: match.title) ?? carried.chapter
+                carried = SpinePlacement(title: match.title, chapter: chapter)
+            } else if !carried.title.isEmpty {
+                carried = SpinePlacement(title: carried.title, chapter: carried.chapter)
+            } else {
+                carried = SpinePlacement(title: item.title, chapter: ChapterFiles.number(in: item.title))
+            }
+            placements.append(carried)
+        }
+        return placements
+    }
+
+    static func hrefsMatch(_ spineHref: String, _ tocHref: String) -> Bool {
+        let left = bare(spineHref)
+        let right = bare(tocHref)
+        if left.isEmpty || right.isEmpty { return false }
+        return left == right || left.hasSuffix("/" + right) || right.hasSuffix("/" + left)
+    }
+
+    private static func bare(_ href: String) -> String {
+        let noHash = href.split(separator: "#").first.map(String.init) ?? href
+        var value = noHash.removingPercentEncoding ?? noHash
+        while value.hasPrefix("./") { value.removeFirst(2) }
+        return value
+    }
+}
+
 public struct EPUBBook: Equatable, Sendable {
     public var title: String
     public var identifier: String
