@@ -35,14 +35,16 @@ public struct TutorExchange: Equatable, Sendable {
 
 public enum TutorPrompt {
     public static func message(passage: String, chapter: Int?, chapterFile: String?, concepts: [Concept], question: String, command: TutorCommand?) -> String {
-        var lines = [
-            "You are the Socratic tutor described in CLAUDE.md. Ask one question at a time. Do not lecture.",
-            "",
-        ]
+        var lines: [String] = []
         if let command {
-            lines.append("Skill: \(command.slash)")
+            lines.append(question.isEmpty ? command.slash : "\(command.slash) \(question)")
+            lines.append("")
+        } else if !question.isEmpty {
+            lines.append(question)
             lines.append("")
         }
+        lines.append("You are the Socratic tutor described in CLAUDE.md. Ask one question at a time. Do not lecture.")
+        lines.append("")
         if let chapter {
             lines.append("Chapter: \(chapter)")
         }
@@ -56,7 +58,7 @@ public enum TutorPrompt {
         lines.append("Passage:")
         lines.append(passage)
         lines.append("")
-        if !question.isEmpty {
+        if command == nil, !question.isEmpty {
             lines.append("Reader's question: \(question)")
         }
         return lines.joined(separator: "\n")
@@ -65,7 +67,9 @@ public enum TutorPrompt {
 
 extension ClaudeCommand {
     /// Vault tutor: cwd is the book folder so CLAUDE.md and `.claude/skills` load.
-    /// Session persistence uses `--resume` or `--continue`. Edit/Write stay inside learner/, learning/, and reviews/.
+    /// The first call starts a fresh session. Later calls pass `--resume` with the id Claude returned.
+    /// `--continue` is never used, so Reader does not attach to an unrelated conversation in this folder.
+    /// Edit/Write stay inside learner/, learning/, and reviews/.
     public static let tutorWriteTools = "Read,Grep,Glob,Edit(learner/**),Edit(learning/**),Edit(reviews/**),Write(learner/**),Write(learning/**),Write(reviews/**)"
 
     public static func tutorInvocation(executable: String, prompt: String, workingDirectory: String, sessionID: String?) -> CLIInvocation {
@@ -79,10 +83,33 @@ extension ClaudeCommand {
         ]
         if let sessionID, !sessionID.isEmpty {
             arguments.append(contentsOf: ["--resume", sessionID])
-        } else {
-            arguments.append("--continue")
         }
         arguments.append(contentsOf: ["--", prompt])
         return CLIInvocation(executable: executable, arguments: arguments, workingDirectory: workingDirectory)
+    }
+}
+
+public enum ClaudeExecutable {
+    /// A GUI app's PATH does not include the directories a login shell uses.
+    public static func searchPaths(home: String) -> [String] {
+        let trimmed = home.hasSuffix("/") ? String(home.dropLast()) : home
+        return [
+            trimmed + "/.local/bin/claude",
+            "/opt/homebrew/bin/claude",
+            "/usr/local/bin/claude",
+        ]
+    }
+
+    /// Settings override wins. Otherwise the first executable candidate, then `zsh -lc 'command -v claude'`.
+    public static func resolve(override: String?, home: String, fileExists: (String) -> Bool, loginShellPath: () -> String?) -> String {
+        let custom = override?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !custom.isEmpty { return custom }
+        for path in searchPaths(home: home) where fileExists(path) {
+            return path
+        }
+        if let found = loginShellPath()?.trimmingCharacters(in: .whitespacesAndNewlines), !found.isEmpty, fileExists(found) {
+            return found
+        }
+        return "claude"
     }
 }

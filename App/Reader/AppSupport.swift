@@ -72,20 +72,22 @@ enum KeychainStore {
 }
 
 enum CLILocator {
-    /// Dock-launched apps do not see a login shell's PATH. Ask the login shell once.
+    /// Dock-launched apps do not see a login shell's PATH.
     static func locate(_ name: String) -> String? {
-        let candidates = [
-            "/opt/homebrew/bin/\(name)",
-            "/usr/local/bin/\(name)",
-            "/usr/bin/\(name)",
-        ]
+        let home = NSHomeDirectory()
+        let candidates = name == "claude"
+            ? ClaudeExecutable.searchPaths(home: home)
+            : [home + "/.local/bin/\(name)", "/opt/homebrew/bin/\(name)", "/usr/local/bin/\(name)"]
         for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
             return path
         }
-        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        return loginCommand(name)
+    }
+
+    static func loginCommand(_ name: String) -> String? {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: shell)
-        process.arguments = ["-lic", "command -v \(name)"]
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-lc", "command -v \(name)"]
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = Pipe()

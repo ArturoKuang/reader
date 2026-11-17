@@ -444,6 +444,15 @@ struct RightPanelView: View {
                 ForEach(Array(session.tutorLines.enumerated()), id: \.offset) { _, line in
                     Text(line).font(.callout).textSelection(.enabled)
                 }
+                if !session.answer.isEmpty {
+                    HStack {
+                        Button("Save as note") { session.saveAnswerAsNote() }
+                        Button("Copy") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(session.answer, forType: .string)
+                        }
+                    }
+                }
                 if !session.concepts.isEmpty {
                     Text("Concepts in this passage").font(.caption).foregroundStyle(.secondary)
                     ForEach(ConceptsFile.suggested(passage: session.selection?.text ?? "", concepts: session.concepts, chapter: ChapterFiles.number(in: session.selection?.section ?? session.sectionTitle))) { concept in
@@ -451,7 +460,7 @@ struct RightPanelView: View {
                     }
                 }
             }
-            if !session.answer.isEmpty {
+            if !session.tutorAvailable, !session.answer.isEmpty {
                 Text(session.answer).textSelection(.enabled)
                 Text(session.answerLabel).font(.caption).foregroundStyle(.secondary)
                 HStack {
@@ -528,7 +537,7 @@ struct SettingsView: View {
                     settings.claudeCLIPath = CLILocator.locate("claude")
                     settings.codexCLIPath = CLILocator.locate("codex")
                 }
-                Text("Reader runs `claude --print` and `codex exec` with read-only tools. Sign in with those tools themselves; Reader does not ask before sending.").font(.caption).foregroundStyle(.secondary)
+                Text("A saved claude path overrides detection. Otherwise Reader looks in ~/.local/bin, Homebrew, /usr/local/bin, then `zsh -lc 'command -v claude'`.").font(.caption).foregroundStyle(.secondary)
             }
             Section("Look up") {
                 Toggle("Use the default provider for word explanations", isOn: $settings.lookupUsesDefault)

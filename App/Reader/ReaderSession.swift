@@ -515,7 +515,11 @@ final class ReaderSession: ObservableObject {
     func askCurrentQuestion() {
         let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        ask(purpose: .ask(text))
+        if usesVault, tutorAvailable {
+            askTutor(command: nil, question: text)
+        } else {
+            ask(purpose: .ask(text))
+        }
     }
 
     func stopAsk() { runner.cancel() }
@@ -604,12 +608,23 @@ final class ReaderSession: ObservableObject {
             date: isoDay(Date()),
             eventID: "reader-\(UUID().uuidString.lowercased())"
         )
-        appendTutorEvent(event)
-        tutorLines.append("You: \(command?.slash ?? question)")
+        let spoken: String
+        if let command {
+            spoken = question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? command.slash : "\(command.slash) \(question.trimmingCharacters(in: .whitespacesAndNewlines))"
+        } else {
+            spoken = question
+        }
+        tutorLines.append("You: \(spoken)")
         asking = true
         show(tab: .askAI)
+        let executable = ClaudeExecutable.resolve(
+            override: settings.claudeCLIPath,
+            home: NSHomeDirectory(),
+            fileExists: { FileManager.default.isExecutableFile(atPath: $0) },
+            loginShellPath: { CLILocator.loginCommand("claude") }
+        )
         let invocation = ClaudeCommand.tutorInvocation(
-            executable: settings.claudeCLIPath ?? "claude",
+            executable: executable,
             prompt: prompt,
             workingDirectory: bookFolder,
             sessionID: claudeSessionID
@@ -617,24 +632,26 @@ final class ReaderSession: ObservableObject {
         let runner = ProcessCommandRunner()
         Task { [weak self] in
             do {
-                let result = try runner.run(invocation, timeout: 180) { chunk in
-                    Task { @MainActor in self?.answer = chunk }
-                }
+                let result = try runner.run(invocation, timeout: 180) { _ in }
                 let text = (try? CLIOutput.parseClaude(result.stdout)) ?? result.stdout
                 let resumed = CLIOutput.claudeSessionID(result.stdout)
                 await MainActor.run {
-                    if let resumed, !resumed.isEmpty {
-                        self?.claudeSessionID = resumed
-                        self?.onSaveVaultState?()
+                    guard let self else { return }
+                    if result.exitCode == 0, !result.timedOut, !result.cancelled {
+                        self.appendTutorEvent(event)
                     }
-                    self?.answer = text
-                    self?.tutorLines.append(text)
-                    self?.asking = false
-                    self?.answerLabel = "Answered by Claude Code in this vault"
+                    if let resumed, !resumed.isEmpty {
+                        self.claudeSessionID = resumed
+                        self.onSaveVaultState?()
+                    }
+                    self.answer = text
+                    self.tutorLines.append(text)
+                    self.asking = false
+                    self.answerLabel = "Answered by Claude Code in this vault"
                 }
             } catch {
                 await MainActor.run {
-                    self?.answer = error.localizedDescription
+                    self?.tutorLines.append(error.localizedDescription)
                     self?.asking = false
                 }
             }

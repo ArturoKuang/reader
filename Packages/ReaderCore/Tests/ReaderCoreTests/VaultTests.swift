@@ -188,6 +188,31 @@ final class VaultTests: XCTestCase {
         XCTAssertTrue(VaultSync.isOwnWrite(newDisk: first, lastWritten: first))
     }
 
+    func testTutorSendsTheQuestionAndStartsAFreshSession() {
+        let prompt = TutorPrompt.message(passage: "hard to vary", chapter: 4, chapterFile: "book/04-explanations.md", concepts: [], question: "Why is this hard?", command: .learn)
+        XCTAssertTrue(prompt.hasPrefix("/learn Why is this hard?"))
+        XCTAssertTrue(prompt.contains("hard to vary"))
+        let fresh = ClaudeCommand.tutorInvocation(executable: "claude", prompt: prompt, workingDirectory: "/book", sessionID: nil)
+        XCTAssertFalse(fresh.arguments.contains("--continue"))
+        XCTAssertFalse(fresh.arguments.contains("--resume"))
+        let resumed = ClaudeCommand.tutorInvocation(executable: "claude", prompt: prompt, workingDirectory: "/book", sessionID: "sess-9")
+        XCTAssertEqual(Array(resumed.arguments.drop(while: { $0 != "--resume" }).prefix(2)), ["--resume", "sess-9"])
+        XCTAssertFalse(resumed.arguments.contains("--continue"))
+        let home = "/Users/arturokuang"
+        XCTAssertEqual(
+            ClaudeExecutable.resolve(override: "/custom/claude", home: home, fileExists: { _ in false }, loginShellPath: { nil }),
+            "/custom/claude"
+        )
+        XCTAssertEqual(
+            ClaudeExecutable.resolve(override: "  ", home: home, fileExists: { $0.hasSuffix("/.local/bin/claude") }, loginShellPath: { "/opt/homebrew/bin/claude" }),
+            home + "/.local/bin/claude"
+        )
+        XCTAssertEqual(
+            ClaudeExecutable.resolve(override: nil, home: home, fileExists: { $0 == "/opt/homebrew/bin/claude" }, loginShellPath: { "/opt/homebrew/bin/claude" }),
+            "/opt/homebrew/bin/claude"
+        )
+    }
+
     func testClaudeSessionIDIsReadFromStreamJSON() {
         let stdout = """
         {"type":"assistant","session_id":"sess-9","message":{"content":[{"type":"text","text":"Why?"}]}}
