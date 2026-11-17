@@ -131,9 +131,31 @@ public enum VocabularyFile {
         return copy.joined(separator: "\n")
     }
 
+    public static func heading(_ word: String) -> String {
+        let trimmed = word.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.first else { return trimmed }
+        return String(first).uppercased() + trimmed.dropFirst()
+    }
+
+    /// The first dictionary sense, not the whole entry.
+    public static func shortMeaning(_ definition: String) -> String {
+        let lines = definition.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let text = lines.joined(separator: " ")
+        guard !text.isEmpty else { return "" }
+        var sense = text
+        if let numbered = text.range(of: #"\d+\s*[\.\)]\s+"#, options: .regularExpression) {
+            sense = String(text[numbered.upperBound...])
+        }
+        sense = sense.split(separator: ";").first.map(String.init) ?? sense
+        if let period = sense.firstIndex(of: "."), sense.distance(from: sense.startIndex, to: period) > 0, sense.distance(from: sense.startIndex, to: period) < 90 {
+            sense = String(sense[..<period])
+        }
+        return sense.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     public static func render(_ entry: VocabEntry) -> String {
-        var lines = ["### \(entry.word)"]
-        lines.append("- **Meaning:** \(entry.meaning)")
+        var lines = ["### \(heading(entry.word))"]
+        lines.append("- **Meaning:** \(shortMeaning(entry.meaning))")
         lines.append("- **Book context:** “\(entry.bookContext)”")
         if let plain = entry.plainLanguage, !plain.isEmpty {
             lines.append("- **In plain language:** \(plain)")

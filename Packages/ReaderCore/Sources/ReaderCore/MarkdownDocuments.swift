@@ -231,6 +231,11 @@ public struct HighlightsDocument: Equatable, Sendable {
         self.warnings = warnings
     }
 
+    /// Same passage on the same page or CFI. A second highlight of that range is a duplicate.
+    public func containsSameRange(quote: String, page: Int?, cfi: String?) -> Bool {
+        highlights.contains { $0.quote == quote && $0.page == page && $0.cfi == cfi }
+    }
+
     /// Drops one highlight. The next `render()` omits it from `highlights.md`.
     public mutating func removeHighlight(id: String) -> HighlightEntry? {
         guard let index = highlights.firstIndex(where: { $0.id == id }) else { return nil }

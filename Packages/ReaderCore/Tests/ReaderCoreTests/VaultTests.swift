@@ -55,7 +55,8 @@ final class VaultTests: XCTestCase {
         let chapter3 = updated.range(of: "## Chapter 3")!
         XCTAssertLessThan(chapter3.lowerBound, chapter4.lowerBound)
         XCTAssertLessThan(chapter4.lowerBound, chapter5.lowerBound)
-        XCTAssertTrue(updated.contains("- **Meaning:** Offspring."))
+        XCTAssertTrue(updated.contains("- **Meaning:** Offspring"))
+        XCTAssertTrue(updated.contains("### Progeny"))
         XCTAssertTrue(updated.contains("- **Book context:** “the progeny of a pair”"))
         XCTAssertTrue(updated.contains("- **Added:** October 13, 2026"))
         XCTAssertFalse(updated.contains("In plain language"))
@@ -164,7 +165,7 @@ final class VaultTests: XCTestCase {
         XCTAssertTrue(tutor.arguments.contains("--continue") == false)
         XCTAssertTrue(ClaudeCommand.tutorWriteTools.contains("Write(learner/**)"))
         let fresh = ClaudeCommand.tutorInvocation(executable: "claude", prompt: "Hi", workingDirectory: "/book", sessionID: nil)
-        XCTAssertTrue(fresh.arguments.contains("--continue"))
+        XCTAssertFalse(fresh.arguments.contains("--continue"))
         let prompt = TutorPrompt.message(passage: "hard to vary", chapter: 4, chapterFile: "book/04.md", concepts: [concepts[0]], question: "Why?", command: .learn)
         XCTAssertTrue(prompt.contains("/learn"))
         XCTAssertTrue(prompt.contains("one question at a time"))
@@ -249,6 +250,12 @@ final class VaultTests: XCTestCase {
         ]
         let placed = SpineChapters.placements(spine: spine, toc: toc)
         XCTAssertEqual(placed.map(\.chapter), [nil, 0, 1, 1, 18])
+        XCTAssertFalse(ConceptMatching.contains(term: "219", in: "postcode SW1A 2190"))
+        XCTAssertTrue(ConceptMatching.contains(term: "219", in: "postcode 219"))
+        XCTAssertFalse(ConceptMatching.contains(term: "aerodynamic", in: "aerodynamics"))
+        XCTAssertTrue(ConceptMatching.contains(term: "aerodynamic", in: "an aerodynamic tilt"))
+        XCTAssertEqual(VocabularyFile.heading("progeny"), "Progeny")
+        XCTAssertEqual(VocabularyFile.shortMeaning("noun\n1. Offspring; descendants of a person.\n2. Outcome."), "Offspring")
         XCTAssertEqual(placed[2].title, "Chapter 1. The Reach of Explanations")
         XCTAssertEqual(ChapterFiles.notesFile(chapter: placed[2].chapter, bookTitle: "book.epub"), "Chapter 1.md")
     }

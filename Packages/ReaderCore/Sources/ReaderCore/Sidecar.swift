@@ -335,6 +335,17 @@ public enum SidecarStore {
         return .different
     }
 
+    /// Remembers a vault book so Export All Words can find it. The directory is the book folder, not a .reader package.
+    public static func noteVaultBook(bookPath: String, directory: String, title: String, fingerprint: String, index: inout LibraryIndex, now: String) {
+        let result = OpenResult(
+            package: .empty(identity: FrontMatter(kind: "notes", document: title, fingerprint: fingerprint)),
+            directory: directory,
+            placement: .sibling,
+            hasSavedViewState: true
+        )
+        record(result, fingerprint: fingerprint, pdfID: nil, epubID: nil, title: title, bookPath: bookPath, index: &index, now: now)
+    }
+
     private static func record(_ result: OpenResult, fingerprint: String, pdfID: String?, epubID: String?, title: String, bookPath: String, index: inout LibraryIndex, now: String) {
         index.documents.removeAll { entry in
             entry.fingerprint == fingerprint

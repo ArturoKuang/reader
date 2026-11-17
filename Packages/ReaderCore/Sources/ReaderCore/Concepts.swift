@@ -1,5 +1,41 @@
 import Foundation
 
+public enum ConceptMatching {
+    /// A find-term matches only as a whole token. Digits inside a longer number do not count.
+    public static func contains(term: String, in text: String) -> Bool {
+        range(of: term, in: text) != nil
+    }
+
+    public static func range(of term: String, in text: String) -> Range<String.Index>? {
+        let needle = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return nil }
+        let haystack = text.lowercased()
+        let query = needle.lowercased()
+        var cursor = haystack.startIndex
+        while let found = haystack.range(of: query, range: cursor..<haystack.endIndex) {
+            if isWholeToken(found, in: haystack) { return found }
+            cursor = found.upperBound
+        }
+        return nil
+    }
+
+    private static func isWholeToken(_ range: Range<String.Index>, in text: String) -> Bool {
+        if range.lowerBound > text.startIndex {
+            let before = text[text.index(before: range.lowerBound)]
+            if isTokenCharacter(before) { return false }
+        }
+        if range.upperBound < text.endIndex {
+            let after = text[range.upperBound]
+            if isTokenCharacter(after) { return false }
+        }
+        return true
+    }
+
+    private static func isTokenCharacter(_ character: Character) -> Bool {
+        character.isLetter || character.isNumber || character == "'" || character == "’"
+    }
+}
+
 public struct Concept: Equatable, Sendable, Identifiable {
     public var id: String
     public var title: String
@@ -60,12 +96,11 @@ public enum ConceptsFile {
     }
 
     public static func suggested(passage: String, concepts: [Concept], chapter: Int?) -> [Concept] {
-        let haystack = passage.lowercased()
-        return concepts.filter { concept in
-            if let chapter, let own = concept.chapter, own != chapter { return false }
-            return concept.findTerms.contains { term in
-                !term.isEmpty && haystack.contains(term.lowercased())
+        concepts.filter { concept in
+            if let own = concept.chapter {
+                guard let chapter, own == chapter else { return false }
             }
+            return concept.findTerms.contains { ConceptMatching.contains(term: $0, in: passage) }
         }
     }
 

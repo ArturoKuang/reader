@@ -149,6 +149,8 @@ final class CoreTests: XCTestCase {
         let parsed = HighlightsDocument.parse(rendered)
         XCTAssertEqual(parsed.highlights.map(\.id), ["h_keep"])
         XCTAssertEqual(parsed.highlights.first?.quote, "kept sentence")
+        XCTAssertTrue(document.containsSameRange(quote: "kept sentence", page: 10, cfi: nil))
+        XCTAssertFalse(document.containsSameRange(quote: "kept sentence", page: 11, cfi: nil))
     }
 
     func testWordsRoundTripUndoAndOrphanBullet() {
