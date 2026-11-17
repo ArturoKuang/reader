@@ -51,6 +51,15 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         session.onToast = { [weak self] text in
             self?.presentToast(text)
         }
+        session.onCaptureSelection = { [weak self] done in
+            guard let self else { done(); return }
+            if let epub = self.epubController {
+                epub.captureSelection(completion: done)
+            } else {
+                self.pdfController?.captureSelection()
+                done()
+            }
+        }
         installMonitor()
         session.onPageChange = { [weak self] in
             self?.document.map { ($0 as? ReaderDocument)?.refreshSubtitle() }
@@ -442,43 +451,49 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     @objc func highlight6(_ sender: Any?) { highlight(6) }
     @objc func highlightLast(_ sender: Any?) { session.highlightLast(); pdfController?.refreshAnnotations(); applyChrome() }
     private func highlight(_ color: Int) {
-        pdfController?.captureSelection()
-        epubController?.captureSelection()
-        session.highlight(color: color)
-        pdfController?.refreshAnnotations()
-        applyChrome()
+        session.withSelection { [weak self] in
+            guard let self else { return }
+            self.session.highlight(color: color)
+            self.pdfController?.refreshAnnotations()
+            self.applyChrome()
+        }
     }
     @objc func addNote(_ sender: Any?) {
-        pdfController?.captureSelection()
-        epubController?.captureSelection()
-        session.addNote()
-        pdfController?.refreshAnnotations()
-        applyChrome()
+        session.withSelection { [weak self] in
+            guard let self else { return }
+            self.session.addNote()
+            self.pdfController?.refreshAnnotations()
+            self.applyChrome()
+        }
     }
     @objc func lookUp(_ sender: Any?) {
-        pdfController?.captureSelection()
-        epubController?.captureSelection()
-        session.lookUp()
-        pdfController?.showLookup()
-        applyChrome()
+        session.withSelection { [weak self] in
+            guard let self else { return }
+            self.session.lookUp()
+            self.pdfController?.showLookup()
+            self.applyChrome()
+        }
     }
     @objc func askAI(_ sender: Any?) {
-        pdfController?.captureSelection()
-        epubController?.captureSelection()
-        session.show(tab: .askAI)
-        applyChrome()
+        session.withSelection { [weak self] in
+            guard let self else { return }
+            self.session.show(tab: .askAI)
+            self.applyChrome()
+        }
     }
     @objc func explainSimply(_ sender: Any?) {
-        pdfController?.captureSelection()
-        epubController?.captureSelection()
-        session.ask(purpose: .explainSimply)
-        applyChrome()
+        session.withSelection { [weak self] in
+            guard let self else { return }
+            self.session.ask(purpose: .explainSimply)
+            self.applyChrome()
+        }
     }
     @objc func summarizeSection(_ sender: Any?) {
-        pdfController?.captureSelection()
-        epubController?.captureSelection()
-        session.ask(purpose: .summarizeSection)
-        applyChrome()
+        session.withSelection { [weak self] in
+            guard let self else { return }
+            self.session.ask(purpose: .summarizeSection)
+            self.applyChrome()
+        }
     }
     @objc func bookmarkPage(_ sender: Any?) { session.addBookmark(); applyChrome() }
     @objc func revealInObsidian(_ sender: Any?) {
@@ -502,10 +517,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         session.onSaveVaultState?()
     }
     @objc func copyCitation(_ sender: Any?) {
-        pdfController?.captureSelection()
-        guard let text = session.copyCitation() else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        session.withSelection { [weak self] in
+            guard let self, let text = self.session.copyCitation() else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+        }
     }
 
     @objc func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {

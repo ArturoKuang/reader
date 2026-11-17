@@ -104,18 +104,32 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     }
 
     func captureSelection() {
-        webView?.evaluateJavaScript("window.readerSelection && window.readerSelection()") { [weak self] result, _ in
-            guard let self, let object = result as? [String: Any], let text = object["text"] as? String, !text.isEmpty else { return }
-            Task { @MainActor in
-                self.session.selection = SelectionContext(
-                    text: text,
-                    cfi: object["cfi"] as? String,
-                    section: self.session.sectionTitle,
-                    prefix: object["prefix"] as? String ?? "",
-                    suffix: object["suffix"] as? String ?? "",
-                    sentence: object["sentence"] as? String ?? text,
-                    rects: []
-                )
+        captureSelection(completion: {})
+    }
+
+    /// Reads the DOM selection and only then runs `completion`, on the main queue.
+    func captureSelection(completion: @escaping () -> Void) {
+        guard let webView else {
+            completion()
+            return
+        }
+        webView.evaluateJavaScript("window.readerSelection && window.readerSelection()") { [weak self] result, _ in
+            DispatchQueue.main.async {
+                if let self, let object = result as? [String: Any], let text = object["text"] as? String, !text.isEmpty {
+                    if let index = self.integer(object["index"]), let epub = self.session.epub, epub.spine.indices.contains(index) {
+                        self.applySpine(index, count: epub.spine.count)
+                    }
+                    self.session.selection = SelectionContext(
+                        text: text,
+                        cfi: object["cfi"] as? String,
+                        section: self.session.sectionTitle,
+                        prefix: object["prefix"] as? String ?? "",
+                        suffix: object["suffix"] as? String ?? "",
+                        sentence: object["sentence"] as? String ?? text,
+                        rects: []
+                    )
+                }
+                completion()
             }
         }
     }

@@ -26,6 +26,8 @@ final class ReaderSession: ObservableObject {
     var tutorAvailable = false
     var claudeSessionID: String?
     var onVaultFlush: (() -> Void)?
+    /// AppKit/WebKit refresh the current passage, then run the action. PDF is synchronous.
+    var onCaptureSelection: ((@escaping () -> Void) -> Void)?
     var onSaveVaultState: (() -> Void)?
     var onInsertConcept: ((Concept) -> Void)?
     @Published var vaultNotesFolder = "notes"
@@ -488,6 +490,14 @@ final class ReaderSession: ObservableObject {
             }
             asking = false
         }
+    }
+
+    func withSelection(_ body: @escaping () -> Void) {
+        guard let onCaptureSelection else {
+            body()
+            return
+        }
+        onCaptureSelection(body)
     }
 
     func askCurrentQuestion() {

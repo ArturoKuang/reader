@@ -416,16 +416,16 @@ struct RightPanelView: View {
             }
             TextField("Ask about the selection", text: $session.question)
                 .textFieldStyle(.roundedBorder)
-                .onSubmit { session.askCurrentQuestion() }
+                .onSubmit { session.withSelection { session.askCurrentQuestion() } }
             HStack {
-                Button(session.asking ? "Asking…" : "Ask") { session.askCurrentQuestion() }.disabled(session.asking)
+                Button(session.asking ? "Asking…" : "Ask") { session.withSelection { session.askCurrentQuestion() } }.disabled(session.asking)
                 Button("Stop") { session.stopAsk() }.disabled(!session.asking)
             }
             if session.tutorAvailable {
                 HStack {
-                    Button("Learn") { session.askTutor(command: .learn, question: session.question) }
-                    Button("Review") { session.askTutor(command: .review, question: session.question) }
-                    Button("Wrap") { session.askTutor(command: .wrap, question: session.question) }
+                    Button("Learn") { session.withSelection { session.askTutor(command: .learn, question: session.question) } }
+                    Button("Review") { session.withSelection { session.askTutor(command: .review, question: session.question) } }
+                    Button("Wrap") { session.withSelection { session.askTutor(command: .wrap, question: session.question) } }
                 }
                 ForEach(Array(session.tutorLines.enumerated()), id: \.offset) { _, line in
                     Text(line).font(.callout).textSelection(.enabled)
