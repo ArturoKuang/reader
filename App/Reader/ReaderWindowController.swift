@@ -546,8 +546,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         NSPasteboard.general.setString(session.annotationMarkdown(session.annotations), forType: .string)
     }
 
-    func showSelectionBar(relativeTo rect: NSRect) {
-        guard let host = pdfController?.noteHostView ?? epubController?.view else { return }
+    func showSelectionBar(relativeTo rect: NSRect, in host: NSView) {
         selectionBar.show(session: session, relativeTo: rect, of: host)
     }
 

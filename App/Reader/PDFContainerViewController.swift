@@ -329,15 +329,21 @@ final class PDFContainerViewController: NSViewController {
             sentence: span?.sentence ?? text,
             rects: rects
         )
-        if showBar, session.settings.showSelectionBar, let page = pdfView.currentPage {
-            let rect: NSRect
-            if let first = rects.first, first.count >= 4 {
-                rect = pdfView.convert(NSRect(x: first[0], y: first[1], width: max(first[2] - first[0], 8), height: max(first[3] - first[1], 8)), from: page)
-            } else {
-                rect = pdfView.bounds
-            }
-            (view.window?.windowController as? ReaderWindowController)?.showSelectionBar(relativeTo: rect)
+        if showBar, session.settings.showSelectionBar, let union = selectionBounds(of: pdfView.currentSelection) {
+            (view.window?.windowController as? ReaderWindowController)?.showSelectionBar(relativeTo: union, in: pdfView)
         }
+    }
+
+    private func selectionBounds(of selection: PDFSelection?) -> NSRect? {
+        guard let selection else { return nil }
+        var union: NSRect?
+        for line in selection.selectionsByLine() {
+            guard let page = line.pages.first else { continue }
+            let converted = pdfView.convert(line.bounds(for: page), from: page)
+            guard converted.width > 0, converted.height > 0 else { continue }
+            union = union.map { $0.union(converted) } ?? converted
+        }
+        return union
     }
 
     func refreshAnnotations() {

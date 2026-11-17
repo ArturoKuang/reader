@@ -191,6 +191,10 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let body = message.body as? [String: Any] else { return }
+        if body["kind"] as? String == "dismiss-bar" {
+            (view.window?.windowController as? ReaderWindowController)?.dismissSelectionBar()
+            return
+        }
         if body["kind"] as? String == "note", let id = body["id"] as? String {
             session.lastAnnotationHit = id
             session.openAnnotation(id)
@@ -228,8 +232,8 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             sentence: body["sentence"] as? String ?? text,
             rects: []
         )
-        if session.settings.showSelectionBar {
-            (view.window?.windowController as? ReaderWindowController)?.showSelectionBar(relativeTo: NSRect(x: view.bounds.midX, y: view.bounds.midY, width: 2, height: 2))
+        if session.settings.showSelectionBar, let webView, let rect = cssSelectionRect(body["rect"], in: webView) {
+            (view.window?.windowController as? ReaderWindowController)?.showSelectionBar(relativeTo: rect, in: webView)
         }
     }
 
@@ -272,6 +276,19 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
             self?.webView?.evaluateJavaScript("window.readerFlash && window.readerFlash('\(escaped)')")
         }
+    }
+
+    private func cssSelectionRect(_ value: Any?, in webView: WKWebView) -> NSRect? {
+        guard let rect = value as? [String: Any] else { return nil }
+        func number(_ key: String) -> CGFloat? {
+            if let value = rect[key] as? NSNumber { return CGFloat(truncating: value) }
+            return nil
+        }
+        guard let x = number("x"), let y = number("y"), let width = number("width"), let height = number("height"), width > 1, height > 1 else { return nil }
+        if webView.isFlipped {
+            return NSRect(x: x, y: y, width: width, height: height)
+        }
+        return NSRect(x: x, y: webView.bounds.height - y - height, width: width, height: height)
     }
 
     private func integer(_ value: Any?) -> Int? {
@@ -404,7 +421,8 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
           const host = sel.anchorNode && (sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement);
           const section = host && host.closest ? host.closest("section[id^='spine-']") : null;
           const index = section ? Number(section.dataset.index || 0) : 0;
-          return { text, index, prefix: node.slice(Math.max(0, start - 40), start), suffix: node.slice(start + text.length, start + text.length + 40), sentence: node.trim(), cfi: "epubcfi(/6/" + ((index + 1) * 2) + "!/4,/1:" + start + ",/1:" + (start + text.length) + ")" };
+          const box = sel.getRangeAt(0).getBoundingClientRect();
+          return { text, index, rect: { x: box.left, y: box.top, width: box.width, height: box.height }, prefix: node.slice(Math.max(0, start - 40), start), suffix: node.slice(start + text.length, start + text.length + 40), sentence: node.trim(), cfi: "epubcfi(/6/" + ((index + 1) * 2) + "!/4,/1:" + start + ",/1:" + (start + text.length) + ")" };
         };
         const sections = [...document.querySelectorAll("section[id^='spine-']")];
         if (sections.length) {
@@ -416,6 +434,9 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
           }, { root: null, threshold: [0.2, 0.5] });
           sections.forEach(section => observer.observe(section));
         }
+        document.addEventListener("scroll", () => {
+          if (window.webkit && window.webkit.messageHandlers.reader) window.webkit.messageHandlers.reader.postMessage({kind: "dismiss-bar"});
+        }, true);
         document.addEventListener("mouseup", () => {
           const value = window.readerSelection();
           if (value && window.webkit && window.webkit.messageHandlers.reader) window.webkit.messageHandlers.reader.postMessage(value);
