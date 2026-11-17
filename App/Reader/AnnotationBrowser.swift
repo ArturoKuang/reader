@@ -11,34 +11,43 @@ struct AnnotationBrowser: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            VStack(alignment: .leading, spacing: 6) {
                 TextField("Search notes and highlights", text: $session.annotationQuery)
                     .textFieldStyle(.roundedBorder)
-                Menu(filterTitle) {
-                    Button("All") { session.annotationFilter = "all" }
-                    Button("Notes Only") { session.annotationFilter = "notes" }
-                    Divider()
-                    ForEach(1...6, id: \.self) { color in
-                        Button("Color \(color) (\(session.annotations.filter { $0.color == color && $0.highlight != nil }.count))") {
-                            session.annotationFilter = "\(color)"
+                Menu {
+                    Section("Show") {
+                        Button("All") { session.annotationFilter = "all" }
+                        Button("Notes Only") { session.annotationFilter = "notes" }
+                        ForEach(1...6, id: \.self) { color in
+                            Button("\(HighlightCallout.name(for: color).capitalized) (\(session.annotations.filter { $0.color == color && $0.highlight != nil }.count))") {
+                                session.annotationFilter = "\(color)"
+                            }
                         }
                     }
-                    Divider()
-                    Button("Sort: Page Order") { session.annotationSortRecent = false }
-                    Button("Sort: Recently Edited") { session.annotationSortRecent = true }
+                    Section("Sort") {
+                        Button("Page Order") { session.annotationSortRecent = false }
+                        Button("Recently Edited") { session.annotationSortRecent = true }
+                    }
+                } label: {
+                    Label(filterTitle, systemImage: "line.3.horizontal.decrease")
                 }
                 .menuStyle(.borderlessButton)
-                .fixedSize()
+                .fixedSize(horizontal: true, vertical: false)
             }
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
             if session.annotationSelection.count > 1 {
                 selectionStrip
             }
             if session.visibleAnnotations.isEmpty {
-                if session.annotationQuery.isEmpty && session.annotationFilter == "all" {
-                    ContentUnavailableView("No highlights or notes yet", systemImage: "highlighter", description: Text("Select text, then press ⌃⌘1–6 to highlight or ⇧⌘N to add a note."))
-                } else {
-                    ContentUnavailableView.search(text: session.annotationQuery)
+                Group {
+                    if session.annotationQuery.isEmpty && session.annotationFilter == "all" {
+                        ContentUnavailableView("No highlights or notes yet", systemImage: "highlighter", description: Text("Select text, then press ⌃⌘1–6 to highlight or ⇧⌘N to add a note."))
+                    } else {
+                        ContentUnavailableView.search(text: session.annotationQuery)
+                    }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List(selection: $session.annotationSelection) {
                     ForEach(AnnotationIndex.grouped(session.visibleAnnotations)) { group in
@@ -79,9 +88,11 @@ struct AnnotationBrowser: View {
                     }
                     return .ignored
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             vaultFooter
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear {
             suppressJump = true
             if session.annotationSelection.isEmpty, let nearest = AnnotationIndex.nearest(session.annotations, to: session.page) {
@@ -92,9 +103,10 @@ struct AnnotationBrowser: View {
     }
 
     private var filterTitle: String {
-        if session.annotationFilter == "notes" { return "Notes" }
-        if let color = Int(session.annotationFilter) { return "Color \(color)" }
-        return "All"
+        let sort = session.annotationSortRecent ? "Recent" : "Page"
+        if session.annotationFilter == "notes" { return "\(sort) · Notes" }
+        if let color = Int(session.annotationFilter) { return "\(sort) · \(HighlightCallout.name(for: color).capitalized)" }
+        return "\(sort) · All"
     }
 
     private func row(_ item: Annotation) -> some View {
@@ -164,8 +176,23 @@ struct AnnotationBrowser: View {
     }
 
     private var selectionStrip: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                Text("\(session.annotationSelection.count) selected")
+                selectionActions
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(session.annotationSelection.count) selected")
+                selectionActions
+            }
+        }
+        .font(.caption)
+        .buttonStyle(.borderless)
+        .padding(.horizontal, 12)
+    }
+
+    private var selectionActions: some View {
         HStack(spacing: 10) {
-            Text("\(session.annotationSelection.count) selected")
             Button("Delete") { session.deleteSelectedAnnotations() }
             Menu("Recolor") {
                 ForEach(1...6, id: \.self) { color in
@@ -181,8 +208,6 @@ struct AnnotationBrowser: View {
                 session.exportAnnotations(items)
             }
         }
-        .font(.caption)
-        .buttonStyle(.borderless)
     }
 
     private func paste(_ text: String) {
@@ -210,6 +235,8 @@ struct AnnotationBrowser: View {
                 Button("Settings") { vaultSettings = true }
                     .buttonStyle(.borderless)
             }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 8)
             .popover(isPresented: $vaultSettings) {
                 VStack(alignment: .leading, spacing: 8) {
                     Toggle("Write notes into this vault", isOn: $session.vaultEnabled)

@@ -310,18 +310,17 @@ struct RightPanelView: View {
             .padding(8)
             .labelsHidden()
             Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    switch session.panelTab {
-                    case .notes, .highlights:
-                        AnnotationBrowser(session: session) { item in jumpAnnotation(item) }
-                            .frame(minHeight: 280)
-                    case .words: words
-                    case .askAI: ask
-                    }
-                }
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            switch session.panelTab {
+            case .notes, .highlights:
+                AnnotationBrowser(session: session) { item in jumpAnnotation(item) }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .words:
+                WordList(session: session)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .askAI:
+                ask
+                    .padding(12)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
         }
     }
@@ -329,10 +328,6 @@ struct RightPanelView: View {
     private func jumpAnnotation(_ item: Annotation) {
         guard let controller = NSApp.keyWindow?.windowController as? ReaderWindowController else { return }
         controller.reveal(ReadingPosition(page: item.page, cfi: item.cfi, section: item.section, quote: item.quote))
-    }
-
-    private var words: some View {
-        WordList(session: session)
     }
 
     private var ask: some View {
@@ -345,21 +340,28 @@ struct RightPanelView: View {
                         .buttonStyle(.borderless)
                 }
             }
-            HStack {
-                Button("Explain") { session.withSelection { session.ask(purpose: .explainSimply) } }
-                Button("Summarize") { session.withSelection { session.ask(purpose: .summarizeSection) } }
-                Button("Define Terms") { session.withSelection { session.ask(purpose: .ask("Define the difficult terms in this passage.")) } }
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Button("Explain") { session.withSelection { session.ask(purpose: .explainSimply) } }
+                    Button("Summarize") { session.withSelection { session.ask(purpose: .summarizeSection) } }
+                }
+                HStack(spacing: 6) {
+                    Button("Define Terms") { session.withSelection { session.ask(purpose: .ask("Define the difficult terms in this passage.")) } }
+                }
                 if session.tutorAvailable {
-                    Button("Learn") { session.withSelection { session.askTutor(command: .learn, question: session.question) } }
-                    Button("Review") { session.withSelection { session.askTutor(command: .review, question: session.question) } }
-                    Button("Wrap") { session.withSelection { session.askTutor(command: .wrap, question: session.question) } }
+                    HStack(spacing: 6) {
+                        Button("Learn") { session.withSelection { session.askTutor(command: .learn, question: session.question) } }
+                        Button("Review") { session.withSelection { session.askTutor(command: .review, question: session.question) } }
+                        Button("Wrap") { session.withSelection { session.askTutor(command: .wrap, question: session.question) } }
+                    }
                 }
             }
+            if session.chat.isEmpty {
+                ContentUnavailableView("Ask about this passage", systemImage: "text.bubble", description: Text("Passages are sent to the chosen provider when you ask."))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
-                    if session.chat.isEmpty {
-                        ContentUnavailableView("Ask about this passage", systemImage: "text.bubble", description: Text("Passages are sent to the chosen provider when you ask."))
-                    }
                     ForEach(session.chat) { line in
                         VStack(alignment: .leading, spacing: 4) {
                             Text(line.text).textSelection(.enabled).padding(8).background(line.mine ? Color.accentColor.opacity(0.15) : Color(nsColor: .quaternaryLabelColor).opacity(0.2)).clipShape(RoundedRectangle(cornerRadius: 8))
@@ -380,6 +382,8 @@ struct RightPanelView: View {
                     }
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
             TextEditor(text: $session.question)
                 .font(.body)
                 .frame(minHeight: 44, maxHeight: 80)
@@ -399,13 +403,6 @@ struct RightPanelView: View {
             }
         }
     }
-
-    private func conceptHelp(_ concept: Concept) -> String {
-        var lines: [String] = []
-        if let claim = concept.claim { lines.append("Claim: \(claim)") }
-        if let trap = concept.trap { lines.append("Trap: \(trap)") }
-        return lines.joined(separator: "\n")
-    }
 }
 
 struct WordList: View {
@@ -417,21 +414,31 @@ struct WordList: View {
     var body: some View {
         let rows = ordered
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                TextField("Search words", text: $query).textFieldStyle(.roundedBorder)
-                Picker("Sort", selection: $sort) {
-                    Text("Recent").tag("recent")
-                    Text("A–Z").tag("alpha")
-                    Text("Page").tag("page")
-                }.labelsHidden()
-                Picker("Filter", selection: $filter) {
-                    Text("All").tag("all")
-                    Text("Learning").tag("learning")
-                    Text("Learned").tag("learned")
-                }.labelsHidden()
+            VStack(alignment: .leading, spacing: 6) {
+                TextField("Search words", text: $query)
+                    .textFieldStyle(.roundedBorder)
+                Menu {
+                    Section("Sort") {
+                        Button("Recent") { sort = "recent" }
+                        Button("A–Z") { sort = "alpha" }
+                        Button("Page") { sort = "page" }
+                    }
+                    Section("Filter") {
+                        Button("All") { filter = "all" }
+                        Button("Learning") { filter = "learning" }
+                        Button("Learned") { filter = "learned" }
+                    }
+                } label: {
+                    Label(wordMenuTitle, systemImage: "line.3.horizontal.decrease")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize(horizontal: true, vertical: false)
             }
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
             if rows.isEmpty {
                 ContentUnavailableView("No words yet", systemImage: "character.book.closed", description: Text("Look up a word with ⌃⌘D or Force Click. It lands here with its sentence."))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List {
                     ForEach(rows) { word in
@@ -460,13 +467,24 @@ struct WordList: View {
                         offsets.map { rows[$0].id }.forEach { session.deleteWord(id: $0) }
                     }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             if session.usesVault {
                 Text(session.vaultEnabled ? "Obsidian · learner/vocabulary.md" : "Not saving vocabulary to the vault")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 8)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var wordMenuTitle: String {
+        let sortName = sort == "alpha" ? "A–Z" : (sort == "page" ? "Page" : "Recent")
+        let filterName = filter == "learned" ? "Learned" : (filter == "learning" ? "Learning" : "All")
+        return "\(sortName) · \(filterName)"
     }
 
     private var ordered: [WordEntry] {
