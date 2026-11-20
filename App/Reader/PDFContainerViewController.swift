@@ -285,7 +285,7 @@ final class PDFContainerViewController: NSViewController {
     }
 
     @objc private func foundMatch(_ notification: Notification) {
-        guard let selection = notification.userInfo?[PDFDocumentFoundSelection] as? PDFSelection else { return }
+        guard let selection = notification.userInfo?["PDFDocumentFoundSelection"] as? PDFSelection else { return }
         matches.append(selection)
         publishHits()
         if matches.count == 1 { showCurrentMatch() }
@@ -299,7 +299,7 @@ final class PDFContainerViewController: NSViewController {
     private func publishHits() {
         guard let document = pdfView.document else { return }
         session.searchHits = matches.enumerated().map { index, selection in
-            let page = selection.pages.first.flatMap { document.index(for: $0) + 1 } ?? 1
+            let page = selection.pages.first.map { document.index(for: $0) + 1 } ?? 1
             let copy = selection.copy() as! PDFSelection
             copy.extendForLineBoundaries()
             let snippet = copy.string ?? selection.string ?? session.findQuery
@@ -828,7 +828,7 @@ final class NoteOverlay: NSView {
                 let card = cards[item.id] ?? makeCard(item)
                 cards[item.id] = card
                 card.stringValue = item.body
-                cardSlots.append((item.id, Double(passage.maxY - 54)))
+                cardSlots.append((id: item.id, y: Double(passage.maxY - 54)))
                 cardX[item.id] = pageRect.maxX + 22
                 cardWidths[item.id] = min(margin - 28, 220)
             } else {

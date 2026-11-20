@@ -355,10 +355,10 @@ final class ThumbView: NSView {
             stored.draw(in: target)
             return
         }
-        let page = page
         let size = target.size
+        let renderedPage = page
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let image = page.thumbnail(of: size, for: .mediaBox)
+            let image = renderedPage.thumbnail(of: size, for: PDFDisplayBox.mediaBox)
             Self.cache.setObject(image, forKey: key)
             DispatchQueue.main.async {
                 self?.cached = image
@@ -834,7 +834,7 @@ struct SettingsView: View {
             let router = AIRouter(settings: current, openAIKey: openAI, anthropicKey: anthropic, transport: URLSessionTransport(), runner: ProcessCommandRunner())
             do {
                 let book = BookText(title: "Test", pages: [BookPage(marker: "p. 1", text: "Hello.", page: 1)])
-                _ = try await router.answer(book: book, focus: nil, purpose: .ask("Reply with one word."), provider: provider, cliDirectory: NSTemporaryDirectory())
+                _ = try await router.answer(book: book, focus: nil, purpose: .ask("Reply with one word."), provider: provider, cliDirectory: NSTemporaryDirectory(), fs: LocalFileSystem())
                 keyStatus = "Ready"
             } catch {
                 keyStatus = (error as? AIError)?.userMessage ?? (error as? ReaderFailure)?.message ?? error.localizedDescription
