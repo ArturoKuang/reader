@@ -7,6 +7,15 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     let session: ReaderSession
     private let split = NSSplitViewController()
     private var searchItem: NSSearchToolbarItem?
+    private let findCountLabel: NSTextField = {
+        let label = NSTextField(labelWithString: "")
+        label.font = .systemFont(ofSize: 12)
+        label.textColor = .secondaryLabelColor
+        label.alignment = .center
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        return label
+    }()
     private var inspectorObservation: NSKeyValueObservation?
     private let sidebarHost: NSHostingController<SidebarView>
     private let panelHost: NSHostingController<RightPanelView>
@@ -258,11 +267,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     // MARK: Toolbar
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .vault, .inspectorTrackingSeparator, .toggleInspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .findCount, .vault, .inspectorTrackingSeparator, .toggleInspector]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .vault, .inspectorTrackingSeparator, .toggleInspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .findCount, .vault, .inspectorTrackingSeparator, .toggleInspector]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
@@ -323,6 +332,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             item.searchField.delegate = self
             searchItem = item
             item.label = "Find"
+            return item
+        case .findCount:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.view = findCountLabel
+            item.label = "Matches"
             return item
         case .vault:
             let item = NSMenuToolbarItem(itemIdentifier: itemIdentifier)
@@ -621,7 +635,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             try? self.session.annotationMarkdown(self.session.annotations).write(to: url, atomically: true, encoding: .utf8)
         }
     }
-    @objc func selectAll(_ sender: Any?) {
+    @objc override func selectAll(_ sender: Any?) {
         if let text = window?.firstResponder as? NSTextView, text.isEditable || text.isFieldEditor {
             text.selectAll(sender)
             return
@@ -715,7 +729,13 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     }
 
     func showFindCount(_ index: Int, of total: Int) {
-        searchItem?.badge = NSToolbarItem.Badge(string: "\(index) of \(total)")
+        let text = total > 0 ? "\(index) of \(total)" : ""
+        if #available(macOS 26, *) {
+            searchItem?.badge = text.isEmpty ? nil : NSItemBadge.text(text)
+            findCountLabel.stringValue = ""
+        } else {
+            findCountLabel.stringValue = text
+        }
     }
 
     func searchFieldDidEndSearching(_ sender: NSSearchField) {
@@ -723,7 +743,10 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             session.setSidebar(previous)
             session.sidebarBeforeSearch = nil
         }
-        searchItem?.badge = nil
+        if #available(macOS 26, *) {
+            searchItem?.badge = nil
+        }
+        findCountLabel.stringValue = ""
     }
     @objc func findNext(_ sender: Any?) { pdfController?.findNext(); epubController?.find(forward: true) }
     @objc func findPrevious(_ sender: Any?) { pdfController?.findPrevious(); epubController?.find(forward: false) }
@@ -999,6 +1022,7 @@ private extension NSToolbarItem.Identifier {
     static let sidebarModes = NSToolbarItem.Identifier("sidebarModes")
     static let backForward = NSToolbarItem.Identifier("backForward")
     static let search = NSToolbarItem.Identifier("search")
+    static let findCount = NSToolbarItem.Identifier("findCount")
     static let highlight = NSToolbarItem.Identifier("highlight")
     static let addNote = NSToolbarItem.Identifier("addNote")
     static let zoomIn = NSToolbarItem.Identifier("zoomIn")
