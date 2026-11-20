@@ -421,4 +421,12 @@ public enum VaultAnnotationSync {
         }
         return text
     }
+
+    /// Adds sidecar notes that are not already in the file. Existing block ids are left untouched.
+    public static func mergeSidecarOnce(existing: String, bookPath: String, annotations: [Annotation]) -> String {
+        let present = Set(VaultNoteFile.blocks(existing).map(\.id))
+        let fresh = annotations.filter { !present.contains($0.id) }
+        guard !fresh.isEmpty else { return existing }
+        return render(existing: existing, bookPath: bookPath, annotations: fresh)
+    }
 }

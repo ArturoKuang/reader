@@ -31,6 +31,37 @@ public enum VaultFinder {
         }
         return nil
     }
+
+    public enum Kind: Equatable, Sendable {
+        case bookFolder
+        case loose
+    }
+
+    /// A book folder already has notes, a curriculum, or a tutor file. A loose file only happens to sit in the vault.
+    public static func classify(bookFolder: String, fs: FileSystem) -> Kind {
+        if fs.exists(Paths.join(bookFolder, "CLAUDE.md")) { return .bookFolder }
+        if fs.isDirectory(Paths.join(bookFolder, "curriculum")) { return .bookFolder }
+        if fs.isDirectory(Paths.join(bookFolder, "notes")) { return .bookFolder }
+        return .loose
+    }
+
+    public enum Open: Equatable, Sendable {
+        case vault(VaultLocation)
+        case missingLink(String)
+        case none
+    }
+
+    /// An explicit link wins. A missing linked folder does not fall through to a parent vault.
+    public static func resolve(bookPath: String, linkedFolder: String?, fs: FileSystem) -> Open {
+        if let linkedFolder {
+            guard fs.isDirectory(linkedFolder) else { return .missingLink(linkedFolder) }
+            let probe = Paths.join(linkedFolder, "book.pdf")
+            guard let found = locate(bookPath: probe, fs: fs) else { return .missingLink(linkedFolder) }
+            return .vault(VaultLocation(vaultRoot: found.vaultRoot, vaultName: found.vaultName, bookFolder: linkedFolder))
+        }
+        guard let found = locate(bookPath: bookPath, fs: fs) else { return .none }
+        return .vault(found)
+    }
 }
 
 public enum ChapterFiles {

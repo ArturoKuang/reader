@@ -17,6 +17,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if NSDocumentController.shared.documents.isEmpty {
             showWelcome(nil)
         }
+        if !FileManager.default.fileExists(atPath: AppPaths.settingsFile) {
+            Task.detached {
+                guard CLILocator.locate("claude") != nil else { return }
+                await MainActor.run {
+                    var settings = SettingsStore.load()
+                    settings.defaultProvider = .claudeCLI
+                    SettingsStore.save(settings)
+                }
+            }
+        }
     }
 
     func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool { false }
@@ -57,7 +67,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let window = NSWindow(contentViewController: host)
             window.title = "Reader Settings"
             window.setContentSize(NSSize(width: 560, height: 640))
-            window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+            window.styleMask = [.titled, .closable]
+            window.toolbarStyle = .preference
+            window.setContentSize(NSSize(width: 500, height: 560))
             settingsWindow = window
         }
         settingsWindow?.center()
@@ -130,6 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ]))
         main.addItem(menu("File", items: [
             item("Open…", #selector(openDocument(_:)), "o", .command),
+            item("Link to Vault Book Folder…", #selector(ReaderWindowController.linkVaultFolder(_:))),
             separator(),
             item("Export All Words…", #selector(exportAllWords(_:)), "e", [.command, .shift]),
             item("Export Notes as Markdown…", #selector(ReaderWindowController.exportNotes(_:)), "e", [.command, .shift, .option]),
@@ -191,8 +204,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Forward", #selector(ReaderWindowController.goForward(_:)), "]", .command),
             separator(),
             item("Go to Page…", #selector(ReaderWindowController.goToPage(_:)), "g", [.command, .option]),
-            item("Next Page", #selector(ReaderWindowController.nextPage(_:))),
-            item("Previous Page", #selector(ReaderWindowController.previousPage(_:))),
+            item("Next Page", #selector(ReaderWindowController.nextPage(_:)), Self.arrow(Int(NSDownArrowFunctionKey)), [.command, .option]),
+            item("Previous Page", #selector(ReaderWindowController.previousPage(_:)), Self.arrow(Int(NSUpArrowFunctionKey)), [.command, .option]),
+            item("Next Chapter", #selector(ReaderWindowController.nextChapter(_:)), Self.arrow(Int(NSRightArrowFunctionKey)), [.command, .option]),
+            item("Previous Chapter", #selector(ReaderWindowController.previousChapter(_:)), Self.arrow(Int(NSLeftArrowFunctionKey)), [.command, .option]),
         ]))
         main.addItem(menu("Tools", items: [
             item("Highlight Color 1", #selector(ReaderWindowController.highlight1(_:)), "1", [.command, .control]),
@@ -212,19 +227,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             separator(),
             item("Bookmark This Page", #selector(ReaderWindowController.bookmarkPage(_:)), "d", .command),
             item("Reveal in Obsidian", #selector(ReaderWindowController.revealInObsidian(_:))),
+            item("Open Vault Folder", #selector(ReaderWindowController.openVaultFolder(_:))),
+            item("Pause Saving to Vault", #selector(ReaderWindowController.pauseVault(_:))),
+            item("Vault Settings", #selector(showSettings(_:))),
             item("Concept Markers", #selector(ReaderWindowController.toggleConceptMarkers(_:))),
             item("Words", #selector(showWords(_:)), "w", [.command, .shift]),
         ]))
         main.addItem(menu("Window", items: [
             item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m", .command),
             item("Zoom", #selector(NSWindow.performZoom(_:))),
+            item("Bring All to Front", #selector(NSApplication.arrangeInFront(_:))),
+            separator(),
+            item("Welcome to Reader", #selector(showWelcome(_:)), "1", [.command, .shift]),
         ]))
         main.addItem(menu("Help", items: [
             item("Keyboard Shortcuts", #selector(showShortcuts(_:)), "?", .command),
         ]))
         hideShortcutAlias(in: main.item(withTitle: "View")?.submenu, title: "Ask AI", key: "4")
         hideShortcutAlias(in: main.item(withTitle: "Tools")?.submenu, title: "Add Note", key: "n", modifiers: [.command, .control])
+        if let file = main.item(withTitle: "File")?.submenu {
+            let recent = NSMenu(title: "Open Recent")
+            recent.addItem(item("Clear Menu", #selector(NSDocumentController.clearRecentDocuments(_:))))
+            let recentItem = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
+            recentItem.submenu = recent
+            file.insertItem(recentItem, at: 1)
+        }
         NSApp.mainMenu = main
+        NSApp.windowsMenu = main.item(withTitle: "Window")?.submenu
+        NSApp.helpMenu = main.item(withTitle: "Help")?.submenu
+    }
+
+    private static func arrow(_ key: Int) -> String {
+        String(UnicodeScalar(UInt32(key))!)
     }
 
     private func hideShortcutAlias(in menu: NSMenu?, title: String, key: String, modifiers: NSEvent.ModifierFlags = .control) {

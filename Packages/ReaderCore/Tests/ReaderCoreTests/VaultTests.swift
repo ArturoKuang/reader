@@ -259,4 +259,40 @@ final class VaultTests: XCTestCase {
         XCTAssertEqual(placed[2].title, "Chapter 1. The Reach of Explanations")
         XCTAssertEqual(ChapterFiles.notesFile(chapter: placed[2].chapter, bookTitle: "book.epub"), "Chapter 1.md")
     }
+
+    func testVaultClassifyLinkAndMergeOnce() throws {
+        let fs = MemoryFileSystem()
+        try fs.createDirectory("/SecondBrain/.obsidian")
+        try fs.createDirectory("/SecondBrain/books/boi/notes")
+        try fs.write("/SecondBrain/books/boi/CLAUDE.md", Data("tutor".utf8))
+        XCTAssertEqual(VaultFinder.classify(bookFolder: "/SecondBrain/books/boi", fs: fs), .bookFolder)
+        try fs.createDirectory("/SecondBrain/inbox")
+        XCTAssertEqual(VaultFinder.classify(bookFolder: "/SecondBrain/inbox", fs: fs), .loose)
+        let linked = VaultFinder.resolve(bookPath: "/Downloads/book.pdf", linkedFolder: "/SecondBrain/books/boi", fs: fs)
+        guard case .vault(let location) = linked else {
+            return XCTFail("expected a vault")
+        }
+        XCTAssertEqual(location.bookFolder, "/SecondBrain/books/boi")
+        XCTAssertEqual(VaultFinder.resolve(bookPath: "/Downloads/book.pdf", linkedFolder: "/missing", fs: fs), .missingLink("/missing"))
+        var state = ViewState.fresh
+        state.vaultBookFolder = location.bookFolder
+        let data = try JSONEncoder().encode(state)
+        let decoded = try JSONDecoder().decode(ViewState.self, from: data)
+        XCTAssertEqual(decoded.vaultBookFolder, "/SecondBrain/books/boi")
+        let old = try JSONDecoder().decode(ViewState.self, from: Data("{\"version\":1}".utf8))
+        XCTAssertNil(old.vaultBookFolder)
+        let existing = "My notes stay.\n"
+        let highlight = HighlightEntry(id: "h1", color: 1, page: 2, quote: "hard to vary", section: "Chapter 4")
+        let note = NoteEntry(id: "n1", page: 2, quote: "hard to vary", section: "Chapter 4", body: "a note")
+        var package = SidecarPackage.empty(identity: FrontMatter(kind: "notes", document: "book.pdf", fingerprint: "sha256:x"))
+        package.highlights.highlights = [highlight]
+        package.notes.notes = [note]
+        let merged = VaultAnnotationSync.mergeSidecarOnce(existing: existing, bookPath: "/Downloads/book.pdf", annotations: AnnotationIndex.items(highlights: package.highlights.highlights, notes: package.notes.notes))
+        XCTAssertTrue(merged.hasPrefix("My notes stay."))
+        XCTAssertTrue(merged.contains("^h1"))
+        let again = VaultAnnotationSync.mergeSidecarOnce(existing: merged, bookPath: "/Downloads/book.pdf", annotations: AnnotationIndex.items(highlights: package.highlights.highlights, notes: package.notes.notes))
+        XCTAssertEqual(again, merged)
+        XCTAssertEqual(AIError.missingKey(provider: "ChatGPT").userMessage, "Add a ChatGPT API key in Settings.")
+        XCTAssertEqual(AIError.missingCLI(name: "Claude Code").userMessage, "Claude Code was not found. Set its path in Settings.")
+    }
 }

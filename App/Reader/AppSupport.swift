@@ -174,49 +174,40 @@ struct ShortcutRow: Identifiable {
 }
 
 enum ShortcutCatalog {
-    static let rows: [ShortcutRow] = [
-        ShortcutRow(title: "Hide Sidebar", keys: "⌥⌘1"),
-        ShortcutRow(title: "Thumbnails", keys: "⌥⌘2"),
-        ShortcutRow(title: "Table of Contents", keys: "⌥⌘3"),
-        ShortcutRow(title: "Highlights and Notes", keys: "⌥⌘4"),
-        ShortcutRow(title: "Bookmarks", keys: "⌥⌘5"),
-        ShortcutRow(title: "Contact Sheet", keys: "⌥⌘6"),
-        ShortcutRow(title: "Continuous Scroll", keys: "⌘1"),
-        ShortcutRow(title: "Single Page", keys: "⌘2"),
-        ShortcutRow(title: "Two Pages", keys: "⌘3"),
-        ShortcutRow(title: "Actual Size", keys: "⌘0"),
-        ShortcutRow(title: "Zoom to Fit", keys: "⌘9"),
-        ShortcutRow(title: "Fit Width", keys: "⌘8"),
-        ShortcutRow(title: "Zoom In", keys: "⌘+"),
-        ShortcutRow(title: "Zoom Out", keys: "⌘−"),
-        ShortcutRow(title: "Zoom to Selection", keys: "⌘*"),
-        ShortcutRow(title: "Rotate Left", keys: "⌘L"),
-        ShortcutRow(title: "Rotate Right", keys: "⌘R"),
-        ShortcutRow(title: "Find", keys: "⌘F"),
-        ShortcutRow(title: "Find Next", keys: "⌘G"),
-        ShortcutRow(title: "Find Previous", keys: "⇧⌘G"),
-        ShortcutRow(title: "Go to Page", keys: "⌥⌘G"),
-        ShortcutRow(title: "Back / Forward", keys: "⌘[ / ⌘]"),
-        ShortcutRow(title: "Bookmark this page", keys: "⌘D"),
-        ShortcutRow(title: "Show Inspector", keys: "⌘I"),
-        ShortcutRow(title: "Show or hide right panel", keys: "⌥⌘0"),
-        ShortcutRow(title: "Enter Full Screen", keys: "⌃⌘F"),
-        ShortcutRow(title: "Slideshow", keys: "⇧⌘F"),
-        ShortcutRow(title: "Notes / Words / Ask AI", keys: "⌃1 / ⌃2 / ⌃3"),
-        ShortcutRow(title: "Ask AI (alternate)", keys: "⌃4"),
-        ShortcutRow(title: "Highlight with color 1–6", keys: "⌃⌘1 … ⌃⌘6"),
-        ShortcutRow(title: "Highlight with last color", keys: "⌃⌘H"),
-        ShortcutRow(title: "Add note to selection", keys: "⇧⌘N or ⌃⌘N"),
-        ShortcutRow(title: "Look up selection", keys: "⌃⌘D"),
-        ShortcutRow(title: "Ask AI about selection", keys: "⌘K"),
-        ShortcutRow(title: "Copy with citation", keys: "⇧⌘C"),
-        ShortcutRow(title: "Show notes in the margin", keys: "⌥⌘E"),
-        ShortcutRow(title: "Export notes as Markdown", keys: "⇧⌥⌘E"),
-        ShortcutRow(title: "Set a vim mark", keys: "m, then a key"),
-        ShortcutRow(title: "Jump to a mark", keys: "`, then the key"),
-        ShortcutRow(title: "Jump back", keys: "`, then `"),
-        ShortcutRow(title: "Words window", keys: "⇧⌘W"),
-        ShortcutRow(title: "Export all words", keys: "⇧⌘E"),
-        ShortcutRow(title: "Settings", keys: "⌘,"),
-    ]
+    static func current() -> [ShortcutRow] {
+        var rows: [ShortcutRow] = []
+        if let menu = NSApp.mainMenu { walk(menu, into: &rows) }
+        rows.append(ShortcutRow(title: "Set a vim mark", keys: "m, then a key"))
+        rows.append(ShortcutRow(title: "Jump to a mark", keys: "`, then the key"))
+        rows.append(ShortcutRow(title: "Jump back", keys: "`, then `"))
+        rows.append(ShortcutRow(title: "Next search hit", keys: "n"))
+        rows.append(ShortcutRow(title: "Previous search hit", keys: "N"))
+        return rows
+    }
+
+    private static func walk(_ menu: NSMenu, into rows: inout [ShortcutRow]) {
+        for item in menu.items {
+            if let submenu = item.submenu {
+                walk(submenu, into: &rows)
+                continue
+            }
+            if item.isSeparatorItem || item.isHidden || item.isAlternate || item.keyEquivalent.isEmpty { continue }
+            rows.append(ShortcutRow(title: item.title, keys: format(item)))
+        }
+    }
+
+    private static func format(_ item: NSMenuItem) -> String {
+        var prefix = ""
+        let mask = item.keyEquivalentModifierMask
+        if mask.contains(.control) { prefix += "⌃" }
+        if mask.contains(.option) { prefix += "⌥" }
+        if mask.contains(.shift) { prefix += "⇧" }
+        if mask.contains(.command) { prefix += "⌘" }
+        let key = item.keyEquivalent
+        if key == String(UnicodeScalar(UInt32(NSDownArrowFunctionKey))!) { return prefix + "↓" }
+        if key == String(UnicodeScalar(UInt32(NSUpArrowFunctionKey))!) { return prefix + "↑" }
+        if key == String(UnicodeScalar(UInt32(NSLeftArrowFunctionKey))!) { return prefix + "←" }
+        if key == String(UnicodeScalar(UInt32(NSRightArrowFunctionKey))!) { return prefix + "→" }
+        return prefix + key.uppercased()
+    }
 }

@@ -34,6 +34,10 @@ final class ReaderSession: ObservableObject {
     @Published var vaultNotesFolder = "notes"
     @Published var vaultVocabularyFile = ""
     @Published var vaultEnabled = true
+    var vaultLoose = false
+    @Published var askChoice = ""
+    @Published var focusQuestion = 0
+    @Published var aiSetup: String?
     @Published var noteDraft = ""
     var pendingReaderLink: ReaderLink?
     @Published var sidebar: SidebarMode
@@ -262,6 +266,8 @@ final class ReaderSession: ObservableObject {
     }
 
     func show(tab: PanelTab) {
+        let opens = UserDefaults.standard.object(forKey: "reader.openInspector") as? Bool ?? true
+        guard panelVisible || opens else { return }
         panelVisible = true
         panelTab = tab
         package.state.panelVisible = true
@@ -488,7 +494,9 @@ final class ReaderSession: ObservableObject {
 
     func ask(purpose: AIPurpose, provider override: ProviderID? = nil, storeExplanationFor word: String? = nil) {
         guard let bookText else {
-            answer = "This book has no extracted text yet."
+            let message = "This book has no extracted text yet."
+            answer = message
+            chat.append(ReaderChatLine(id: UUID(), mine: false, text: message))
             return
         }
         let chosen = override ?? provider
@@ -546,13 +554,15 @@ final class ReaderSession: ObservableObject {
                     if let last = chat.indices.last { chat[last].text = result.text }
                 }
             } catch {
+                let message = (error as? AIError)?.userMessage ?? (error as? ReaderFailure)?.message ?? error.localizedDescription
+                if message.contains("Settings") { aiSetup = message }
                 if word != nil {
-                    lookup?.explanation = "Couldn't explain this word."
+                    lookup?.explanation = message
                     lookup?.busy = false
                 } else {
-                    answer = "The provider didn't answer."
+                    answer = message
                     answerLabel = ""
-                    if let last = chat.indices.last { chat[last].text = answer }
+                    if let last = chat.indices.last { chat[last].text = message }
                 }
             }
             asking = false
@@ -580,10 +590,11 @@ final class ReaderSession: ObservableObject {
     func askCurrentQuestion() {
         let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        if usesVault, tutorAvailable {
+        if askChoice == "tutor", usesVault, tutorAvailable {
             askTutor(command: nil, question: text)
         } else {
-            ask(purpose: .ask(text))
+            let chosen = ProviderID(rawValue: askChoice) ?? provider
+            ask(purpose: .ask(text), provider: chosen)
         }
     }
 

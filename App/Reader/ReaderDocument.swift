@@ -5,6 +5,7 @@ final class ReaderDocument: NSDocument {
     var session: ReaderSession?
     private var vault: VaultCoordinator?
     private var bookData = Data()
+    private static var pendingVaultNotice: String?
 
     override class var autosavesInPlace: Bool { true }
     override class var preservesVersions: Bool { false }
@@ -15,7 +16,16 @@ final class ReaderDocument: NSDocument {
         fileURL = opened.url
         fileType = opened.kind == .epub ? "org.idpf.epub-container" : "com.adobe.pdf"
         let fs = LocalFileSystem()
-        if let coordinator = VaultCoordinator.make(bookPath: opened.url.path) {
+        let library = LibraryIndex.load(from: AppPaths.indexFile, fs: fs)
+        let linked = library.documents.first { $0.bookPath == opened.url.path }?.vaultBookFolder
+        let unlinked = UserDefaults.standard.stringArray(forKey: "reader.unlinkedVaults")?.contains(opened.url.path) == true
+        let openedVault: (coordinator: VaultCoordinator?, notice: String?) = unlinked ? (nil, nil) : VaultCoordinator.make(bookPath: opened.url.path, linkedFolder: linked)
+        if let notice = openedVault.notice {
+            // Applied once the session exists on the sidecar path below.
+            Self.pendingVaultNotice = notice
+        }
+        if let coordinator = openedVault.coordinator {
+            Self.pendingVaultNotice = nil
             let hasState = fs.exists(Paths.join(coordinator.location.bookFolder, ".reader-state.json"))
             let identity = FrontMatter(kind: "notes", document: opened.url.lastPathComponent, fingerprint: SHA256.fingerprint(opened.data))
             let result = OpenResult(package: SidecarPackage.empty(identity: identity), directory: coordinator.location.bookFolder, placement: .sibling, hasSavedViewState: hasState)
@@ -54,6 +64,10 @@ final class ReaderDocument: NSDocument {
         )
         try index.save(to: AppPaths.indexFile, fs: fs)
         let session = ReaderSession(bookURL: opened.url, bookData: opened.data, open: result)
+        if let notice = Self.pendingVaultNotice {
+            session.notice = notice
+            Self.pendingVaultNotice = nil
+        }
         session.onDirty = { [weak self] in
             // Set the page subtitle first, then mark edited. AppKit appends " — Edited"
             // itself; including it here shows the suffix twice.

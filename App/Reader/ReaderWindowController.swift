@@ -197,6 +197,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         reappliedSavedFrame = true
         guard let window else { return }
         restoreWindowFrame(window)
+        offerVaultSave()
+        showTipStrip()
     }
 
     func windowDidResize(_ notification: Notification) {
@@ -246,11 +248,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     // MARK: Toolbar
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .inspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .vault, .inspector]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .inspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .vault, .inspector]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
@@ -309,6 +311,20 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             item.action = #selector(find(_:))
             item.target = self
             item.label = "Find"
+            return item
+        case .vault:
+            let item = NSMenuToolbarItem(itemIdentifier: itemIdentifier)
+            let writing = session.usesVault && session.vaultEnabled
+            let symbol = NSImage(systemSymbolName: "link", accessibilityDescription: "Vault")
+            if writing, let symbol {
+                item.image = symbol.withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [.controlAccentColor]))
+            } else {
+                item.image = symbol
+            }
+            item.title = session.vaultName ?? "Vault"
+            item.label = "Vault"
+            item.menu = vaultMenu()
+            item.isEnabled = session.usesVault
             return item
         case .inspector:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
@@ -605,6 +621,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     }
     @objc func nextPage(_ sender: Any?) { pdfController?.nextPage(); epubController?.nextPage() }
     @objc func previousPage(_ sender: Any?) { pdfController?.previousPage(); epubController?.previousPage() }
+    @objc func nextChapter(_ sender: Any?) { epubController?.nextPage() }
+    @objc func previousChapter(_ sender: Any?) { epubController?.previousPage() }
     @objc func goToPage(_ sender: Any?) {
         guard let window else { return }
         let alert = NSAlert()
@@ -731,9 +749,124 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         case #selector(toggleConceptMarkers(_:)): menuItem.state = session.showConceptMarkers ? .on : .off
         case #selector(showMarginNotes(_:)): menuItem.state = session.showMarginNotes ? .on : .off
         case #selector(delete(_:)): return !session.annotationSelection.isEmpty
+        case #selector(revealInObsidian(_:)), #selector(openVaultFolder(_:)), #selector(pauseVault(_:)):
+            if menuItem.action == #selector(pauseVault(_:)) {
+                menuItem.title = session.vaultEnabled ? "Pause Saving to Vault" : "Resume Saving to Vault"
+            }
+            return session.usesVault
+        case #selector(linkVaultFolder(_:)):
+            menuItem.title = session.usesVault ? "Unlink Vault Book Folder" : "Link to Vault Book Folder…"
+            return true
+        case #selector(nextChapter(_:)), #selector(previousChapter(_:)):
+            return epubController != nil
         default: break
         }
         return true
+    }
+
+    @objc func openVaultFolder(_ sender: Any?) {
+        guard let folder = session.bookFolder else { return }
+        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: folder)
+    }
+
+    @objc func pauseVault(_ sender: Any?) {
+        session.vaultEnabled.toggle()
+        session.onSaveVaultState?()
+    }
+
+    @objc func linkVaultFolder(_ sender: Any?) {
+        if session.usesVault {
+            var paths = UserDefaults.standard.stringArray(forKey: "reader.unlinkedVaults") ?? []
+            if !paths.contains(session.bookURL.path) { paths.append(session.bookURL.path) }
+            UserDefaults.standard.set(paths, forKey: "reader.unlinkedVaults")
+            session.package.state.vaultBookFolder = nil
+            storeVaultLink(nil)
+            session.notice = "Unlinked. Reopen the book to use the sidecar."
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.prompt = "Link"
+        panel.begin { [weak self] response in
+            guard let self, response == .OK, let url = panel.url else { return }
+            let fs = LocalFileSystem()
+            switch VaultFinder.resolve(bookPath: self.session.bookURL.path, linkedFolder: url.path, fs: fs) {
+            case .vault(let location):
+                self.session.package.state.vaultBookFolder = location.bookFolder
+                self.storeVaultLink(location.bookFolder)
+                self.mergeSidecarIntoVault(location)
+                var paths = UserDefaults.standard.stringArray(forKey: "reader.unlinkedVaults") ?? []
+                paths.removeAll { $0 == self.session.bookURL.path }
+                UserDefaults.standard.set(paths, forKey: "reader.unlinkedVaults")
+                self.session.notice = "Linked to \(location.bookFolder). Reopen the book to write there."
+            case .missingLink, .none:
+                self.session.notice = "That folder is not inside an Obsidian vault."
+            }
+        }
+    }
+
+    private func storeVaultLink(_ folder: String?) {
+        let fs = LocalFileSystem()
+        var index = LibraryIndex.load(from: AppPaths.indexFile, fs: fs)
+        if let row = index.documents.firstIndex(where: { $0.bookPath == session.bookURL.path }) {
+            index.documents[row].vaultBookFolder = folder
+            try? index.save(to: AppPaths.indexFile, fs: fs)
+        }
+    }
+
+    private func mergeSidecarIntoVault(_ location: VaultLocation) {
+        let fs = LocalFileSystem()
+        let directory = VaultPaths.notesDirectory(bookFolder: location.bookFolder, settings: VaultBookSettings.load(bookFolder: location.bookFolder, fs: fs))
+        try? fs.createDirectory(directory)
+        let name = ChapterFiles.notesFile(chapter: ChapterFiles.number(in: session.sectionTitle), bookTitle: session.bookURL.deletingPathExtension().lastPathComponent)
+        let path = Paths.join(directory, name)
+        let existing = (try? fs.readString(path)) ?? ""
+        let merged = VaultAnnotationSync.mergeSidecarOnce(existing: existing, bookPath: session.bookURL.path, annotations: session.annotations)
+        if merged != existing { try? fs.writeString(path, merged) }
+    }
+
+    private func vaultMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Reveal Chapter", action: #selector(revealInObsidian(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Open Vault Folder", action: #selector(openVaultFolder(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: session.vaultEnabled ? "Pause Saving" : "Resume Saving", action: #selector(pauseVault(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Vault Settings", action: #selector(AppDelegate.showSettings(_:)), keyEquivalent: "")
+        for item in menu.items where item.action != #selector(AppDelegate.showSettings(_:)) {
+            item.target = self
+        }
+        return menu
+    }
+
+    private func offerVaultSave() {
+        guard session.usesVault, session.vaultLoose, !session.vaultEnabled else { return }
+        let key = "reader.vaultOffer." + session.bookURL.path
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        let alert = NSAlert()
+        alert.messageText = "This file is in your Obsidian vault"
+        alert.informativeText = "Save notes into \(session.bookFolder ?? "the book folder")?"
+        alert.addButton(withTitle: "Save to Vault")
+        alert.addButton(withTitle: "Not Now")
+        if alert.runModal() == .alertFirstButtonReturn {
+            session.vaultEnabled = true
+            session.onSaveVaultState?()
+        }
+    }
+
+    private func showTipStrip() {
+        guard !UserDefaults.standard.bool(forKey: "reader.didShowTips"), let content = window?.contentView else { return }
+        UserDefaults.standard.set(true, forKey: "reader.didShowTips")
+        let label = NSTextField(labelWithString: "Select text to highlight · ⇧⌘N adds a note · ⌥⌘4 shows them all")
+        label.font = .systemFont(ofSize: 12)
+        label.textColor = .secondaryLabelColor
+        label.backgroundColor = .windowBackgroundColor
+        label.drawsBackground = true
+        label.alignment = .center
+        label.frame = NSRect(x: 0, y: content.bounds.height - 28, width: content.bounds.width, height: 24)
+        label.autoresizingMask = [.width, .minYMargin]
+        content.addSubview(label)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { label.removeFromSuperview() }
     }
 }
 
@@ -782,4 +915,5 @@ private extension NSToolbarItem.Identifier {
     static let zoomOut = NSToolbarItem.Identifier("zoomOut")
     static let appearance = NSToolbarItem.Identifier("appearance")
     static let inspector = NSToolbarItem.Identifier("inspector")
+    static let vault = NSToolbarItem.Identifier("vault")
 }

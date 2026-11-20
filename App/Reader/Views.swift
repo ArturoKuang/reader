@@ -4,6 +4,8 @@ import ReaderCore
 import SwiftUI
 
 struct WelcomeView: View {
+    @State private var selection: String?
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Reader").font(.largeTitle.weight(.semibold))
@@ -16,17 +18,21 @@ struct WelcomeView: View {
             } else {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 16)], spacing: 16) {
                     ForEach(urls.prefix(12), id: \.path) { url in
-                        Button(url.deletingPathExtension().lastPathComponent) {
-                            NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { _, _, _ in }
-                        }
-                        .buttonStyle(.plain)
-                        .frame(maxWidth: .infinity, minHeight: 88)
-                        .padding(8)
-                        .background(Color(nsColor: .quaternaryLabelColor).opacity(0.15))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        WelcomeTile(url: url, selected: selection == url.path)
+                            .onTapGesture { selection = url.path }
+                            .focusable()
+                            .onKeyPress(keys: [.return], phases: .down) { _ in
+                                openRecent(url)
+                                return .handled
+                            }
                     }
                 }
             }
+        }
+        .onKeyPress(keys: [.return], phases: .down) { _ in
+            guard let selection else { return .ignored }
+            openRecent(URL(fileURLWithPath: selection))
+            return .handled
         }
         .padding(28)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -40,6 +46,65 @@ struct WelcomeView: View {
             }
             return true
         }
+    }
+
+    private func openRecent(_ url: URL) {
+        NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { _, _, _ in }
+    }
+}
+
+private struct WelcomeTile: View {
+    var url: URL
+    var selected: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ZStack(alignment: .topTrailing) {
+                tileImage
+                    .frame(maxWidth: .infinity, minHeight: 88)
+                    .background(Color(nsColor: .textBackgroundColor))
+                if vaultBacked {
+                    Image(systemName: "link")
+                        .font(.caption)
+                        .padding(4)
+                }
+            }
+            Text(url.deletingPathExtension().lastPathComponent).font(.callout).lineLimit(2)
+            if let progress {
+                Text(progress).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(selected ? Color.accentColor.opacity(0.18) : Color(nsColor: .quaternaryLabelColor).opacity(0.15))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? Color.accentColor : .clear, lineWidth: 2))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { _, _, _ in }
+        }
+    }
+
+    @ViewBuilder private var tileImage: some View {
+        if url.pathExtension.lowercased() == "pdf", let page = PDFDocument(url: url)?.page(at: 0) {
+            let image = page.thumbnail(of: NSSize(width: 160, height: 200), for: .mediaBox)
+            Image(nsImage: image).resizable().scaledToFit()
+        } else {
+            Image(systemName: "book.closed").font(.largeTitle).foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 88)
+        }
+    }
+
+    private var vaultBacked: Bool {
+        let index = LibraryIndex.load(from: AppPaths.indexFile, fs: LocalFileSystem())
+        return index.documents.contains { $0.bookPath == url.path && $0.vaultBookFolder != nil }
+    }
+
+    private var progress: String? {
+        let index = LibraryIndex.load(from: AppPaths.indexFile, fs: LocalFileSystem())
+        guard let entry = index.documents.first(where: { $0.bookPath == url.path }) else { return nil }
+        let statePath = Paths.join(entry.sidecarPath, "state.json")
+        guard let data = try? LocalFileSystem().read(statePath), let state = try? JSONDecoder().decode(ViewState.self, from: data), state.page > 1 else { return nil }
+        return "Page \(state.page)"
     }
 }
 
@@ -301,6 +366,7 @@ struct EPUBContactSheet: View {
 
 struct RightPanelView: View {
     @ObservedObject var session: ReaderSession
+    @FocusState private var questionFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -339,25 +405,35 @@ struct RightPanelView: View {
                 HStack {
                     Text("“\(selection.text)”").font(.callout).italic().lineLimit(3)
                     Spacer()
-                    Button("×") { session.selection = nil; session.chat = [] }
-                        .buttonStyle(.borderless)
+                    Button { session.selection = nil; session.chat = [] } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.borderless)
                 }
             }
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Button("Explain") { session.withSelection { session.ask(purpose: .explainSimply) } }
-                    Button("Summarize") { session.withSelection { session.ask(purpose: .summarizeSection) } }
+            ControlGroup {
+                Button("Explain") { session.withSelection { session.ask(purpose: .explainSimply) } }
+                Button("Summarize") { session.withSelection { session.ask(purpose: .summarizeSection) } }
+                Button("Define Terms") { session.withSelection { session.ask(purpose: .ask("Define the difficult terms in this passage.")) } }
+            }
+            if session.tutorAvailable {
+                Text("Tutor").font(.caption).foregroundStyle(.secondary)
+                ControlGroup {
+                    Button("Learn") { session.withSelection { session.askTutor(command: .learn, question: session.question) } }
+                    Button("Review") { session.withSelection { session.askTutor(command: .review, question: session.question) } }
+                    Button("Wrap") { session.withSelection { session.askTutor(command: .wrap, question: session.question) } }
                 }
-                HStack(spacing: 6) {
-                    Button("Define Terms") { session.withSelection { session.ask(purpose: .ask("Define the difficult terms in this passage.")) } }
+            }
+            if let setup = session.aiSetup {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Set up AI").font(.headline)
+                    Text(setup).font(.callout)
+                    Button("Open Settings…") { NSApp.sendAction(#selector(AppDelegate.showSettings(_:)), to: nil, from: nil) }
                 }
-                if session.tutorAvailable {
-                    HStack(spacing: 6) {
-                        Button("Learn") { session.withSelection { session.askTutor(command: .learn, question: session.question) } }
-                        Button("Review") { session.withSelection { session.askTutor(command: .review, question: session.question) } }
-                        Button("Wrap") { session.withSelection { session.askTutor(command: .wrap, question: session.question) } }
-                    }
-                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(nsColor: .quaternaryLabelColor).opacity(0.2))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
             }
             if session.chat.isEmpty {
                 ContentUnavailableView("Ask about this passage", systemImage: "text.bubble", description: Text("Passages are sent to the chosen provider when you ask."))
@@ -387,20 +463,44 @@ struct RightPanelView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            TextEditor(text: $session.question)
-                .font(.body)
-                .frame(minHeight: 44, maxHeight: 80)
-                .onKeyPress(keys: [.return], phases: .down) { press in
-                    if press.modifiers.contains(.shift) { return .ignored }
-                    session.withSelection { session.askCurrentQuestion() }
-                    return .handled
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: $session.question)
+                    .font(.body)
+                    .focused($questionFocused)
+                    .frame(minHeight: 44, maxHeight: 80)
+                    .onKeyPress(keys: [.return], phases: .down) { press in
+                        if press.modifiers.contains(.shift) { return .ignored }
+                        session.withSelection { session.askCurrentQuestion() }
+                        return .handled
+                    }
+                if session.question.isEmpty {
+                    Text("Ask about this passage — Return to send")
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 8)
+                        .padding(.leading, 5)
+                        .allowsHitTesting(false)
                 }
+            }
+            .onChange(of: session.focusQuestion) { _, _ in questionFocused = true }
             HStack {
-                Picker("Provider", selection: $session.provider) {
-                    ForEach(ProviderID.allCases, id: \.self) { Text($0.label).tag($0) }
+                Picker("Provider", selection: $session.askChoice) {
+                    if session.tutorAvailable {
+                        Text("Tutor (Claude Code · this book)").tag("tutor")
+                    }
+                    ForEach(ProviderID.allCases, id: \.self) { Text($0.label).tag($0.rawValue) }
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
+                .onAppear {
+                    if session.askChoice.isEmpty {
+                        session.askChoice = session.tutorAvailable ? "tutor" : session.provider.rawValue
+                    }
+                }
+            if session.askChoice == "tutor" {
+                Text(session.claudeSessionID == nil ? "New session" : "Resumed")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
                 Spacer()
                 if session.asking { Button("Stop") { session.stopAsk() } }
             }
@@ -532,6 +632,10 @@ struct LookupCard: View {
                 Text(lookup.definition)
                 Text(lookup.busy ? "Explaining…" : "In this passage").font(.caption).foregroundStyle(.secondary)
                 Text(lookup.explanation.isEmpty ? " " : lookup.explanation)
+                if lookup.explanation.contains("Settings") {
+                    Button("Open Settings…") { NSApp.sendAction(#selector(AppDelegate.showSettings(_:)), to: nil, from: nil) }
+                        .buttonStyle(.borderless)
+                }
                 Text("“\(lookup.sentence)” · \(lookup.location)").font(.caption).italic()
                 HStack {
                     Text("Saved to Words").font(.caption).foregroundStyle(.secondary)
@@ -556,13 +660,24 @@ struct SettingsView: View {
     @State private var openAIKey = KeychainStore.load(account: "openai") ?? ""
     @State private var anthropicKey = KeychainStore.load(account: "anthropic") ?? ""
     @State private var keyStatus = ""
+    @State private var detectingCLIs = false
+    @State private var openInspector = UserDefaults.standard.object(forKey: "reader.openInspector") as? Bool ?? true
     @FocusState private var keyField: String?
 
     var body: some View {
+        TabView {
         Form {
             Section("General") {
                 Toggle("Show the annotation bar when selecting text", isOn: $settings.showSelectionBar)
+                Toggle("Open the inspector for notes and lookups", isOn: $openInspector)
+                    .onChange(of: openInspector) { _, value in
+                        UserDefaults.standard.set(value, forKey: "reader.openInspector")
+                    }
             }
+        }
+        .formStyle(.grouped)
+        .tabItem { Text("General") }
+        Form {
             Section("Default") {
                 Picker("Provider", selection: $settings.defaultProvider) {
                     ForEach(ProviderID.allCases, id: \.self) { Text($0.label).tag($0) }
@@ -587,8 +702,22 @@ struct SettingsView: View {
                 TextField("claude path", text: Binding(get: { settings.claudeCLIPath ?? "" }, set: { settings.claudeCLIPath = $0.isEmpty ? nil : $0 }))
                 TextField("codex path", text: Binding(get: { settings.codexCLIPath ?? "" }, set: { settings.codexCLIPath = $0.isEmpty ? nil : $0 }))
                 Button("Detect installed CLIs") {
-                    settings.claudeCLIPath = CLILocator.locate("claude")
-                    settings.codexCLIPath = CLILocator.locate("codex")
+                    detectingCLIs = true
+                    Task.detached {
+                        let claude = CLILocator.locate("claude")
+                        let codex = CLILocator.locate("codex")
+                        await MainActor.run {
+                            settings.claudeCLIPath = claude
+                            settings.codexCLIPath = codex
+                            detectingCLIs = false
+                        }
+                    }
+                }
+                if detectingCLIs { ProgressView().controlSize(.small) }
+                HStack {
+                    Circle().fill(aiReady ? Color.green : Color.secondary).frame(width: 8, height: 8)
+                    Text(aiReady ? "Ready" : "Not configured").font(.caption)
+                    Button("Test") { testAI() }
                 }
                 Text("A saved claude path overrides detection. Otherwise Reader looks in ~/.local/bin, Homebrew, /usr/local/bin, then `zsh -lc 'command -v claude'`.").font(.caption).foregroundStyle(.secondary)
             }
@@ -604,6 +733,12 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .tabItem { Text("AI") }
+        VaultLibrarySettings()
+            .tabItem { Text("Vault") }
+        ShortcutList()
+            .tabItem { Text("Shortcuts") }
+        }
         .onChange(of: settings) { _, newValue in
             SettingsStore.save(newValue)
         }
@@ -616,7 +751,40 @@ struct SettingsView: View {
             storeKey(account: "anthropic", value: anthropicKey)
         }
         .padding()
-        .frame(minWidth: 520, minHeight: 560)
+        .frame(width: 500, height: 560)
+    }
+
+    private var aiReady: Bool {
+        if settings.defaultProvider == .openai { return !openAIKey.isEmpty }
+        if settings.defaultProvider == .anthropic { return !anthropicKey.isEmpty }
+        let path = settings.defaultProvider == .claudeCLI ? settings.claudeCLIPath : settings.codexCLIPath
+        return path.map { FileManager.default.isExecutableFile(atPath: $0) } ?? false
+    }
+
+    private func testAI() {
+        let provider = settings.defaultProvider
+        if provider == .openai, openAIKey.isEmpty {
+            keyStatus = AIError.missingKey(provider: "ChatGPT").userMessage
+            return
+        }
+        if provider == .anthropic, anthropicKey.isEmpty {
+            keyStatus = AIError.missingKey(provider: "Claude").userMessage
+            return
+        }
+        keyStatus = "Testing…"
+        let current = settings
+        let openAI = openAIKey
+        let anthropic = anthropicKey
+        Task {
+            let router = AIRouter(settings: current, openAIKey: openAI, anthropicKey: anthropic, transport: URLSessionTransport(), runner: ProcessCommandRunner())
+            do {
+                let book = BookText(title: "Test", pages: [BookPage(marker: "p. 1", text: "Hello.", page: 1)])
+                _ = try await router.answer(book: book, focus: nil, purpose: .ask("Reply with one word."), provider: provider, cliDirectory: NSTemporaryDirectory())
+                keyStatus = "Ready"
+            } catch {
+                keyStatus = (error as? AIError)?.userMessage ?? (error as? ReaderFailure)?.message ?? error.localizedDescription
+            }
+        }
     }
 
     private func storeKey(account: String, value: String) {
@@ -626,6 +794,61 @@ struct SettingsView: View {
         } else {
             KeychainStore.save(account: account, secret: value)
             keyStatus = "Saved in Keychain"
+        }
+    }
+}
+
+struct VaultLibrarySettings: View {
+    private var books: [LibraryEntry] {
+        LibraryIndex.load(from: AppPaths.indexFile, fs: LocalFileSystem()).documents.filter { entry in
+            entry.vaultBookFolder != nil || FileManager.default.fileExists(atPath: Paths.join(entry.sidecarPath, ".reader-state.json"))
+        }
+    }
+
+    var body: some View {
+        if books.isEmpty {
+            ContentUnavailableView("No vault books", systemImage: "link", description: Text("Link a book from File, or open one that already lives in a vault."))
+        } else {
+            List(books, id: \.bookPath) { entry in
+                VaultBookRow(entry: entry)
+            }
+        }
+    }
+}
+
+private struct VaultBookRow: View {
+    var entry: LibraryEntry
+    @State private var enabled = true
+    private var folder: String { entry.vaultBookFolder ?? entry.sidecarPath }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(entry.title)
+            Text(folder).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            Toggle("Save notes here", isOn: $enabled)
+                .onChange(of: enabled) { _, value in
+                    let fs = LocalFileSystem()
+                    var settings = VaultBookSettings.load(bookFolder: folder, fs: fs)
+                    settings.enabled = value
+                    try? settings.save(bookFolder: folder, fs: fs)
+                }
+            Button("Reveal") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: folder) }
+                .buttonStyle(.borderless)
+        }
+        .onAppear {
+            enabled = VaultBookSettings.load(bookFolder: folder, fs: LocalFileSystem()).enabled
+        }
+    }
+}
+
+struct ShortcutList: View {
+    var body: some View {
+        List(ShortcutCatalog.current()) { row in
+            HStack {
+                Text(row.title)
+                Spacer()
+                Text(row.keys).foregroundStyle(.secondary)
+            }
         }
     }
 }
@@ -704,7 +927,7 @@ struct ShortcutsView: View {
     @State private var query = ""
 
     var body: some View {
-        let rows = ShortcutCatalog.rows.filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) || $0.keys.localizedCaseInsensitiveContains(query) }
+        let rows = ShortcutCatalog.current().filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) || $0.keys.localizedCaseInsensitiveContains(query) }
         VStack(alignment: .leading, spacing: 8) {
             Text("Viewing shortcuts match Preview. Notes, words, and Ask AI use the Reader shortcuts. ⌘1–⌘3 stay with Continuous Scroll, Single Page, and Two Pages, so the side panel uses ⌃1–⌃4.").font(.callout).foregroundStyle(.secondary)
             TextField("Search shortcuts", text: $query).textFieldStyle(.roundedBorder)

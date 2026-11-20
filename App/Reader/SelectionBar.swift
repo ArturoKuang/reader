@@ -124,7 +124,27 @@ final class SelectionBarController: NSObject {
 
     @objc func noteClicked(_ sender: Any?) { session?.addNote(); dismiss() }
     @objc func lookUpClicked(_ sender: Any?) { session?.lookUp(); dismiss() }
-    @objc func askClicked(_ sender: Any?) { session?.show(tab: .askAI); dismiss() }
+    @objc func askClicked(_ sender: Any?) {
+        guard let view = sender as? NSView else { return }
+        let menu = NSMenu()
+        let explain = NSMenuItem(title: "Explain", action: #selector(explainFromBar(_:)), keyEquivalent: "")
+        let summarize = NSMenuItem(title: "Summarize", action: #selector(summarizeFromBar(_:)), keyEquivalent: "")
+        let terms = NSMenuItem(title: "Define Terms", action: #selector(defineFromBar(_:)), keyEquivalent: "")
+        let ask = NSMenuItem(title: "Ask…", action: #selector(askFromBar(_:)), keyEquivalent: "")
+        for item in [explain, summarize, terms, ask] {
+            item.target = self
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: view.bounds.height + 4), in: view)
+    }
+    @objc func explainFromBar(_ sender: Any?) { session?.ask(purpose: .explainSimply); dismiss() }
+    @objc func summarizeFromBar(_ sender: Any?) { session?.ask(purpose: .summarizeSection); dismiss() }
+    @objc func defineFromBar(_ sender: Any?) { session?.ask(purpose: .ask("Define the difficult terms in this passage.")); dismiss() }
+    @objc func askFromBar(_ sender: Any?) {
+        session?.focusQuestion += 1
+        session?.show(tab: .askAI)
+        dismiss()
+    }
     @objc func copyClicked(_ sender: Any?) {
         guard let text = session?.selection?.text else { dismiss(); return }
         NSPasteboard.general.clearContents()

@@ -14,8 +14,10 @@ public struct LibraryEntry: Codable, Equatable, Sendable {
     public var sidecarPath: String
     public var placement: Placement
     public var updated: String
+    /// Set when this book is linked to a vault book folder that is not its parent.
+    public var vaultBookFolder: String?
 
-    public init(fingerprint: String, pdfID: String?, epubID: String?, title: String, bookPath: String, sidecarPath: String, placement: Placement, updated: String) {
+    public init(fingerprint: String, pdfID: String?, epubID: String?, title: String, bookPath: String, sidecarPath: String, placement: Placement, updated: String, vaultBookFolder: String? = nil) {
         self.fingerprint = fingerprint
         self.pdfID = pdfID
         self.epubID = epubID
@@ -24,6 +26,7 @@ public struct LibraryEntry: Codable, Equatable, Sendable {
         self.sidecarPath = sidecarPath
         self.placement = placement
         self.updated = updated
+        self.vaultBookFolder = vaultBookFolder
     }
 }
 

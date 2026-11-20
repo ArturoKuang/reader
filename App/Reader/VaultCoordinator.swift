@@ -19,14 +19,22 @@ final class VaultCoordinator {
         self.settings = settings
     }
 
-    static func make(bookPath: String) -> VaultCoordinator? {
+    static func make(bookPath: String, linkedFolder: String? = nil) -> (coordinator: VaultCoordinator?, notice: String?) {
         let fs = LocalFileSystem()
-        guard let location = VaultFinder.locate(bookPath: bookPath, fs: fs) else { return nil }
+        let location: VaultLocation
+        switch VaultFinder.resolve(bookPath: bookPath, linkedFolder: linkedFolder, fs: fs) {
+        case .vault(let found):
+            location = found
+        case .missingLink(let path):
+            return (nil, "The linked vault folder \(path) is missing. Notes stay in the sidecar.")
+        case .none:
+            return (nil, nil)
+        }
         var settings = VaultBookSettings.load(bookFolder: location.bookFolder, fs: fs)
         if !fs.exists(Paths.join(location.bookFolder, ".reader-state.json")) {
-            settings.enabled = true
+            settings.enabled = VaultFinder.classify(bookFolder: location.bookFolder, fs: fs) == .bookFolder
         }
-        return VaultCoordinator(location: location, settings: settings)
+        return (VaultCoordinator(location: location, settings: settings), nil)
     }
 
     func attach(_ session: ReaderSession) {
@@ -38,7 +46,9 @@ final class VaultCoordinator {
         session.vaultNotesFolder = settings.notesFolder
         session.vaultVocabularyFile = settings.vocabularyFile ?? ""
         session.vaultEnabled = settings.enabled
+        session.vaultLoose = VaultFinder.classify(bookFolder: location.bookFolder, fs: fs) == .loose
         session.tutorAvailable = fs.exists(Paths.join(location.bookFolder, "CLAUDE.md"))
+        if session.tutorAvailable, session.askChoice.isEmpty { session.askChoice = "tutor" }
         session.claudeSessionID = settings.claudeSessionID
         reload(into: session, mergePending: false)
         session.onVaultFlush = { [weak self, weak session] in

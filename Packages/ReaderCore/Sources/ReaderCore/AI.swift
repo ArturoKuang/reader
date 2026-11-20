@@ -8,6 +8,23 @@ import Glibc
 import Darwin
 #endif
 
+public enum AIError: Error, Equatable, Sendable {
+    case missingKey(provider: String)
+    case missingCLI(name: String)
+    case failed(provider: String, detail: String)
+
+    public var userMessage: String {
+        switch self {
+        case .missingKey(let provider):
+            return "Add a \(provider) API key in Settings."
+        case .missingCLI(let name):
+            return "\(name) was not found. Set its path in Settings."
+        case .failed(let provider, let detail):
+            return detail.isEmpty ? "\(provider) didn't answer." : "\(provider): \(detail)"
+        }
+    }
+}
+
 public struct HTTPRequest: Equatable, Sendable {
     public var url: String
     public var method: String

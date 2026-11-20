@@ -101,6 +101,8 @@ public struct ViewState: Codable, Equatable, Sendable {
     public var epubLine: Int
     public var epubMargin: Int
     public var epubJustify: Bool
+    /// A book outside the vault can point at a book folder. Older sidecars omit this.
+    public var vaultBookFolder: String?
 
     public init(
         version: Int = 1,
@@ -122,7 +124,8 @@ public struct ViewState: Codable, Equatable, Sendable {
         epubFont: String = "Original",
         epubLine: Int = 1,
         epubMargin: Int = 1,
-        epubJustify: Bool = false
+        epubJustify: Bool = false,
+        vaultBookFolder: String? = nil
     ) {
         self.version = version
         self.page = page
@@ -144,6 +147,7 @@ public struct ViewState: Codable, Equatable, Sendable {
         self.epubLine = epubLine
         self.epubMargin = epubMargin
         self.epubJustify = epubJustify
+        self.vaultBookFolder = vaultBookFolder
     }
 
     public static var fresh: ViewState { ViewState() }
@@ -151,7 +155,7 @@ public struct ViewState: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case version, page, scrollY, zoom, fitMode, continuous, twoPages
         case sidebar, panelVisible, panelTab, rotations, bookmarks, lastHighlightColor, windowFrame, showMarginNotes
-        case epubTheme, epubFont, epubLine, epubMargin, epubJustify
+        case epubTheme, epubFont, epubLine, epubMargin, epubJustify, vaultBookFolder
     }
 
     public init(from decoder: Decoder) throws {
@@ -176,6 +180,7 @@ public struct ViewState: Codable, Equatable, Sendable {
         epubLine = try container.decodeIfPresent(Int.self, forKey: .epubLine) ?? 1
         epubMargin = try container.decodeIfPresent(Int.self, forKey: .epubMargin) ?? 1
         epubJustify = try container.decodeIfPresent(Bool.self, forKey: .epubJustify) ?? false
+        vaultBookFolder = try container.decodeIfPresent(String.self, forKey: .vaultBookFolder)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -200,6 +205,7 @@ public struct ViewState: Codable, Equatable, Sendable {
         try container.encode(epubLine, forKey: .epubLine)
         try container.encode(epubMargin, forKey: .epubMargin)
         try container.encode(epubJustify, forKey: .epubJustify)
+        try container.encodeIfPresent(vaultBookFolder, forKey: .vaultBookFolder)
     }
 }
 
