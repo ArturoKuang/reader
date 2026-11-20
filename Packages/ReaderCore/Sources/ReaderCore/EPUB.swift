@@ -468,3 +468,11 @@ enum XML {
         }
     }
 }
+
+public enum EPUBHeading {
+    /// True when the chapter markup already has an h1 or h2, so Reader should not add another title.
+    public static func hasHeading(xhtml: String) -> Bool {
+        let lowered = xhtml.lowercased()
+        return lowered.contains("<h1") || lowered.contains("<h2")
+    }
+}

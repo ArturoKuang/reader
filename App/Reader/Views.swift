@@ -110,6 +110,7 @@ private struct WelcomeTile: View {
 
 struct SidebarView: View {
     @ObservedObject var session: ReaderSession
+    @State private var outlineSelection: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -155,7 +156,7 @@ struct SidebarView: View {
                         VStack(spacing: 6) {
                             PageThumb(document: document, index: index)
                                 .frame(maxWidth: .infinity)
-                                .aspectRatio(0.72, contentMode: .fit)
+                                .aspectRatio(pageAspect(document, index), contentMode: .fit)
                                 .background(Color.white)
                                 .clipShape(RoundedRectangle(cornerRadius: 2, style: .continuous))
                                 .overlay(
@@ -181,33 +182,36 @@ struct SidebarView: View {
         }
     }
 
-    private var outlineList: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 4) {
-                if session.outline.isEmpty {
-                    ContentUnavailableView("No table of contents", systemImage: "list.bullet", description: Text("This book has no contents to open."))
-                }
-                ForEach(session.outline) { row in
-                    Text(row.title)
-                        .font(.callout)
-                        .padding(.leading, CGFloat(row.depth) * 12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                        .onTapGesture { if let page = row.page { jump(page: page) } else if let cfi = row.cfi { jumpEPUB(cfi) } }
-                }
-            }
-            .padding(10)
+    @ViewBuilder private var outlineList: some View {
+        if session.outline.isEmpty {
+            ContentUnavailableView("No table of contents", systemImage: "list.bullet", description: Text("This book has no contents to open."))
+        } else {
+        List(session.outline, selection: $outlineSelection) { row in
+            Text(row.title)
+                .font(.callout)
+                .padding(.leading, CGFloat(row.depth) * 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .listStyle(.sidebar)
+        .onChange(of: outlineSelection) { _, id in
+            guard let id, let row = session.outline.first(where: { $0.id == id }) else { return }
+            if let page = row.page { jump(page: page) } else if let cfi = row.cfi { jumpEPUB(cfi) }
+        }
         }
     }
 
     private var searchList: some View {
-        List(session.searchHits) { hit in
+        List {
+            Section("\(session.searchHits.count) results") {
+                ForEach(session.searchHits) { hit in
             VStack(alignment: .leading, spacing: 2) {
                 Text(hit.snippet).font(.callout).lineLimit(3)
                 Text("\(hit.section) · p. \(hit.page)").font(.caption).foregroundStyle(.secondary)
             }
             .contentShape(Rectangle())
             .onTapGesture { jump(page: hit.page) }
+                }
+            }
         }
     }
 
@@ -235,7 +239,22 @@ struct SidebarView: View {
                     }
                     .onTapGesture {
                         guard let controller = NSApp.keyWindow?.windowController as? ReaderWindowController else { return }
-                        controller.reveal(ReadingPosition(page: bookmark.page, section: bookmark.section))
+                        controller.reveal(ReadingPosition(page: bookmark.page, cfi: bookmark.cfi, section: bookmark.section))
+                    }
+                    .contextMenu {
+                        Button("Rename") {
+                            let alert = NSAlert()
+                            alert.messageText = "Rename bookmark"
+                            let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
+                            field.stringValue = bookmark.title
+                            alert.accessoryView = field
+                            alert.addButton(withTitle: "Rename")
+                            alert.addButton(withTitle: "Cancel")
+                            if alert.runModal() == .alertFirstButtonReturn {
+                                session.renameBookmark(id: bookmark.id, title: field.stringValue)
+                            }
+                        }
+                        Button("Remove") { session.removeBookmark(id: bookmark.id) }
                     }
                 }
                 Text("Marks").font(.headline).padding(.top, 8)
@@ -268,6 +287,13 @@ struct SidebarView: View {
         }
     }
 
+    private func pageAspect(_ document: PDFDocument, _ index: Int) -> CGFloat {
+        guard let page = document.page(at: index) else { return 0.72 }
+        let box = page.bounds(for: .mediaBox)
+        guard box.height > 0 else { return 0.72 }
+        return box.width / box.height
+    }
+
     private func jump(page: Int) {
         session.recordJump(from: ReadingPosition(page: session.page, zoom: session.zoom, section: session.sectionTitle), to: ReadingPosition(page: page))
         session.page = page
@@ -296,7 +322,12 @@ struct PageThumb: NSViewRepresentable {
 }
 
 final class ThumbView: NSView {
-    var page: PDFPage?
+    var page: PDFPage? {
+        didSet { cached = nil; needsDisplay = true }
+    }
+    private var cached: NSImage?
+    private static let cache = NSCache<NSString, NSImage>()
+
     override func draw(_ dirtyRect: NSRect) {
         NSColor.windowBackgroundColor.setFill()
         bounds.fill()
@@ -314,8 +345,26 @@ final class ThumbView: NSView {
             target.origin.y += (target.height - height) / 2
             target.size.height = height
         }
-        let image = page.thumbnail(of: target.size, for: .mediaBox)
-        image.draw(in: target)
+        let key = "\(ObjectIdentifier(page).hashValue)-\(Int(target.width))x\(Int(target.height))" as NSString
+        if let cached, cached.size == target.size {
+            cached.draw(in: target)
+            return
+        }
+        if let stored = Self.cache.object(forKey: key) {
+            cached = stored
+            stored.draw(in: target)
+            return
+        }
+        let page = page
+        let size = target.size
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let image = page.thumbnail(of: size, for: .mediaBox)
+            Self.cache.setObject(image, forKey: key)
+            DispatchQueue.main.async {
+                self?.cached = image
+                self?.needsDisplay = true
+            }
+        }
     }
 }
 
@@ -439,6 +488,7 @@ struct RightPanelView: View {
                 ContentUnavailableView("Ask about this passage", systemImage: "text.bubble", description: Text("Passages are sent to the chosen provider when you ask."))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
+            ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(session.chat) { line in
@@ -458,10 +508,15 @@ struct RightPanelView: View {
                                 .buttonStyle(.borderless)
                             }
                         }
+                        .id(line.id)
                     }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onChange(of: session.chat.count) { _, _ in
+                if let last = session.chat.last?.id { proxy.scrollTo(last, anchor: .bottom) }
+            }
+            }
             }
             ZStack(alignment: .topLeading) {
                 TextEditor(text: $session.question)

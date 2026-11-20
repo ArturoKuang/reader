@@ -210,12 +210,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Previous Chapter", #selector(ReaderWindowController.previousChapter(_:)), Self.arrow(Int(NSLeftArrowFunctionKey)), [.command, .option]),
         ]))
         main.addItem(menu("Tools", items: [
-            item("Highlight Color 1", #selector(ReaderWindowController.highlight1(_:)), "1", [.command, .control]),
-            item("Highlight Color 2", #selector(ReaderWindowController.highlight2(_:)), "2", [.command, .control]),
-            item("Highlight Color 3", #selector(ReaderWindowController.highlight3(_:)), "3", [.command, .control]),
-            item("Highlight Color 4", #selector(ReaderWindowController.highlight4(_:)), "4", [.command, .control]),
-            item("Highlight Color 5", #selector(ReaderWindowController.highlight5(_:)), "5", [.command, .control]),
-            item("Highlight Color 6", #selector(ReaderWindowController.highlight6(_:)), "6", [.command, .control]),
+            item("Highlight Yellow", #selector(ReaderWindowController.highlight1(_:)), "1", [.command, .control]),
+            item("Highlight Green", #selector(ReaderWindowController.highlight2(_:)), "2", [.command, .control]),
+            item("Highlight Blue", #selector(ReaderWindowController.highlight3(_:)), "3", [.command, .control]),
+            item("Highlight Pink", #selector(ReaderWindowController.highlight4(_:)), "4", [.command, .control]),
+            item("Highlight Purple", #selector(ReaderWindowController.highlight5(_:)), "5", [.command, .control]),
+            item("Highlight Orange", #selector(ReaderWindowController.highlight6(_:)), "6", [.command, .control]),
             item("Highlight with Last Color", #selector(ReaderWindowController.highlightLast(_:)), "h", [.command, .control]),
             separator(),
             item("Add Note", #selector(ReaderWindowController.addNote(_:)), "n", [.command, .shift]),
@@ -243,6 +243,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         main.addItem(menu("Help", items: [
             item("Keyboard Shortcuts", #selector(showShortcuts(_:)), "?", .command),
         ]))
+        if let view = main.item(withTitle: "View")?.submenu {
+            let appearance = NSMenu(title: "Appearance")
+            for title in ["Original", "Paper", "Quiet", "Night"] {
+                let theme = item(title, #selector(ReaderWindowController.chooseTheme(_:)))
+                appearance.addItem(theme)
+            }
+            appearance.addItem(.separator())
+            for title in ["Original", "New York", "San Francisco", "Georgia", "Charter", "Iowan"] {
+                appearance.addItem(item(title, #selector(ReaderWindowController.chooseFont(_:))))
+            }
+            appearance.addItem(.separator())
+            appearance.addItem(tagged("Tight", #selector(ReaderWindowController.chooseLineSpacing(_:)), 0))
+            appearance.addItem(tagged("Comfortable", #selector(ReaderWindowController.chooseLineSpacing(_:)), 1))
+            appearance.addItem(tagged("Loose", #selector(ReaderWindowController.chooseLineSpacing(_:)), 2))
+            appearance.addItem(.separator())
+            appearance.addItem(tagged("Narrow Margins", #selector(ReaderWindowController.chooseMargin(_:)), 0))
+            appearance.addItem(tagged("Normal Margins", #selector(ReaderWindowController.chooseMargin(_:)), 1))
+            appearance.addItem(tagged("Wide Margins", #selector(ReaderWindowController.chooseMargin(_:)), 2))
+            appearance.addItem(item("Justify", #selector(ReaderWindowController.chooseJustify(_:))))
+            let appearanceItem = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
+            appearanceItem.submenu = appearance
+            view.addItem(appearanceItem)
+        }
         hideShortcutAlias(in: main.item(withTitle: "View")?.submenu, title: "Ask AI", key: "4")
         hideShortcutAlias(in: main.item(withTitle: "Tools")?.submenu, title: "Add Note", key: "n", modifiers: [.command, .control])
         if let file = main.item(withTitle: "File")?.submenu {
@@ -274,6 +297,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.submenu = menu
         return item
+    }
+
+    private func tagged(_ title: String, _ action: Selector, _ tag: Int) -> NSMenuItem {
+        let entry = item(title, action)
+        entry.tag = tag
+        return entry
     }
 
     private func item(_ title: String, _ action: Selector?, _ key: String = "", _ modifiers: NSEvent.ModifierFlags = []) -> NSMenuItem {

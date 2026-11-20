@@ -358,6 +358,46 @@ public enum AnnotationExport {
     }
 }
 
+public enum MarginLayout {
+    /// Sort by vertical position and push a card down when it would cover the one above.
+    /// `y` is the bottom of the card in a y-up coordinate space. Higher cards stay put; the next card moves down.
+    public static func stack(_ cards: [(id: String, y: Double)], height: Double, gap: Double = 4) -> [(id: String, y: Double)] {
+        let sorted = cards.sorted { lhs, rhs in
+            if lhs.y == rhs.y { return lhs.id < rhs.id }
+            return lhs.y > rhs.y
+        }
+        var placed: [(id: String, y: Double)] = []
+        var nextTop = Double.greatestFiniteMagnitude
+        for card in sorted {
+            let top = min(card.y + height, nextTop)
+            let y = top - height
+            placed.append((card.id, y))
+            nextTop = y - gap
+        }
+        return placed
+    }
+}
+
+public enum BookmarkEdit {
+    public static func matches(_ bookmark: Bookmark, page: Int?, cfi: String?) -> Bool {
+        if let cfi, let stored = bookmark.cfi, stored == cfi { return true }
+        if let page, bookmark.page == page { return true }
+        return false
+    }
+
+    /// Returns the bookmark that was added, or nil when an existing one was removed.
+    @discardableResult
+    public static func toggle(page: Int?, cfi: String?, title: String, section: String?, id: String, bookmarks: inout [Bookmark]) -> Bookmark? {
+        if let index = bookmarks.firstIndex(where: { matches($0, page: page, cfi: cfi) }) {
+            bookmarks.remove(at: index)
+            return nil
+        }
+        let bookmark = Bookmark(id: id, page: page, cfi: cfi, title: title, section: section)
+        bookmarks.append(bookmark)
+        return bookmark
+    }
+}
+
 public enum HighlightAppearance {
     public static let blendMode = "multiply"
     public static let opacity = 0.38
@@ -373,6 +413,18 @@ public enum HighlightAppearance {
             Double(value & 0xff) / 255,
             opacity
         )
+    }
+
+    public static func css(dark: Bool) -> String {
+        (1...6).compactMap { color -> String? in
+            guard let part = components(color: color, dark: dark) else { return nil }
+            let hex = String(format: "#%02X%02X%02X%02X", intByte(part.r), intByte(part.g), intByte(part.b), intByte(part.a))
+            return ".reader-hl-\(color) { background: \(hex); }"
+        }.joined(separator: "\n")
+    }
+
+    private static func intByte(_ value: Double) -> Int {
+        min(255, max(0, Int((value * 255).rounded())))
     }
 }
 

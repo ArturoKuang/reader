@@ -396,11 +396,36 @@ final class ReaderSession: ObservableObject {
     func expandAllNotes() { expandedNotes = Set(package.notes.notes.map(\.id)) }
     func collapseAllNotes() { expandedNotes.removeAll() }
 
-    func addBookmark() {
+    func addBookmark() { toggleBookmark() }
+
+    func toggleBookmark() {
         let title = sectionTitle.isEmpty ? "Page \(page)" : sectionTitle
-        let bookmark = Bookmark(id: IDs.make("b"), page: isPDF ? page : nil, cfi: isPDF ? nil : currentEPUBCFI(), title: title, section: sectionTitle)
-        package.state.bookmarks.append(bookmark)
-        if sidebar != .bookmarks { setSidebar(.bookmarks) }
+        let pageNumber = isPDF ? page : nil
+        let cfi = isPDF ? nil : currentEPUBCFI()
+        let before = package.state.bookmarks
+        let added = BookmarkEdit.toggle(page: pageNumber, cfi: cfi, title: title, section: sectionTitle, id: IDs.make("b"), bookmarks: &package.state.bookmarks)
+        undoManager?.registerUndo(withTarget: self) { session in
+            session.package.state.bookmarks = before
+            session.dirty()
+        }
+        undoManager?.setActionName(added == nil ? "Remove Bookmark" : "Add Bookmark")
+        dirty()
+    }
+
+    func bookmarkExistsForCurrentPosition() -> Bool {
+        let pageNumber = isPDF ? page : nil
+        let cfi = isPDF ? nil : currentEPUBCFI()
+        return package.state.bookmarks.contains { BookmarkEdit.matches($0, page: pageNumber, cfi: cfi) }
+    }
+
+    func renameBookmark(id: String, title: String) {
+        guard let index = package.state.bookmarks.firstIndex(where: { $0.id == id }) else { return }
+        let previous = package.state.bookmarks[index].title
+        package.state.bookmarks[index].title = title
+        undoManager?.registerUndo(withTarget: self) { session in
+            session.renameBookmark(id: id, title: previous)
+        }
+        undoManager?.setActionName("Rename Bookmark")
         dirty()
     }
 

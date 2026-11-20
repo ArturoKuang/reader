@@ -58,9 +58,35 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             self.webView?.evaluateJavaScript("window.readerPaint && window.readerPaint(\(self.highlightScript()))")
         }
         loadSpine()
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, event.window == self.view.window, self.view.window?.firstResponder is WKWebView else { return event }
+            let shift = event.modifierFlags.contains(.shift)
+            if event.keyCode == 49 {
+                self.scrollPage(forward: !shift)
+                return nil
+            }
+            if event.keyCode == 124 { self.scrollPage(forward: true); return nil }
+            if event.keyCode == 123 { self.scrollPage(forward: false); return nil }
+            return event
+        }
     }
 
-    func applyDisplayMode() { loadSpine() }
+    private func scrollPage(forward: Bool) {
+        let direction = forward ? 1 : -1
+        let check = forward ? "window.scrollY + window.innerHeight >= document.body.scrollHeight - 8" : "window.scrollY <= 8"
+        webView?.evaluateJavaScript("window.scrollBy(0, window.innerHeight * 0.9 * \(direction)); \(check)") { [weak self] result, _ in
+            guard let self, (result as? Bool) == true else { return }
+            if forward { self.nextPage() } else if self.session.page > 1 { self.previousPage() }
+        }
+    }
+
+    func applyDisplayMode() {
+        if webView?.url != nil, session.continuous {
+            applyLiveStyle()
+        } else {
+            loadSpine()
+        }
+    }
 
     func setContactSheet(_ visible: Bool) {
         contactHost?.view.removeFromSuperview()
@@ -84,13 +110,29 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         contactHost = host
     }
 
-    func actualSize() { fontScale = 1; session.rememberZoom(1, fit: .actual); loadSpine() }
-    func zoomToFit() { fontScale = 1.15; session.rememberZoom(fontScale, fit: .fitPage); loadSpine() }
-    func fitWidth() { fontScale = 1.15; session.rememberZoom(fontScale, fit: .fitWidth); loadSpine() }
+    func actualSize() { fontScale = 1; session.rememberZoom(1, fit: .actual); applyLiveStyle() }
+    func zoomToFit() { fontScale = 1.15; session.rememberZoom(fontScale, fit: .fitPage); applyLiveStyle() }
+    func fitWidth() { fontScale = 1.15; session.rememberZoom(fontScale, fit: .fitWidth); applyLiveStyle() }
     func zoom(by factor: Double) {
         fontScale = min(max(fontScale * factor, 0.6), 2.4)
         session.rememberZoom(fontScale, fit: .custom)
-        loadSpine()
+        applyLiveStyle()
+    }
+
+    func applyLiveStyle() {
+        guard webView?.url != nil else { loadSpine(); return }
+        let appearance = epubAppearance()
+        let family = appearance.font.isEmpty ? "inherit" : appearance.font
+        let script = """
+        document.body.style.fontSize = '\(16 * fontScale)px';
+        document.body.style.fontFamily = '\(family)';
+        document.body.style.lineHeight = '\(appearance.line)';
+        document.body.style.margin = '\(appearance.margin)px auto';
+        document.body.style.background = '\(appearance.background)';
+        document.body.style.color = '\(appearance.foreground)';
+        document.body.style.textAlign = '\(appearance.align)';
+        """
+        webView?.evaluateJavaScript(script)
     }
     func nextPage() { showSpine(index: min(session.page, max(session.pageCount - 1, 0))) }
     func previousPage() { showSpine(index: max(session.page - 2, 0)) }
@@ -105,6 +147,12 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             self.findBar.currentEditor()?.selectAll(nil)
         }
     }
+    func search(_ query: String) {
+        findBar.stringValue = query
+        session.findQuery = query
+        find(forward: true)
+    }
+
     @objc private func submitFind() { find(forward: true) }
     func find(forward: Bool) {
         let query = findBar.stringValue.isEmpty ? session.findQuery : findBar.stringValue
@@ -325,7 +373,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         case "Georgia": font = "Georgia, serif"
         case "Charter": font = "Charter, serif"
         case "Iowan": font = "\"Iowan Old Style\", serif"
-        default: font = "Georgia, serif"
+        default: font = ""
         }
         let lines = ["1.4", "1.6", "1.9"]
         let margins = [24, 48, 80]
@@ -386,20 +434,18 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             let index = epub.spine.firstIndex(where: { $0.id == item.id }) ?? 0
             let chapter = placements.indices.contains(index) ? placements[index].chapter : nil
             let html = epub.xhtml(for: item.href) ?? "<p>Missing \(item.href)</p>"
-            body += "<section id=\"spine-\(item.id)\" data-index=\"\(index)\" data-chapter=\"\(chapter.map(String.init) ?? "")\"><h2>\(item.title)</h2>\(html)</section>"
+            let heading = EPUBHeading.hasHeading(xhtml: html) ? "" : "<h2>\(item.title)</h2>"
+            body += "<section id=\"spine-\(item.id)\" data-index=\"\(index)\" data-chapter=\"\(chapter.map(String.init) ?? "")\">\(heading)\(html)</section>"
         }
         let target = min(max(session.page - 1, 0), max(epub.spine.count - 1, 0))
         applySpine(target, count: epub.spine.count)
         let appearance = epubAppearance()
         let css = """
-        body { font: \(16 * fontScale)px \(appearance.font); line-height: \(appearance.line); margin: \(appearance.margin)px auto; max-width: \(session.twoPages ? 920 : 680)px; \(columns) background: \(appearance.background); color: \(appearance.foreground); text-align: \(appearance.align); }
-        .reader-hl { background: #F2C94C59; }
-        .reader-hl-1 { background: #F2C94C59; }
-        .reader-hl-2 { background: #6FCF9759; }
-        .reader-hl-3 { background: #56CCF259; }
-        .reader-hl-4 { background: #F299C859; }
-        .reader-hl-5 { background: #BB6BD959; }
-        .reader-hl-6 { background: #F2994A59; }
+        body { font: \(16 * fontScale)px \(appearance.font.isEmpty ? "inherit" : appearance.font); line-height: \(appearance.line); margin: \(appearance.margin)px auto; max-width: \(session.twoPages ? 920 : 680)px; \(columns) background: \(appearance.background); color: \(appearance.foreground); text-align: \(appearance.align); }
+        \(HighlightAppearance.css(dark: false))
+        @media (prefers-color-scheme: dark) {
+        \(HighlightAppearance.css(dark: true))
+        }
         h2 { overflow-wrap: anywhere; }
         .reader-word { border-bottom: 1.5px dotted #666; }
         .reader-glyph { float: right; clear: right; border: 0; background: transparent; font-size: 14px; cursor: pointer; width: 16px; }

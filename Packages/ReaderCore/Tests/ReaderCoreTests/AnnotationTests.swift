@@ -158,6 +158,20 @@ final class AnnotationTests: XCTestCase {
         XCTAssertFalse(loaded.enabled)
     }
 
+    func testMarginStackHeadingAndBookmarkToggle() {
+        let stacked = MarginLayout.stack([("lower", 90), ("upper", 140)], height: 54)
+        XCTAssertEqual(stacked.map(\.id), ["upper", "lower"])
+        XCTAssertEqual(stacked.map(\.y), [140, 82])
+        XCTAssertTrue(EPUBHeading.hasHeading(xhtml: "<h1>Chapter</h1><p>text</p>"))
+        XCTAssertFalse(EPUBHeading.hasHeading(xhtml: "<p>No title here</p>"))
+        var bookmarks = [Bookmark(id: "b1", page: 3, title: "Three")]
+        XCTAssertNil(BookmarkEdit.toggle(page: 3, cfi: nil, title: "Three", section: nil, id: "b2", bookmarks: &bookmarks))
+        XCTAssertTrue(bookmarks.isEmpty)
+        XCTAssertNotNil(BookmarkEdit.toggle(page: nil, cfi: "epubcfi(/6/4)", title: "Chapter", section: "Chapter 1", id: "b3", bookmarks: &bookmarks))
+        XCTAssertEqual(bookmarks.count, 1)
+        XCTAssertTrue(HighlightAppearance.css(dark: true).contains(".reader-hl-1"))
+    }
+
     func testExportMatchesVaultCallout() {
         let highlight = HighlightEntry(id: "h1", color: 1, page: 4, cfi: "page=4", quote: "hard to vary", section: "Chapter 4", noteID: "n1")
         let note = NoteEntry(id: "n1", page: 4, quote: "hard to vary", section: "Chapter 4", body: "A note of mine.")

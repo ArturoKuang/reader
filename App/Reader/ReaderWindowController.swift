@@ -3,9 +3,11 @@ import ReaderCore
 import SwiftUI
 import UniformTypeIdentifiers
 
-final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWindowDelegate {
+final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWindowDelegate, NSSearchFieldDelegate {
     let session: ReaderSession
     private let split = NSSplitViewController()
+    private var searchItem: NSSearchToolbarItem?
+    private var inspectorObservation: NSKeyValueObservation?
     private let sidebarHost: NSHostingController<SidebarView>
     private let panelHost: NSHostingController<RightPanelView>
     private let center: NSViewController
@@ -93,7 +95,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         let content = NSSplitViewItem(viewController: center)
         content.minimumThickness = 320
         content.allowsFullHeightLayout = true
-        let inspector = NSSplitViewItem(viewController: panelHost)
+        let inspector = NSSplitViewItem(inspectorWithViewController: panelHost)
         inspector.minimumThickness = 280
         inspector.maximumThickness = 320
         inspector.canCollapse = true
@@ -104,6 +106,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         split.addSplitViewItem(inspector)
         sidebarItem = sidebar
         panelItem = inspector
+        inspectorObservation = inspector.observe(\.isCollapsed, options: [.new]) { [weak self] item, _ in
+            guard let self else { return }
+            self.session.panelVisible = !item.isCollapsed
+            self.session.package.state.panelVisible = self.session.panelVisible
+        }
         window?.contentViewController = split
     }
 
@@ -226,6 +233,9 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         let contact = session.sidebar == .contactSheet
         sidebarItem?.isCollapsed = session.sidebar == .hidden || contact
         panelItem?.isCollapsed = !session.panelVisible
+        if session.isPDF, let toolbar = window?.toolbar, let index = toolbar.items.firstIndex(where: { $0.itemIdentifier == .appearance }) {
+            toolbar.removeItem(at: index)
+        }
         pdfController?.setContactSheet(contact)
         epubController?.setContactSheet(contact)
         sidebarHost.rootView = SidebarView(session: session)
@@ -248,11 +258,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     // MARK: Toolbar
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .vault, .inspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .vault, .inspectorTrackingSeparator, .toggleInspector]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .vault, .inspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .vault, .inspectorTrackingSeparator, .toggleInspector]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
@@ -273,11 +283,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         case .sidebarTrackingSeparator:
             return nil
         case .appearance:
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            guard !session.isPDF else { return nil }
+            let item = NSMenuToolbarItem(itemIdentifier: itemIdentifier)
             item.image = NSImage(systemSymbolName: "textformat.size", accessibilityDescription: "Appearance")
-            item.action = #selector(showAppearance(_:))
-            item.target = self
             item.label = "Appearance"
+            item.menu = appearanceMenu()
             return item
         case .addNote:
             let note = NSToolbarItem(itemIdentifier: itemIdentifier)
@@ -306,10 +316,12 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             item.label = "Highlight"
             return item
         case .search:
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "Find")
-            item.action = #selector(find(_:))
-            item.target = self
+            let item = NSSearchToolbarItem(itemIdentifier: itemIdentifier)
+            item.searchField.placeholderString = "Find"
+            item.searchField.target = self
+            item.searchField.action = #selector(submitSearch(_:))
+            item.searchField.delegate = self
+            searchItem = item
             item.label = "Find"
             return item
         case .vault:
@@ -326,13 +338,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             item.menu = vaultMenu()
             item.isEnabled = session.usesVault
             return item
-        case .inspector:
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: "Inspector")
-            item.action = #selector(togglePanel(_:))
-            item.target = self
-            item.label = "Inspector"
-            return item
+        case .toggleInspector, .inspectorTrackingSeparator:
+            return nil
         default:
             return nil
         }
@@ -375,7 +382,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         }
         let menu = NSMenu()
         for index in 1...6 {
-            let item = NSMenuItem(title: "Color \(index)", action: #selector(highlightFromMenu(_:)), keyEquivalent: "")
+            let item = NSMenuItem(title: HighlightCallout.name(for: index).capitalized, action: #selector(highlightFromMenu(_:)), keyEquivalent: "")
+            item.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: item.title)?.withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [ReaderColor.nsColor(index)]))
             item.target = self
             item.tag = index
             menu.addItem(item)
@@ -515,6 +523,62 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     @objc func showWordsTab(_ sender: Any?) { session.show(tab: .words); applyChrome() }
     @objc func showHighlightsTab(_ sender: Any?) { session.show(tab: .highlights); applyChrome() }
     @objc func showAskTab(_ sender: Any?) { session.show(tab: .askAI); applyChrome() }
+    private func appearanceMenu() -> NSMenu {
+        let menu = NSMenu()
+        for theme in ["original", "paper", "quiet", "night"] {
+            let item = NSMenuItem(title: theme.capitalized, action: #selector(chooseTheme(_:)), keyEquivalent: "")
+            item.target = self
+            item.state = session.package.state.epubTheme == theme ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        for font in ["Original", "New York", "San Francisco", "Georgia", "Charter", "Iowan"] {
+            let item = NSMenuItem(title: font, action: #selector(chooseFont(_:)), keyEquivalent: "")
+            item.target = self
+            item.state = session.package.state.epubFont == font ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        for (title, tag) in [("Tight", 0), ("Comfortable", 1), ("Loose", 2)] {
+            let item = NSMenuItem(title: title, action: #selector(chooseLineSpacing(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = tag
+            item.state = session.package.state.epubLine == tag ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        for (title, tag) in [("Narrow Margins", 0), ("Normal Margins", 1), ("Wide Margins", 2)] {
+            let item = NSMenuItem(title: title, action: #selector(chooseMargin(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = tag
+            item.state = session.package.state.epubMargin == tag ? .on : .off
+            menu.addItem(item)
+        }
+        let justify = NSMenuItem(title: "Justify", action: #selector(chooseJustify(_:)), keyEquivalent: "")
+        justify.target = self
+        justify.state = session.package.state.epubJustify ? .on : .off
+        menu.addItem(justify)
+        return menu
+    }
+
+    @objc func chooseLineSpacing(_ sender: NSMenuItem) {
+        session.package.state.epubLine = sender.tag
+        session.saveViewQuietly()
+        epubController?.applyLiveStyle()
+    }
+
+    @objc func chooseMargin(_ sender: NSMenuItem) {
+        session.package.state.epubMargin = sender.tag
+        session.saveViewQuietly()
+        epubController?.applyLiveStyle()
+    }
+
+    @objc func chooseJustify(_ sender: NSMenuItem) {
+        session.package.state.epubJustify.toggle()
+        session.saveViewQuietly()
+        epubController?.applyLiveStyle()
+    }
+
     @objc func showAppearance(_ sender: Any?) {
         let menu = NSMenu()
         for theme in ["original", "paper", "quiet", "night"] {
@@ -535,13 +599,13 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         }
     }
 
-    @objc private func chooseTheme(_ sender: NSMenuItem) {
+    @objc func chooseTheme(_ sender: NSMenuItem) {
         session.package.state.epubTheme = sender.title.lowercased()
         session.saveViewQuietly()
         epubController?.applyDisplayMode()
     }
 
-    @objc private func chooseFont(_ sender: NSMenuItem) {
+    @objc func chooseFont(_ sender: NSMenuItem) {
         session.package.state.epubFont = sender.title
         session.saveViewQuietly()
         epubController?.applyDisplayMode()
@@ -639,7 +703,28 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         }
     }
 
-    @objc func find(_ sender: Any?) { pdfController?.toggleFind(); epubController?.toggleFind() }
+    @objc func find(_ sender: Any?) {
+        searchItem?.beginSearchInteraction()
+    }
+
+    @objc func submitSearch(_ sender: Any?) {
+        let query = searchItem?.searchField.stringValue ?? ""
+        session.findQuery = query
+        pdfController?.search(query)
+        epubController?.search(query)
+    }
+
+    func showFindCount(_ index: Int, of total: Int) {
+        searchItem?.badge = NSToolbarItem.Badge(string: "\(index) of \(total)")
+    }
+
+    func searchFieldDidEndSearching(_ sender: NSSearchField) {
+        if let previous = session.sidebarBeforeSearch {
+            session.setSidebar(previous)
+            session.sidebarBeforeSearch = nil
+        }
+        searchItem?.badge = nil
+    }
     @objc func findNext(_ sender: Any?) { pdfController?.findNext(); epubController?.find(forward: true) }
     @objc func findPrevious(_ sender: Any?) { pdfController?.findPrevious(); epubController?.find(forward: false) }
 
@@ -758,6 +843,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             menuItem.title = session.usesVault ? "Unlink Vault Book Folder" : "Link to Vault Book Folder…"
             return true
         case #selector(nextChapter(_:)), #selector(previousChapter(_:)):
+            return epubController != nil
+        case #selector(bookmarkPage(_:)):
+            menuItem.title = session.bookmarkExistsForCurrentPosition() ? "Remove Bookmark" : "Add Bookmark"
+            return true
+        case #selector(chooseTheme(_:)), #selector(chooseFont(_:)), #selector(chooseLineSpacing(_:)), #selector(chooseMargin(_:)), #selector(chooseJustify(_:)):
             return epubController != nil
         default: break
         }

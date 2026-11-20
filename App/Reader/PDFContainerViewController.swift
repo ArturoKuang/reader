@@ -71,6 +71,8 @@ final class PDFContainerViewController: NSViewController {
         applyDisplayMode()
         // Do not scale here. bounds are still zero, and PDFView would stick at minScaleFactor (10%).
         NotificationCenter.default.addObserver(self, selector: #selector(pageChanged), name: .PDFViewPageChanged, object: pdfView)
+        NotificationCenter.default.addObserver(self, selector: #selector(foundMatch(_:)), name: .PDFDocumentDidFindMatch, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(findFinished(_:)), name: .PDFDocumentDidEndFind, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(scaleChanged), name: .PDFViewScaleChanged, object: pdfView)
         pdfView.onMouseUp = { [weak self] in self?.captureSelection() }
         pdfView.highlightIDAt = { [weak self] point in self?.highlightID(atViewPoint: point) }
@@ -275,6 +277,45 @@ final class PDFContainerViewController: NSViewController {
         }
     }
 
+    func search(_ query: String) {
+        findBar.stringValue = query
+        session.findQuery = query
+        matches = []
+        runFind(forward: true)
+    }
+
+    @objc private func foundMatch(_ notification: Notification) {
+        guard let selection = notification.userInfo?[PDFDocumentFoundSelection] as? PDFSelection else { return }
+        matches.append(selection)
+        publishHits()
+        if matches.count == 1 { showCurrentMatch() }
+    }
+
+    @objc private func findFinished(_ notification: Notification) {
+        publishHits()
+        showCurrentMatch()
+    }
+
+    private func publishHits() {
+        guard let document = pdfView.document else { return }
+        session.searchHits = matches.enumerated().map { index, selection in
+            let page = selection.pages.first.flatMap { document.index(for: $0) + 1 } ?? 1
+            let copy = selection.copy() as! PDFSelection
+            copy.extendForLineBoundaries()
+            let snippet = copy.string ?? selection.string ?? session.findQuery
+            return SearchHit(id: index, page: page, snippet: snippet, section: session.outline.last { ($0.page ?? 0) <= page }?.title ?? "")
+        }
+        (view.window?.windowController as? ReaderWindowController)?.showFindCount(min(matchIndex + 1, max(matches.count, 1)), of: matches.count)
+    }
+
+    private func showCurrentMatch() {
+        guard matches.indices.contains(matchIndex) else { return }
+        session.searchIndex = matchIndex
+        let selection = matches[matchIndex]
+        pdfView.setCurrentSelection(selection, animate: true)
+        pdfView.scrollSelectionToVisible(nil)
+    }
+
     @objc private func findFromBar() { runFind(forward: true) }
     func findNext() { runFind(forward: true) }
     func findPrevious() { runFind(forward: false) }
@@ -284,16 +325,14 @@ final class PDFContainerViewController: NSViewController {
         session.findQuery = query
         guard !query.isEmpty, let document = pdfView.document else { return }
         if matches.isEmpty || matches.first?.string?.localizedCaseInsensitiveContains(query) != true {
-            matches = document.findString(query, withOptions: [.caseInsensitive])
+            matches = []
             matchIndex = 0
-            session.searchHits = matches.enumerated().map { index, selection in
-                let page = selection.pages.first.flatMap { document.index(for: $0) + 1 } ?? 1
-                let snippet = selection.string ?? query
-                return SearchHit(id: index, page: page, snippet: snippet, section: session.outline.last { ($0.page ?? 0) <= page }?.title ?? "")
-            }
-            session.searchIndex = 0
+            session.searchHits = []
             if session.sidebar != .searchResults { session.sidebarBeforeSearch = session.sidebar }
             session.sidebar = .searchResults
+            document.cancelFindString()
+            document.beginFindString(query, withOptions: .caseInsensitive)
+            return
         } else if forward {
             matchIndex = matches.isEmpty ? 0 : (matchIndex + 1) % matches.count
         } else {
@@ -301,7 +340,8 @@ final class PDFContainerViewController: NSViewController {
         }
         guard matches.indices.contains(matchIndex) else { return }
         session.searchIndex = matchIndex
-        findBar.placeholderString = "\(matchIndex + 1) of \(matches.count)"
+        findBar.placeholderString = "Find"
+        (view.window?.windowController as? ReaderWindowController)?.showFindCount(matchIndex + 1, of: matches.count)
         let selection = matches[matchIndex]
         pdfView.setCurrentSelection(selection, animate: true)
         pdfView.scrollSelectionToVisible(nil)
@@ -552,6 +592,7 @@ final class PDFContainerViewController: NSViewController {
     @objc private func scaleChanged() {
         guard !suppressScaleSave else { return }
         guard pdfView.bounds.width > 160, pdfView.bounds.height > 160 else { return }
+        overlay.needsLayout = true
         let scale = pdfView.scaleFactor
         guard scale.isFinite, scale > 0.05 else { return }
         if pdfView.autoScales {
@@ -625,7 +666,7 @@ final class ReaderPDFView: PDFView {
             let color = NSMenuItem(title: "Color", action: nil, keyEquivalent: "")
             let colors = NSMenu()
             for index in 1...6 {
-                let item = NSMenuItem(title: "Color \(index)", action: #selector(recolorClicked(_:)), keyEquivalent: "")
+                let item = NSMenuItem(title: HighlightCallout.name(for: index).capitalized, action: #selector(recolorClicked(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = id
                 item.tag = index
@@ -740,7 +781,6 @@ final class ReaderPDFView: PDFView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        superview?.viewWithTag(77)?.needsLayout = true
     }
 }
 
@@ -763,26 +803,42 @@ final class NoteOverlay: NSView {
         let live = Set(notes.map(\.id))
         for (id, view) in glyphs where !live.contains(id) { view.removeFromSuperview(); glyphs[id] = nil }
         for (id, view) in cards where !live.contains(id) { view.removeFromSuperview(); cards[id] = nil }
+        let visible = Set(pdfView.visiblePages.map { document.index(for: $0) + 1 })
+        var cardSlots: [(id: String, y: Double)] = []
+        var cardWidths: [String: CGFloat] = [:]
+        var cardX: [String: CGFloat] = [:]
         for item in notes {
-            guard let pageNumber = item.page, let page = document.page(at: pageNumber - 1) else { continue }
+            guard let pageNumber = item.page, visible.contains(pageNumber), let page = document.page(at: pageNumber - 1) else { continue }
             let passage = rect(for: item, on: page, pdfView: pdfView) ?? pdfView.convert(page.bounds(for: pdfView.displayBox), from: page)
             let pageRect = pdfView.convert(page.bounds(for: pdfView.displayBox), from: page)
             let margin = bounds.maxX - pageRect.maxX
             let showCard = session.showMarginNotes && margin >= 180
             let glyph = glyphs[item.id] ?? makeGlyph(item)
             glyphs[item.id] = glyph
-            let x = min(pageRect.maxX + 4, bounds.maxX - 18)
-            glyph.frame = NSRect(x: x, y: passage.maxY - 16, width: 14, height: 14)
+            if margin < 18 {
+                let pageBounds = page.bounds(for: pdfView.displayBox)
+                let marker = NSRect(x: pageBounds.maxX - 16, y: pageBounds.midY, width: 14, height: 14)
+                let converted = pdfView.convert(marker, from: page)
+                glyph.frame = NSRect(x: converted.minX, y: passage.maxY - 16, width: 14, height: 14)
+            } else {
+                glyph.frame = NSRect(x: min(pageRect.maxX + 4, bounds.maxX - 18), y: passage.maxY - 16, width: 14, height: 14)
+            }
             glyph.toolTip = item.body.split(whereSeparator: \.isNewline).first.map(String.init) ?? item.quote
             if showCard {
                 let card = cards[item.id] ?? makeCard(item)
                 cards[item.id] = card
                 card.stringValue = item.body
-                card.frame = NSRect(x: pageRect.maxX + 22, y: passage.maxY - 58, width: min(margin - 28, 220), height: 54)
+                cardSlots.append((item.id, Double(passage.maxY - 54)))
+                cardX[item.id] = pageRect.maxX + 22
+                cardWidths[item.id] = min(margin - 28, 220)
             } else {
                 cards[item.id]?.removeFromSuperview()
                 cards[item.id] = nil
             }
+        }
+        for placed in MarginLayout.stack(cardSlots, height: 54) {
+            guard let card = cards[placed.id] else { continue }
+            card.frame = NSRect(x: cardX[placed.id] ?? 0, y: placed.y, width: cardWidths[placed.id] ?? 180, height: 54)
         }
     }
 
@@ -805,13 +861,25 @@ final class NoteOverlay: NSView {
         field.lineBreakMode = .byTruncatingTail
         field.textColor = .labelColor
         field.identifier = NSUserInterfaceItemIdentifier(item.id)
+        let click = NSClickGestureRecognizer(target: self, action: #selector(openCard(_:)))
+        field.addGestureRecognizer(click)
         addSubview(field)
         return field
     }
 
     private func rect(for item: Annotation, on page: PDFPage, pdfView: PDFView) -> NSRect? {
+        if let stored = item.rects.first, stored.count >= 4 {
+            let bounds = NSRect(x: stored[0], y: stored[1], width: stored[2] - stored[0], height: stored[3] - stored[1])
+            return pdfView.convert(bounds, from: page)
+        }
         guard let string = page.string, let range = string.range(of: item.quote), let selection = page.selection(for: NSRange(range, in: string)) else { return nil }
         return pdfView.convert(selection.bounds(for: page), from: page)
+    }
+
+    @objc private func openCard(_ sender: NSClickGestureRecognizer) {
+        guard let id = (sender.view as? NSTextField)?.identifier?.rawValue else { return }
+        session?.lastAnnotationHit = id
+        session?.openAnnotation(id)
     }
 
     @objc private func open(_ sender: NSClickGestureRecognizer) {
