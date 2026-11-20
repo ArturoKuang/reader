@@ -26,7 +26,6 @@ final class VaultCoordinator {
         if !fs.exists(Paths.join(location.bookFolder, ".reader-state.json")) {
             settings.enabled = true
         }
-        guard settings.enabled else { return nil }
         return VaultCoordinator(location: location, settings: settings)
     }
 
@@ -43,24 +42,64 @@ final class VaultCoordinator {
         session.claudeSessionID = settings.claudeSessionID
         reload(into: session, mergePending: false)
         session.onVaultFlush = { [weak self, weak session] in
-            guard let self, let session else { return }
+            guard let self, let session, self.settings.enabled else { return }
             self.scheduleFlush(session)
         }
         session.onSaveVaultState = { [weak self, weak session] in
             guard let self, let session else { return }
+            let wasWriting = self.settings.enabled
             self.settings.view = session.package.state
             self.settings.showConceptMarkers = session.showConceptMarkers
             self.settings.claudeSessionID = session.claudeSessionID
             self.settings.enabled = session.vaultEnabled
-            self.settings.notesFolder = session.vaultNotesFolder.isEmpty ? "notes" : session.vaultNotesFolder
-            self.settings.vocabularyFile = session.vaultVocabularyFile.isEmpty ? nil : session.vaultVocabularyFile
+            if Paths.isSafeRelative(session.vaultNotesFolder) {
+                self.settings.notesFolder = session.vaultNotesFolder
+            }
+            if session.vaultVocabularyFile.isEmpty || Paths.isSafeRelative(session.vaultVocabularyFile) {
+                self.settings.vocabularyFile = session.vaultVocabularyFile.isEmpty ? nil : session.vaultVocabularyFile
+            }
+            self.holdOwnWrite()
             try? self.settings.save(bookFolder: self.location.bookFolder, fs: self.fs)
+            if self.settings.enabled {
+                if !wasWriting || self.watcher == nil { self.installWatcher(session) }
+            } else {
+                self.watcher = nil
+            }
+        }
+        session.onRelocateNotes = { [weak self, weak session] from, to, move in
+            guard let self, let session, Paths.isSafeRelative(to) else { return }
+            let oldDir = Paths.join(self.location.bookFolder, from)
+            let newDir = Paths.join(self.location.bookFolder, to)
+            if move, FileManager.default.fileExists(atPath: oldDir), !FileManager.default.fileExists(atPath: newDir) {
+                try? FileManager.default.createDirectory(atPath: Paths.parent(newDir), withIntermediateDirectories: true)
+                try? FileManager.default.moveItem(atPath: oldDir, toPath: newDir)
+            }
+            session.vaultNotesFolder = to
+            self.settings.notesFolder = to
+            self.holdOwnWrite()
+            try? self.settings.save(bookFolder: self.location.bookFolder, fs: self.fs)
+            self.installWatcher(session)
         }
         session.onInsertConcept = { [weak self] concept in
             self?.ensureConceptStub(concept)
         }
-        watcher = VaultFolderWatcher(bookFolder: location.bookFolder) { [weak self, weak session] in
-            guard let self, let session, !self.applyingOwnWrite else { return }
+        installWatcher(session)
+    }
+
+    private func holdOwnWrite() {
+        applyingOwnWrite = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+            self?.applyingOwnWrite = false
+        }
+    }
+
+    private func installWatcher(_ session: ReaderSession) {
+        watcher = nil
+        guard settings.enabled else { return }
+        let notes = VaultPaths.notesDirectory(bookFolder: location.bookFolder, settings: settings)
+        let vocabulary = VaultPaths.vocabularyFile(bookFolder: location.bookFolder, settings: settings, fs: fs)
+        watcher = VaultFolderWatcher(bookFolder: location.bookFolder, notesDirectory: notes, vocabularyFile: vocabulary) { [weak self, weak session] in
+            guard let self, let session, !self.applyingOwnWrite, self.settings.enabled else { return }
             self.reload(into: session, mergePending: true)
         }
     }
@@ -70,6 +109,7 @@ final class VaultCoordinator {
         session.concepts = concepts
         session.mastery = loadMastery()
         let notesDir = VaultPaths.notesDirectory(bookFolder: location.bookFolder, settings: settings)
+        let keptRects = Dictionary(session.highlights.map { ($0.id, $0.rects) }, uniquingKeysWith: { first, _ in first })
         var notes: [NoteEntry] = []
         var highlights: [HighlightEntry] = []
         var ids: Set<String> = []
@@ -84,14 +124,16 @@ final class VaultCoordinator {
                 let chapter = ChapterFiles.number(in: name)
                 for block in VaultNoteFile.blocks(text) {
                     ids.insert(block.id)
+                    let page = block.link.pageNumber
+                    let rects = keptRects[block.id] ?? []
                     if let color = block.color {
                         let linked = !block.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        highlights.append(HighlightEntry(id: block.id, color: color, page: nil, cfi: block.link.location, quote: block.quote, section: chapter.map { "Chapter \($0)" }, noteID: linked ? block.id : nil))
+                        highlights.append(HighlightEntry(id: block.id, color: color, page: page, cfi: block.link.location, quote: block.quote, section: chapter.map { "Chapter \($0)" }, rects: rects, noteID: linked ? block.id : nil))
                         if linked {
-                            notes.append(NoteEntry(id: block.id, cfi: block.link.location, quote: block.quote, section: chapter.map { "Chapter \($0)" }, body: block.body))
+                            notes.append(NoteEntry(id: block.id, page: page, cfi: block.link.location, quote: block.quote, section: chapter.map { "Chapter \($0)" }, body: block.body))
                         }
                     } else {
-                        notes.append(NoteEntry(id: block.id, cfi: block.link.location, quote: block.quote, section: chapter.map { "Chapter \($0)" }, body: block.body))
+                        notes.append(NoteEntry(id: block.id, page: page, cfi: block.link.location, quote: block.quote, section: chapter.map { "Chapter \($0)" }, body: block.body))
                     }
                 }
             }
@@ -120,8 +162,8 @@ final class VaultCoordinator {
     }
 
     func flush(_ session: ReaderSession) {
-        applyingOwnWrite = true
-        defer { applyingOwnWrite = false }
+        guard settings.enabled else { return }
+        holdOwnWrite()
         writeNotes(session)
         writeWords(session)
         settings.view = session.package.state
@@ -274,13 +316,14 @@ final class VaultFolderWatcher {
     private var timer: Timer?
     private let onChange: () -> Void
 
-    init(bookFolder: String, onChange: @escaping () -> Void) {
+    init(bookFolder: String, notesDirectory: String, vocabularyFile: String, onChange: @escaping () -> Void) {
         self.onChange = onChange
         let paths = [
             bookFolder,
-            Paths.join(bookFolder, "notes"),
+            notesDirectory,
+            Paths.parent(vocabularyFile),
+            vocabularyFile,
             Paths.join(bookFolder, "learner"),
-            Paths.join(bookFolder, "learner/vocabulary.md"),
             Paths.join(bookFolder, "learner/mastery.json"),
             Paths.join(bookFolder, "curriculum/concepts.md"),
             Paths.join(bookFolder, "learning/events.jsonl"),

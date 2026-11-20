@@ -55,7 +55,6 @@ struct AnnotationBrowser: View {
                             ForEach(group.items) { item in
                                 row(item)
                                     .tag(item.id)
-                                    .contextMenu { context(item) }
                             }
                         }
                     }
@@ -69,13 +68,21 @@ struct AnnotationBrowser: View {
                     return [NSItemProvider(object: session.annotationMarkdown(chosen) as NSString)]
                 }
                 .onExitCommand {
-                    if editing != nil {
-                        editing = nil
-                        session.flushNoteBodies()
+                    if let editing {
+                        self.editing = nil
+                        session.endNoteEdit(id: editing)
                     } else {
                         session.annotationSelection = []
                     }
                 }
+                .contextMenu(forSelectionType: String.self, menu: { ids in
+                    self.selectionMenu(ids)
+                }, primaryAction: { ids in
+                    guard let id = ids.first, let item = session.annotations.first(where: { $0.id == id }) else { return }
+                    let noteID = item.note?.id ?? id
+                    editing = noteID
+                    session.beginNoteEdit(id: noteID)
+                })
                 .onDeleteCommand { session.deleteSelectedAnnotations() }
                 .onKeyPress(phases: .down) { press in
                     if press.key == KeyEquivalent("a"), press.modifiers.contains(.command), !press.modifiers.contains(.shift) {
@@ -116,11 +123,15 @@ struct AnnotationBrowser: View {
                 .frame(width: 3)
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.quote).font(.callout).foregroundStyle(.secondary).lineLimit(3)
-                if editing == item.id {
+                if editing == item.id || editing == item.note?.id {
                     TextEditor(text: binding(item))
                         .font(.body)
                         .frame(minHeight: 64)
-                        .onExitCommand { editing = nil; session.flushNoteBodies() }
+                        .onExitCommand {
+                            let id = editing ?? item.note?.id ?? item.id
+                            editing = nil
+                            session.endNoteEdit(id: id)
+                        }
                 } else if !item.body.isEmpty {
                     Text(item.body).font(.body)
                 }
@@ -140,8 +151,35 @@ struct AnnotationBrowser: View {
         }
         .padding(.vertical, 2)
         .contentShape(Rectangle())
-        .onTapGesture(count: 2) { editing = item.note?.id ?? item.id }
-        .simultaneousGesture(TapGesture().onEnded { onJump(item) })
+    }
+
+    @ViewBuilder private func selectionMenu(_ ids: Set<String>) -> some View {
+        if ids.count > 1 {
+            Button("Delete \(ids.count) Items") { session.deleteAnnotations(ids: ids) }
+        } else if let id = ids.first, let item = session.annotations.first(where: { $0.id == id }) {
+            Button("Edit Note") {
+                let noteID = item.note?.id ?? id
+                editing = noteID
+                session.beginNoteEdit(id: noteID)
+            }
+            Menu("Color") {
+                ForEach(1...6, id: \.self) { color in
+                    Button(HighlightCallout.name(for: color).capitalized) {
+                        session.recolorAnnotation(id: item.highlight?.id ?? item.id, color: color)
+                    }
+                }
+            }
+            Button("Copy Quote") { paste(item.quote) }
+            Button("Copy as Markdown") { paste(session.annotationMarkdown([item])) }
+            Button("Copy Link") {
+                let link = ReaderLink(path: session.bookURL.path, location: item.cfi ?? item.page.map { "page=\($0)" }, id: item.id)
+                paste(link.url)
+            }
+            if session.usesVault {
+                Button("Reveal in Obsidian") { session.onRevealInObsidian?(item.id) }
+            }
+            Button("Remove Highlight & Note") { session.deleteAnnotations(ids: [id]) }
+        }
     }
 
     private func binding(_ item: Annotation) -> Binding<String> {
@@ -150,29 +188,6 @@ struct AnnotationBrowser: View {
             get: { session.notes.first { $0.id == id }?.body ?? item.body },
             set: { session.queueNoteBody(id: id, body: $0) }
         )
-    }
-
-    @ViewBuilder private func context(_ item: Annotation) -> some View {
-        Button("Edit Note") { editing = item.note?.id ?? item.id }
-        Menu("Color") {
-            ForEach(1...6, id: \.self) { color in
-                Button("Color \(color)") { session.recolorAnnotation(id: item.highlight?.id ?? item.id, color: color) }
-            }
-        }
-        Button("Copy Quote") { paste(item.quote) }
-        Button("Copy as Markdown") { paste(session.annotationMarkdown([item])) }
-        Button("Copy Link") {
-            let link = ReaderLink(path: session.bookURL.path, location: item.cfi ?? item.page.map { "page=\($0)" }, id: item.id)
-            paste(link.url)
-        }
-        if session.usesVault {
-            Button("Reveal in Obsidian") { session.onRevealInObsidian?() }
-        }
-        if session.annotationSelection.count > 1, session.annotationSelection.contains(item.id) {
-            Button("Delete \(session.annotationSelection.count) Items") { session.deleteSelectedAnnotations() }
-        } else {
-            Button("Remove Highlight & Note") { session.deleteAnnotations(ids: [item.id]) }
-        }
     }
 
     private var selectionStrip: some View {
@@ -215,17 +230,35 @@ struct AnnotationBrowser: View {
         NSPasteboard.general.setString(text, forType: .string)
     }
 
+    private var notesCaption: String {
+        guard let root = session.vaultRoot, let folder = session.bookFolder else { return "notes" }
+        return ObsidianLink.noteFile(
+            vaultRoot: root,
+            bookFolder: folder,
+            notesFolder: session.vaultNotesFolder,
+            chapter: ChapterFiles.number(in: session.sectionTitle),
+            bookTitle: session.bookURL.deletingPathExtension().lastPathComponent
+        )
+    }
+
     @ViewBuilder private var vaultFooter: some View {
         if session.usesVault {
             HStack {
-                Text(session.vaultEnabled ? "Obsidian · notes/\(ChapterFiles.notesFile(chapter: ChapterFiles.number(in: session.sectionTitle), bookTitle: session.bookURL.deletingPathExtension().lastPathComponent))" : "Not saving to vault")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                if session.vaultEnabled {
+                    Button(notesCaption) { session.onRevealInObsidian?(nil) }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                        .lineLimit(1)
+                } else {
+                    Text("Obsidian vault found · Not saving here")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
                 Spacer()
                 Button(session.vaultEnabled ? "Reveal" : "Enable") {
                     if session.vaultEnabled {
-                        session.onRevealInObsidian?()
+                        session.onRevealInObsidian?(nil)
                     } else {
                         session.vaultEnabled = true
                         session.onSaveVaultState?()
@@ -238,17 +271,77 @@ struct AnnotationBrowser: View {
             .padding(.horizontal, 12)
             .padding(.bottom, 8)
             .popover(isPresented: $vaultSettings) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Toggle("Write notes into this vault", isOn: $session.vaultEnabled)
-                        .onChange(of: session.vaultEnabled) { _, _ in session.onSaveVaultState?() }
-                    TextField("Notes folder", text: $session.vaultNotesFolder)
-                        .onChange(of: session.vaultNotesFolder) { _, _ in session.onSaveVaultState?() }
-                    TextField("Vocabulary file", text: $session.vaultVocabularyFile)
-                        .onChange(of: session.vaultVocabularyFile) { _, _ in session.onSaveVaultState?() }
-                }
-                .padding(12)
-                .frame(width: 280)
+                VaultMappingForm(session: session)
             }
         }
+    }
+}
+
+private struct VaultMappingForm: View {
+    @ObservedObject var session: ReaderSession
+    @State private var notesDraft = ""
+    @State private var vocabDraft = ""
+    @FocusState private var field: Field?
+    private enum Field { case notes, vocab }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("Write notes into this vault", isOn: $session.vaultEnabled)
+                .onChange(of: session.vaultEnabled) { _, _ in session.onSaveVaultState?() }
+            TextField("Notes folder", text: $notesDraft)
+                .focused($field, equals: .notes)
+                .onSubmit { commitNotes() }
+            TextField("Vocabulary file", text: $vocabDraft)
+                .focused($field, equals: .vocab)
+                .onSubmit { commitVocabulary() }
+        }
+        .padding(12)
+        .frame(width: 280)
+        .onAppear {
+            notesDraft = session.vaultNotesFolder
+            vocabDraft = session.vaultVocabularyFile
+        }
+        .onChange(of: field) { _, _ in
+            commitNotes()
+            commitVocabulary()
+        }
+        .onDisappear {
+            commitNotes()
+            commitVocabulary()
+        }
+    }
+
+    private func commitNotes() {
+        let next = notesDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard next != session.vaultNotesFolder else { return }
+        guard Paths.isSafeRelative(next) else {
+            notesDraft = session.vaultNotesFolder
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Move existing notes?"
+        alert.informativeText = "Notes currently live in \(session.vaultNotesFolder)."
+        alert.addButton(withTitle: "Move Existing Notes")
+        alert.addButton(withTitle: "Start Empty")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            session.onRelocateNotes?(session.vaultNotesFolder, next, true)
+        case .alertSecondButtonReturn:
+            session.onRelocateNotes?(session.vaultNotesFolder, next, false)
+        default:
+            notesDraft = session.vaultNotesFolder
+        }
+    }
+
+    private func commitVocabulary() {
+        let next = vocabDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard next != session.vaultVocabularyFile else { return }
+        guard next.isEmpty || Paths.isSafeRelative(next) else {
+            vocabDraft = session.vaultVocabularyFile
+            return
+        }
+        session.vaultVocabularyFile = next
+        session.onSaveVaultState?()
     }
 }

@@ -147,6 +147,11 @@ public enum AnnotationIndex {
         return best
     }
 
+    /// The highlight already covering this exact passage, if any.
+    public static func highlight(matchingQuote quote: String, page: Int?, cfi: String?, in highlights: [HighlightEntry]) -> HighlightEntry? {
+        highlights.first { $0.quote == quote && $0.page == page && $0.cfi == cfi }
+    }
+
     private static func fold(_ text: String) -> String {
         text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
     }
@@ -168,9 +173,45 @@ public enum AnnotationEdit {
     private static let placeholders: Set<String> = ["Write a note…", "Write a note...", "Add Note"]
 
     @discardableResult
-    public static func addNote(toSelection selection: AnnotationAnchor, color: Int, highlightID: String, noteID: String, now: String, package: inout SidecarPackage) -> Annotation {
+    public static func addHighlight(selection: AnnotationAnchor, color: Int, id: String, package: inout SidecarPackage) -> HighlightEntry? {
+        guard HighlightPalette.isValid(color), !selection.text.isEmpty else { return nil }
+        if let existing = AnnotationIndex.highlight(matchingQuote: selection.text, page: selection.page, cfi: selection.cfi, in: package.highlights.highlights) {
+            return existing
+        }
+        let entry = HighlightEntry(
+            id: id,
+            color: color,
+            page: selection.page,
+            cfi: selection.cfi,
+            quote: selection.text,
+            prefix: selection.prefix,
+            suffix: selection.suffix,
+            section: selection.section,
+            rects: selection.rects
+        )
+        package.highlights.highlights.append(entry)
+        package.state.lastHighlightColor = color
+        return entry
+    }
+
+    public static func addNote(toSelection selection: AnnotationAnchor, color: Int, highlightID: String?, noteID: String, now: String, package: inout SidecarPackage) -> Annotation {
         let chosen = HighlightPalette.isValid(color) ? color : package.state.lastHighlightColor
-        if let existing = package.highlights.highlights.first(where: { $0.quote == selection.text && $0.page == selection.page && $0.cfi == selection.cfi }) {
+        if highlightID == nil {
+            let note = NoteEntry(
+                id: noteID,
+                page: selection.page,
+                cfi: selection.cfi,
+                quote: selection.text,
+                prefix: selection.prefix,
+                suffix: selection.suffix,
+                section: selection.section,
+                created: now,
+                body: ""
+            )
+            package.notes.notes.append(note)
+            return Annotation(highlight: nil, note: note)
+        }
+        if let existing = AnnotationIndex.highlight(matchingQuote: selection.text, page: selection.page, cfi: selection.cfi, in: package.highlights.highlights) {
             let linked = existing.noteID ?? noteID
             addNote(toHighlight: existing.id, noteID: linked, now: now, package: &package)
             let note = package.notes.notes.first { $0.id == linked }
@@ -189,7 +230,7 @@ public enum AnnotationEdit {
             body: ""
         )
         let highlight = HighlightEntry(
-            id: highlightID,
+            id: highlightID ?? noteID,
             color: chosen,
             page: selection.page,
             cfi: selection.cfi,

@@ -58,8 +58,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         session.onPresentNote = { [weak self] id in
             self?.presentNote(id)
         }
-        session.onRevealInObsidian = { [weak self] in
-            self?.revealInObsidian(nil)
+        session.onRevealInObsidian = { [weak self] id in
+            self?.revealObsidian(id: id)
         }
         session.onCaptureSelection = { [weak self] done in
             guard let self else { done(); return }
@@ -578,6 +578,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         guard let host else { return }
         let hostView = pdfController?.noteHostView ?? host
         let rect = pdfController?.noteRect(for: id) ?? NSRect(x: hostView.bounds.midX, y: hostView.bounds.midY, width: 1, height: 1)
+        session.beginNoteEdit(id: id)
         notePopover.show(id: id, session: session, relativeTo: rect, of: hostView)
     }
     @objc func slideshow(_ sender: Any?) {
@@ -684,17 +685,21 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     }
     @objc func bookmarkPage(_ sender: Any?) { session.addBookmark(); applyChrome() }
     @objc func revealInObsidian(_ sender: Any?) {
+        revealObsidian(id: nil)
+    }
+
+    func revealObsidian(id: String?) {
         guard session.usesVault, let vault = session.vaultName, let root = session.vaultRoot, let folder = session.bookFolder else { return }
-        let chapter = ChapterFiles.number(in: session.selection?.section ?? session.sectionTitle)
-        let name = ChapterFiles.notesFile(chapter: chapter, bookTitle: session.bookURL.deletingPathExtension().lastPathComponent)
-        var relative = folder
-        if relative.hasPrefix(root) {
-            relative = String(relative.dropFirst(root.count))
-            if relative.hasPrefix("/") { relative.removeFirst() }
-        }
-        let file = Paths.join(Paths.join(relative, "notes"), name)
-        let block = session.notes.last?.id ?? session.highlights.last?.id
-        if let url = URL(string: ObsidianLink.open(vault: vault, file: file, blockID: block)) {
+        let item = id.flatMap { value in session.annotations.first { $0.id == value } }
+        let chapter = ChapterFiles.number(in: item?.section ?? session.selection?.section ?? session.sectionTitle)
+        let file = ObsidianLink.noteFile(
+            vaultRoot: root,
+            bookFolder: folder,
+            notesFolder: session.vaultNotesFolder,
+            chapter: chapter,
+            bookTitle: session.bookURL.deletingPathExtension().lastPathComponent
+        )
+        if let url = URL(string: ObsidianLink.open(vault: vault, file: file, blockID: item?.id ?? id)) {
             NSWorkspace.shared.open(url)
         }
     }

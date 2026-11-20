@@ -168,7 +168,10 @@ struct SidebarView: View {
                         Text(bookmark.title).font(.callout)
                         Text(bookmark.page.map { "p. \($0)" } ?? bookmark.section ?? "").font(.caption).foregroundStyle(.secondary)
                     }
-                    .onTapGesture { if let page = bookmark.page { jump(page: page) } }
+                    .onTapGesture {
+                        guard let controller = NSApp.keyWindow?.windowController as? ReaderWindowController else { return }
+                        controller.reveal(ReadingPosition(page: bookmark.page, section: bookmark.section))
+                    }
                 }
                 Text("Marks").font(.headline).padding(.top, 8)
                 Text("Lowercase marks stay in this book. Uppercase marks open whichever book they were set in. Press m, then a key. Press `, then the key to jump.").font(.caption).foregroundStyle(.secondary)
@@ -194,8 +197,8 @@ struct SidebarView: View {
         .onTapGesture {
             if global, mark.bookFingerprint != session.fingerprint, let path = mark.bookPath {
                 NSDocumentController.shared.openDocument(withContentsOf: URL(fileURLWithPath: path), display: true) { _, _, _ in }
-            } else if let page = mark.position.page {
-                jump(page: page)
+            } else if let controller = NSApp.keyWindow?.windowController as? ReaderWindowController {
+                controller.reveal(mark.position)
             }
         }
     }
@@ -411,6 +414,15 @@ struct WordList: View {
     @State private var sort = "recent"
     @State private var filter = "all"
 
+    private var vocabularyCaption: String {
+        guard session.vaultEnabled, let root = session.vaultRoot, let folder = session.bookFolder else {
+            return "Obsidian vault found · Not saving here"
+        }
+        let relative = session.vaultVocabularyFile.isEmpty ? "learner/vocabulary.md" : session.vaultVocabularyFile
+        let absolute = relative.hasPrefix("/") ? relative : Paths.join(folder, relative)
+        return ObsidianLink.displayPath(vaultRoot: root, absolute: absolute)
+    }
+
     var body: some View {
         let rows = ordered
         VStack(alignment: .leading, spacing: 8) {
@@ -452,9 +464,8 @@ struct WordList: View {
                         }
                         .contentShape(Rectangle())
                         .onTapGesture {
-                            if let page = word.lookups.first?.page, let controller = NSApp.keyWindow?.windowController as? ReaderWindowController {
-                                controller.reveal(ReadingPosition(page: page, quote: word.lookups.first?.sentence))
-                            }
+                            guard let lookup = word.lookups.first, let controller = NSApp.keyWindow?.windowController as? ReaderWindowController else { return }
+                            controller.reveal(ReadingPosition(page: lookup.page, cfi: lookup.cfi, section: lookup.section, quote: lookup.sentence))
                         }
                         .contextMenu {
                             Button("Copy") { copy(word.word) }
@@ -470,7 +481,7 @@ struct WordList: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             if session.usesVault {
-                Text(session.vaultEnabled ? "Obsidian · learner/vocabulary.md" : "Not saving vocabulary to the vault")
+                Text(vocabularyCaption)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -544,6 +555,8 @@ struct SettingsView: View {
     @State private var settings = SettingsStore.load()
     @State private var openAIKey = KeychainStore.load(account: "openai") ?? ""
     @State private var anthropicKey = KeychainStore.load(account: "anthropic") ?? ""
+    @State private var keyStatus = ""
+    @FocusState private var keyField: String?
 
     var body: some View {
         Form {
@@ -558,11 +571,16 @@ struct SettingsView: View {
             }
             Section("API keys") {
                 SecureField("OpenAI API key", text: $openAIKey)
-                    .onSubmit { if !openAIKey.isEmpty { KeychainStore.save(account: "openai", secret: openAIKey) } }
+                    .focused($keyField, equals: "openai")
+                    .onSubmit { storeKey(account: "openai", value: openAIKey) }
                 TextField("OpenAI model", text: $settings.openAIModel)
                 SecureField("Anthropic API key", text: $anthropicKey)
-                    .onSubmit { if !anthropicKey.isEmpty { KeychainStore.save(account: "anthropic", secret: anthropicKey) } }
+                    .focused($keyField, equals: "anthropic")
+                    .onSubmit { storeKey(account: "anthropic", value: anthropicKey) }
                 TextField("Anthropic model", text: $settings.anthropicModel)
+                if !keyStatus.isEmpty {
+                    Text(keyStatus).font(.caption).foregroundStyle(.secondary)
+                }
                 Text("Keys are stored in the login keychain under \(KeychainStore.service). They are not written into settings.json.").font(.caption).foregroundStyle(.secondary)
             }
             Section("Terminal providers") {
@@ -589,8 +607,26 @@ struct SettingsView: View {
         .onChange(of: settings) { _, newValue in
             SettingsStore.save(newValue)
         }
+        .onChange(of: keyField) { old, _ in
+            guard let old else { return }
+            storeKey(account: old, value: old == "openai" ? openAIKey : anthropicKey)
+        }
+        .onDisappear {
+            storeKey(account: "openai", value: openAIKey)
+            storeKey(account: "anthropic", value: anthropicKey)
+        }
         .padding()
         .frame(minWidth: 520, minHeight: 560)
+    }
+
+    private func storeKey(account: String, value: String) {
+        if value.isEmpty {
+            KeychainStore.delete(account: account)
+            keyStatus = "Removed from Keychain"
+        } else {
+            KeychainStore.save(account: account, secret: value)
+            keyStatus = "Saved in Keychain"
+        }
     }
 }
 

@@ -69,9 +69,12 @@ final class ReaderSession: ObservableObject {
     @Published var annotationRevision = 0
     @Published var showMarginNotes = false
     var onPresentNote: ((String) -> Void)?
-    var onRevealInObsidian: (() -> Void)?
+    var onRevealInObsidian: ((String?) -> Void)?
+    var onRelocateNotes: ((String, String, Bool) -> Void)?
     private var noteSaveTimer: Timer?
     private var pendingNoteBodies: [String: String] = [:]
+    private var noteEditBaseline: [String: String] = [:]
+    var chatAnchor: SelectionContext?
     @Published var provider: ProviderID
     @Published var settings: AISettings
 
@@ -284,23 +287,16 @@ final class ReaderSession: ObservableObject {
 
     func highlight(color: Int) {
         guard HighlightPalette.isValid(color), let selection, !selection.text.isEmpty else { return }
-        if package.highlights.containsSameRange(quote: selection.text, page: selection.page, cfi: selection.cfi) { return }
-        let entry = HighlightEntry(
-            id: IDs.make("h"),
-            color: color,
-            page: selection.page,
-            cfi: selection.cfi,
-            quote: selection.text,
-            prefix: selection.prefix,
-            suffix: selection.suffix,
-            section: selection.section,
-            rects: selection.rects
-        )
-        package.highlights.highlights.append(entry)
-        package.state.lastHighlightColor = color
-        showToast("Highlighted with color \(color)")
-        onAnnotationsChanged?()
-        dirty()
+        let anchor = AnnotationAnchor(text: selection.text, page: selection.page, cfi: selection.cfi, section: selection.section, prefix: selection.prefix, suffix: selection.suffix, rects: selection.rects)
+        if let existing = AnnotationIndex.highlight(matchingQuote: selection.text, page: selection.page, cfi: selection.cfi, in: highlights) {
+            recolorAnnotation(id: existing.id, color: color)
+            showToast("Highlighted with \(HighlightCallout.name(for: color))")
+            return
+        }
+        editAnnotations("Highlight") {
+            _ = AnnotationEdit.addHighlight(selection: anchor, color: color, id: IDs.make("h"), package: &package)
+        }
+        showToast("Highlighted with \(HighlightCallout.name(for: color))")
     }
 
     func deleteHighlight(id: String) {
@@ -360,6 +356,20 @@ final class ReaderSession: ObservableObject {
         if let opened {
             lastAnnotationHit = opened
             onPresentNote?(opened)
+        }
+    }
+
+    func addNote(to selection: SelectionContext, body: String, ai: Bool, provider: String?) {
+        let anchor = AnnotationAnchor(text: selection.text, page: selection.page, cfi: selection.cfi, section: selection.section ?? sectionTitle, prefix: selection.prefix, suffix: selection.suffix, rects: selection.rects)
+        editAnnotations("Add Note") {
+            let created = AnnotationEdit.addNote(toSelection: anchor, color: package.state.lastHighlightColor, highlightID: IDs.make("h"), noteID: IDs.make("n"), now: ISO8601DateFormatter().string(from: Date()), package: &package)
+            if let noteID = created.note?.id {
+                AnnotationEdit.updateNoteBody(id: noteID, body: body, now: ISO8601DateFormatter().string(from: Date()), package: &package)
+                if let index = package.notes.notes.firstIndex(where: { $0.id == noteID }) {
+                    package.notes.notes[index].ai = ai
+                    package.notes.notes[index].provider = provider
+                }
+            }
         }
     }
 
@@ -487,6 +497,7 @@ final class ReaderSession: ObservableObject {
             let quote = selection?.text ?? ""
             if quote != chatQuote {
                 chatQuote = quote
+                chatAnchor = selection
                 chat = []
             }
             chat.append(ReaderChatLine(id: UUID(), mine: true, text: chatLabel(purpose)))
@@ -580,10 +591,23 @@ final class ReaderSession: ObservableObject {
 
     func saveAnswerAsNote() {
         guard !answer.isEmpty else { return }
-        if selection == nil {
-            selection = SelectionContext(text: sectionTitle.isEmpty ? "Page note" : sectionTitle, page: page, cfi: currentEPUBCFI(), section: sectionTitle, prefix: "", suffix: "", sentence: "", rects: [])
+        if let anchor = chatAnchor {
+            addNote(to: anchor, body: answer, ai: true, provider: provider.rawValue)
+            return
         }
-        addNote(body: answer, ai: true, provider: provider.rawValue)
+        editAnnotations("Add Note") {
+            let created = AnnotationEdit.addNote(
+                toSelection: AnnotationAnchor(text: sectionTitle.isEmpty ? "Page note" : sectionTitle, page: page, section: sectionTitle),
+                color: package.state.lastHighlightColor,
+                highlightID: nil,
+                noteID: IDs.make("n"),
+                now: ISO8601DateFormatter().string(from: Date()),
+                package: &package
+            )
+            if let id = created.note?.id {
+                AnnotationEdit.updateNoteBody(id: id, body: answer, now: ISO8601DateFormatter().string(from: Date()), package: &package)
+            }
+        }
     }
 
     func copyCitation() -> String? {
@@ -665,6 +689,7 @@ final class ReaderSession: ObservableObject {
         let quote = selection?.text ?? ""
         if quote != chatQuote {
             chatQuote = quote
+            chatAnchor = selection
             chat = []
         }
         let spoken: String
@@ -805,6 +830,55 @@ final class ReaderSession: ObservableObject {
         onPresentNote?(id)
     }
 
+    func beginNoteEdit(id: String) {
+        guard noteEditBaseline[id] == nil else { return }
+        let linked = highlights.first { $0.id == id }?.noteID
+        let body = notes.first { $0.id == id }?.body ?? linked.flatMap { noteID in notes.first { $0.id == noteID }?.body } ?? ""
+        noteEditBaseline[id] = body
+    }
+
+    func endNoteEdit(id: String) {
+        flushNoteBodies()
+        let highlight = highlights.first { $0.id == id || $0.noteID == id }
+        let candidates = [id, highlight?.noteID, highlight?.id].compactMap { $0 }
+        guard let key = candidates.first(where: { noteEditBaseline[$0] != nil }) else { return }
+        let original = noteEditBaseline.removeValue(forKey: key) ?? ""
+        let noteID = highlight?.noteID ?? (notes.contains { $0.id == id } ? id : nil)
+        let current = noteID.flatMap { note in notes.first { $0.id == note }?.body }
+        guard let noteID else {
+            guard !original.isEmpty else { return }
+            undoManager?.registerUndo(withTarget: self) { session in
+                session.restoreEditedNote(id: key, body: original)
+            }
+            undoManager?.setActionName("Edit Note")
+            return
+        }
+        guard current != original else { return }
+        undoManager?.registerUndo(withTarget: self) { session in
+            session.restoreEditedNote(id: noteID, body: original)
+        }
+        undoManager?.setActionName("Edit Note")
+    }
+
+    private func restoreEditedNote(id: String, body: String) {
+        let previous = notes.first(where: { $0.id == id })?.body
+        applyPendingNote(id: id, body: body)
+        annotationRevision += 1
+        onAnnotationsChanged?()
+        dirty()
+        undoManager?.registerUndo(withTarget: self) { session in
+            if let previous {
+                session.restoreEditedNote(id: id, body: previous)
+            } else {
+                session.applyPendingNote(id: id, body: "")
+                session.annotationRevision += 1
+                session.onAnnotationsChanged?()
+                session.dirty()
+            }
+        }
+        undoManager?.setActionName("Edit Note")
+    }
+
     func queueNoteBody(id: String, body: String) {
         pendingNoteBodies[id] = body
         noteSaveTimer?.invalidate()
@@ -820,17 +894,36 @@ final class ReaderSession: ObservableObject {
         let pending = pendingNoteBodies
         pendingNoteBodies = [:]
         guard !pending.isEmpty else { return }
-        editAnnotations("Edit Note") {
-            for (id, body) in pending {
-                if notes.contains(where: { $0.id == id }) {
-                    AnnotationEdit.updateNoteBody(id: id, body: body, now: ISO8601DateFormatter().string(from: Date()), package: &package)
-                } else if let highlight = highlights.first(where: { $0.id == id || $0.noteID == id }), !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    let noteID = highlight.noteID ?? IDs.make("n")
-                    AnnotationEdit.addNote(toHighlight: highlight.id, noteID: noteID, now: ISO8601DateFormatter().string(from: Date()), package: &package)
-                    AnnotationEdit.updateNoteBody(id: noteID, body: body, now: ISO8601DateFormatter().string(from: Date()), package: &package)
-                }
+        let coalesced = pending.keys.contains { noteEditBaseline[$0] != nil }
+        if coalesced {
+            for (id, body) in pending { applyPendingNote(id: id, body: body) }
+            annotationRevision += 1
+            onAnnotationsChanged?()
+            dirty()
+        } else {
+            editAnnotations("Edit Note") {
+                for (id, body) in pending { applyPendingNote(id: id, body: body) }
             }
         }
+    }
+
+    private func applyPendingNote(id: String, body: String) {
+        let now = ISO8601DateFormatter().string(from: Date())
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        if notes.contains(where: { $0.id == id }) {
+            AnnotationEdit.updateNoteBody(id: id, body: body, now: now, package: &package)
+            return
+        }
+        guard let highlight = highlights.first(where: { $0.id == id || $0.noteID == id }) else { return }
+        if trimmed.isEmpty {
+            if let noteID = highlight.noteID {
+                AnnotationEdit.removeNote(id: noteID, package: &package)
+            }
+            return
+        }
+        let noteID = highlight.noteID ?? IDs.make("n")
+        AnnotationEdit.addNote(toHighlight: highlight.id, noteID: noteID, now: now, package: &package)
+        AnnotationEdit.updateNoteBody(id: noteID, body: body, now: now, package: &package)
     }
 
     func recolorAnnotation(id: String, color: Int) {

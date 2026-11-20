@@ -84,9 +84,7 @@ final class SelectionBarController: NSObject {
 
     private func currentColor(in session: ReaderSession) -> Int? {
         guard let selection = session.selection else { return nil }
-        return session.highlights.first {
-            $0.quote == selection.text && $0.page == selection.page && $0.cfi == selection.cfi
-        }?.color
+        return AnnotationIndex.highlight(matchingQuote: selection.text, page: selection.page, cfi: selection.cfi, in: session.highlights)?.color
     }
 
     private func installMonitor() {
@@ -112,15 +110,14 @@ final class SelectionBarController: NSObject {
 
     @objc func colorClicked(_ sender: NSControl) {
         let color = sender.tag
+        guard let session, let selection = session.selection else { dismiss(); return }
+        let existing = AnnotationIndex.highlight(matchingQuote: selection.text, page: selection.page, cfi: selection.cfi, in: session.highlights)
         if color == 0 {
-            guard let session, let selection = session.selection,
-                  let id = session.highlights.first(where: { $0.quote == selection.text && $0.page == selection.page && $0.cfi == selection.cfi })?.id else {
-                dismiss()
-                return
-            }
-            session.deleteHighlight(id: id)
+            if let id = existing?.id { session.deleteHighlight(id: id) }
+        } else if let id = existing?.id {
+            session.recolorAnnotation(id: id, color: color)
         } else {
-            session?.highlight(color: color)
+            session.highlight(color: color)
         }
         dismiss()
     }
@@ -226,7 +223,7 @@ private final class SelectionChrome: NSView {
             if let rgb = HighlightPalette.rgb(color) {
                 swatch.fill = NSColor(srgbRed: rgb.r, green: rgb.g, blue: rgb.b, alpha: 1)
             }
-            let name = HighlightCallout.name(for: color).capitalized
+            let name = "Highlight \(HighlightCallout.name(for: color).capitalized)"
             swatch.toolTip = name
             swatch.target = target
             swatch.action = #selector(SelectionBarController.colorClicked(_:))
@@ -294,6 +291,13 @@ private final class SwatchControl: NSControl {
     private var hovered = false
 
     override var fittingSize: NSSize { NSSize(width: 24, height: 24) }
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .button }
+    override func accessibilityLabel() -> String? { toolTip }
+    override var acceptsFirstResponder: Bool { true }
+    override var canBecomeKeyView: Bool { true }
+    override var focusRingMaskBounds: NSRect { bounds }
+    override func drawFocusRingMask() { NSBezierPath(ovalIn: bounds.insetBy(dx: 4, dy: 4)).fill() }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -380,6 +384,13 @@ private final class BarButton: NSControl {
     required init?(coder: NSCoder) { nil }
 
     override var fittingSize: NSSize { frame.size }
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .button }
+    override func accessibilityLabel() -> String? { toolTip ?? titleText }
+    override var acceptsFirstResponder: Bool { true }
+    override var canBecomeKeyView: Bool { true }
+    override var focusRingMaskBounds: NSRect { bounds }
+    override func drawFocusRingMask() { bounds.fill() }
 
     private static func measuredSize(title: String, showsTitle: Bool) -> NSSize {
         let font = NSFont.systemFont(ofSize: 12, weight: .medium)

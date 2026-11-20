@@ -46,7 +46,7 @@ final class NotePopoverController: NSObject, NSTextViewDelegate, NSPopoverDelega
     }
 
     func popoverDidClose(_ notification: Notification) {
-        session?.flushNoteBodies()
+        if let annotationID { session?.endNoteEdit(id: annotationID) }
     }
 
     private func build() -> NSView {
@@ -66,7 +66,10 @@ final class NotePopoverController: NSObject, NSTextViewDelegate, NSPopoverDelega
             if let rgb = HighlightPalette.rgb(index) {
                 button.contentTintColor = NSColor(calibratedRed: rgb.r, green: rgb.g, blue: rgb.b, alpha: 1)
             }
-            button.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "Color \(index)")
+            let name = HighlightCallout.name(for: index).capitalized
+            button.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: name)
+            button.toolTip = name
+            button.setAccessibilityLabel(name)
             colorButtons.append(button)
             colors.addArrangedSubview(button)
         }
@@ -78,6 +81,14 @@ final class NotePopoverController: NSObject, NSTextViewDelegate, NSPopoverDelega
         textView.drawsBackground = false
         textView.textContainerInset = NSSize(width: 2, height: 4)
         textView.delegate = self
+        textView.minSize = .zero
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: 304, height: CGFloat.greatestFiniteMagnitude)
+        textView.frame = NSRect(x: 0, y: 0, width: 304, height: 72)
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.documentView = textView
@@ -187,7 +198,7 @@ final class NotePopoverController: NSObject, NSTextViewDelegate, NSPopoverDelega
         NSPasteboard.general.setString(link.url, forType: .string)
     }
 
-    @objc private func reveal() { session?.onRevealInObsidian?() }
+    @objc private func reveal() { session?.onRevealInObsidian?(annotationID) }
     @objc private func removeNote() {
         if let id = annotationID { session?.removeNoteOnly(id: id) }
         popover.performClose(nil)

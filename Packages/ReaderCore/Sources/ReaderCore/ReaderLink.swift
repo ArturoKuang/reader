@@ -55,6 +55,30 @@ public struct ReaderLink: Equatable, Sendable {
 }
 
 public enum ObsidianLink {
+    /// Vault-relative notes file, including the configured notes folder and `.md`.
+    public static func noteFile(vaultRoot: String, bookFolder: String, notesFolder: String, chapter: Int?, bookTitle: String) -> String {
+        var relative = bookFolder
+        let root = vaultRoot.hasSuffix("/") ? String(vaultRoot.dropLast()) : vaultRoot
+        if relative.hasPrefix(root) {
+            relative = String(relative.dropFirst(root.count))
+            while relative.hasPrefix("/") { relative.removeFirst() }
+        }
+        let folder = notesFolder.trimmingCharacters(in: .whitespacesAndNewlines)
+        let notes = folder.isEmpty ? "notes" : folder
+        return [relative, notes, ChapterFiles.notesFile(chapter: chapter, bookTitle: bookTitle)].filter { !$0.isEmpty }.joined(separator: "/")
+    }
+
+    /// Path shown in the inspector, relative to the vault root when it lives inside it.
+    public static func displayPath(vaultRoot: String, absolute path: String) -> String {
+        let root = vaultRoot.hasSuffix("/") ? String(vaultRoot.dropLast()) : vaultRoot
+        var value = path
+        if value.hasPrefix(root) {
+            value = String(value.dropFirst(root.count))
+            while value.hasPrefix("/") { value.removeFirst() }
+        }
+        return value
+    }
+
     /// `file` is vault-relative and may include `.md`. A block id becomes `#^id`.
     public static func open(vault: String, file: String, blockID: String? = nil) -> String {
         var note = file

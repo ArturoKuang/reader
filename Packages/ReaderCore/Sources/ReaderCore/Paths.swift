@@ -42,6 +42,17 @@ public enum Paths {
         if directory == "." { return child }
         return directory + "/" + child
     }
+
+    /// A notes or vocabulary path typed by a person. It must stay inside the book folder.
+    public static func isSafeRelative(_ path: String) -> Bool {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed.hasPrefix("/") || trimmed.hasPrefix("~") { return false }
+        if trimmed.contains(":") || trimmed.contains("\\") || trimmed.contains("\0") { return false }
+        for part in trimmed.split(separator: "/", omittingEmptySubsequences: false) {
+            if part.isEmpty || part == "." || part == ".." { return false }
+        }
+        return true
+    }
 }
 
 public struct ReaderFailure: Error, Equatable, CustomStringConvertible, Sendable {

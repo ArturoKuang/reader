@@ -222,7 +222,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         main.addItem(menu("Help", items: [
             item("Keyboard Shortcuts", #selector(showShortcuts(_:)), "?", .command),
         ]))
+        hideShortcutAlias(in: main.item(withTitle: "View")?.submenu, title: "Ask AI", key: "4")
+        hideShortcutAlias(in: main.item(withTitle: "Tools")?.submenu, title: "Add Note", key: "n", modifiers: [.command, .control])
         NSApp.mainMenu = main
+    }
+
+    private func hideShortcutAlias(in menu: NSMenu?, title: String, key: String, modifiers: NSEvent.ModifierFlags = .control) {
+        guard let menu else { return }
+        guard let alias = menu.items.first(where: { $0.title == title && $0.keyEquivalent == key && $0.keyEquivalentModifierMask == modifiers }) else { return }
+        alias.isHidden = true
+        alias.allowsKeyEquivalentWhenHidden = true
     }
 
     private func menu(_ title: String, items: [NSMenuItem]) -> NSMenuItem {
