@@ -8,6 +8,7 @@ struct AnnotationBrowser: View {
     @State private var editing: String?
     @State private var vaultSettings = false
     @State private var suppressJump = false
+    @State private var conceptCache = ConceptLabelCache()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -78,10 +79,9 @@ struct AnnotationBrowser: View {
                 .contextMenu(forSelectionType: String.self, menu: { ids in
                     self.selectionMenu(ids)
                 }, primaryAction: { ids in
-                    guard let id = ids.first, let item = session.annotations.first(where: { $0.id == id }) else { return }
-                    let noteID = item.note?.id ?? id
-                    editing = noteID
-                    session.beginNoteEdit(id: noteID)
+                    guard let id = ids.first else { return }
+                    editing = id
+                    session.beginNoteEdit(id: id)
                 })
                 .onDeleteCommand { session.deleteSelectedAnnotations() }
                 .onKeyPress(phases: .down) { press in
@@ -123,15 +123,15 @@ struct AnnotationBrowser: View {
                 .frame(width: 3)
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.quote).font(.callout).foregroundStyle(.secondary).lineLimit(3)
-                if editing == item.id || editing == item.note?.id {
-                    TextEditor(text: binding(item))
-                        .font(.body)
-                        .frame(minHeight: 64)
-                        .onExitCommand {
-                            let id = editing ?? item.note?.id ?? item.id
-                            editing = nil
-                            session.endNoteEdit(id: id)
-                        }
+                if editing == item.id {
+                    NoteDraftEditor(initial: item.body) { text in
+                        session.queueNoteBody(id: item.id, body: text)
+                    } finish: {
+                        let id = item.id
+                        editing = nil
+                        session.endNoteEdit(id: id)
+                    }
+                    .id(item.id)
                 } else if !item.body.isEmpty {
                     Text(item.body).font(.body)
                 }
@@ -142,9 +142,9 @@ struct AnnotationBrowser: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 if session.usesVault {
-                    let concepts = ConceptsFile.suggested(passage: item.quote, concepts: session.concepts, chapter: ChapterFiles.number(in: item.section ?? ""))
-                    if !concepts.isEmpty {
-                        Text(concepts.map(\.id).joined(separator: " ")).font(.caption2).foregroundStyle(.tertiary)
+                    let labels = conceptCache.labels(id: item.id, quote: item.quote, concepts: session.concepts, chapter: ChapterFiles.number(in: item.section ?? ""))
+                    if !labels.isEmpty {
+                        Text(labels.joined(separator: " ")).font(.caption2).foregroundStyle(.tertiary)
                     }
                 }
             }
@@ -158,9 +158,8 @@ struct AnnotationBrowser: View {
             Button("Delete \(ids.count) Items") { session.deleteAnnotations(ids: ids) }
         } else if let id = ids.first, let item = session.annotations.first(where: { $0.id == id }) {
             Button("Edit Note") {
-                let noteID = item.note?.id ?? id
-                editing = noteID
-                session.beginNoteEdit(id: noteID)
+                editing = id
+                session.beginNoteEdit(id: id)
             }
             Menu("Color") {
                 ForEach(1...6, id: \.self) { color in
@@ -180,14 +179,6 @@ struct AnnotationBrowser: View {
             }
             Button("Remove Highlight & Note") { session.deleteAnnotations(ids: [id]) }
         }
-    }
-
-    private func binding(_ item: Annotation) -> Binding<String> {
-        let id = item.note?.id ?? item.id
-        return Binding(
-            get: { session.notes.first { $0.id == id }?.body ?? item.body },
-            set: { session.queueNoteBody(id: id, body: $0) }
-        )
     }
 
     private var selectionStrip: some View {
@@ -274,6 +265,45 @@ struct AnnotationBrowser: View {
                 VaultMappingForm(session: session)
             }
         }
+    }
+}
+
+/// The note text lives here, not in the list row, so a later save cannot rebuild the field and drop the caret.
+private struct NoteDraftEditor: View {
+    var initial: String
+    var commit: (String) -> Void
+    var finish: () -> Void
+    @State private var draft = ""
+    @State private var loaded = false
+    @State private var closed = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextEditor(text: $draft)
+            .font(.body)
+            .frame(minHeight: 64)
+            .focused($focused)
+            .onAppear {
+                guard !loaded else { return }
+                loaded = true
+                draft = initial
+                focused = true
+            }
+            .onChange(of: draft) { _, text in
+                guard loaded, text != initial else { return }
+                commit(text)
+            }
+            .onChange(of: focused) { wasFocused, isFocused in
+                if wasFocused && !isFocused { close() }
+            }
+            .onExitCommand { close() }
+    }
+
+    private func close() {
+        guard !closed else { return }
+        closed = true
+        commit(draft)
+        finish()
     }
 }
 

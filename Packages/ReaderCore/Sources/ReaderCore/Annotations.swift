@@ -85,9 +85,20 @@ public enum AnnotationIndex {
             joined.append(Annotation(highlight: highlight, note: note))
         }
         for note in notes where !usedNotes.contains(note.id) {
+            if let index = joined.firstIndex(where: { samePassage($0, as: note) && $0.highlight != nil }) {
+                if joined[index].note == nil {
+                    joined[index] = Annotation(highlight: joined[index].highlight, note: note)
+                }
+                continue
+            }
             joined.append(Annotation(highlight: nil, note: note))
         }
         return sort(joined, .position)
+    }
+
+    /// A highlight and a note written again under the highlight's id describe one passage.
+    private static func samePassage(_ item: Annotation, as note: NoteEntry) -> Bool {
+        item.quote == note.quote && item.page == note.page && item.cfi == note.cfi
     }
 
     public static func grouped(_ items: [Annotation]) -> [AnnotationGroup] {
@@ -268,6 +279,15 @@ public enum AnnotationEdit {
         package.notes.notes.append(note)
         package.highlights.highlights[index].noteID = noteID
         return true
+    }
+
+    /// Removes a note that repeats a highlight's passage after the note was saved under the highlight's id.
+    public static func dropDuplicateNotes(highlights: inout [HighlightEntry], notes: inout [NoteEntry]) {
+        notes.removeAll { note in
+            guard let highlight = highlights.first(where: { $0.quote == note.quote && $0.page == note.page && $0.cfi == note.cfi }) else { return false }
+            if highlight.noteID == note.id { return false }
+            return highlight.noteID != nil
+        }
     }
 
     public static func updateNoteBody(id: String, body: String, now: String, package: inout SidecarPackage) {

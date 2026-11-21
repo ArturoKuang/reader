@@ -36,6 +36,33 @@ final class AnnotationTests: XCTestCase {
         XCTAssertEqual(items.map(\.id), ["a", "c", "b"])
     }
 
+    func testEditingKeepsIdsAndDropsTheRewrittenCopy() {
+        var package = SidecarPackage.empty(identity: FrontMatter(kind: "notes", document: "Book.pdf", fingerprint: "sha256:x"))
+        let anchor = AnnotationAnchor(text: "hard to vary", page: 4, section: "Chapter 4")
+        _ = AnnotationEdit.addNote(toSelection: anchor, color: 1, highlightID: "h1", noteID: "n1", now: "t", package: &package)
+        AnnotationEdit.updateNoteBody(id: "n1", body: "typed", now: "t2", package: &package)
+        AnnotationEdit.updateNoteBody(id: "n1", body: "typed more", now: "t3", package: &package)
+        XCTAssertEqual(package.highlights.highlights.map(\.id), ["h1"])
+        XCTAssertEqual(package.notes.notes.map(\.id), ["n1"])
+        XCTAssertEqual(AnnotationIndex.items(highlights: package.highlights.highlights, notes: package.notes.notes).map(\.id), ["h1"])
+        var highlights = [HighlightEntry(id: "h1", color: 1, page: 4, quote: "hard to vary", noteID: "h1")]
+        var notes = [
+            NoteEntry(id: "h1", page: 4, quote: "hard to vary", body: "typed more"),
+            NoteEntry(id: "n1", page: 4, quote: "hard to vary", body: "typed more"),
+        ]
+        AnnotationEdit.dropDuplicateNotes(highlights: &highlights, notes: &notes)
+        let shown = AnnotationIndex.items(highlights: highlights, notes: notes)
+        XCTAssertEqual(notes.map(\.id), ["h1"])
+        XCTAssertEqual(shown.map(\.id), ["h1"])
+        XCTAssertEqual(shown.first?.body, "typed more")
+        let cache = ConceptLabelCache()
+        let concepts = [Concept(id: "C1", title: "Hard", chapter: 4, findTerms: ["hard"])]
+        let first = cache.labels(id: "h1", quote: "hard to vary", concepts: concepts, chapter: 4)
+        let second = cache.labels(id: "h1", quote: "hard to vary", concepts: [Concept(id: "C9", title: "Other", findTerms: ["other"])], chapter: 4)
+        XCTAssertEqual(first, ["C1"])
+        XCTAssertEqual(second, first)
+    }
+
     func testAddUpdateRemoveAndEmptyBody() {
         var package = SidecarPackage.empty(identity: FrontMatter(kind: "notes", document: "Book.pdf", fingerprint: "sha256:x"))
         let selection = AnnotationAnchor(text: "hard to vary", page: 4, section: "Chapter 4", rects: [[1, 2, 3, 4]])

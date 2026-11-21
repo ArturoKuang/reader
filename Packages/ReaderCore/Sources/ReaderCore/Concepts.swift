@@ -36,6 +36,21 @@ public enum ConceptMatching {
     }
 }
 
+/// Remembers concept labels for a passage so a note's body can change without matching the quote again.
+public final class ConceptLabelCache: @unchecked Sendable {
+    private var values: [String: [String]] = [:]
+
+    public init() {}
+
+    public func labels(id: String, quote: String, concepts: [Concept], chapter: Int?) -> [String] {
+        let key = "\(id)\u{1}\(quote)\u{1}\(chapter ?? -1)\u{1}\(concepts.count)"
+        if let cached = values[key] { return cached }
+        let labels = ConceptsFile.suggested(passage: quote, concepts: concepts, chapter: chapter).map(\.id)
+        values[key] = labels
+        return labels
+    }
+}
+
 public struct Concept: Equatable, Sendable, Identifiable {
     public var id: String
     public var title: String

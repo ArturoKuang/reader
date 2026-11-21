@@ -150,9 +150,13 @@ final class VaultCoordinator {
         }
         if mergePending {
             for note in session.notes where !ids.contains(note.id) {
+                let alreadyShown = highlights.contains { $0.quote == note.quote && $0.page == note.page && $0.cfi == note.cfi }
+                    || notes.contains { $0.quote == note.quote && $0.page == note.page && $0.cfi == note.cfi }
+                if alreadyShown { continue }
                 notes.append(note)
             }
         }
+        AnnotationEdit.dropDuplicateNotes(highlights: &highlights, notes: &notes)
         session.package.notes.notes = notes
         session.package.highlights.highlights = highlights
         loadedBlockIDs = ids
