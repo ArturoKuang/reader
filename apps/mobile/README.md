@@ -7,7 +7,7 @@ Expo spike for highlighting. The Mac app and `Packages/ReaderCore` are unchanged
 `src/contract/` is the temporary TypeScript contract. A header in `types.ts` says these types will be generated from `spec/`.
 
 - A book is a `sha256:` fingerprint of the file bytes, plus a PDF id or an EPUB id.
-- Word ids are `w_` plus `WordStore.normalize` (trim Swift whitespace and newlines, then Unicode lowercase).
+- Word ids are `w_` plus Swift `trimmingCharacters(in: .whitespacesAndNewlines).lowercased()`, per code point and without Unicode normalization.
 - A highlight and its note are separate records. The note's `highlightId` points at the highlight. Sidecar comments still store that link on the highlight under the key `note`.
 - The anchor of record is quote + prefix + suffix. Page, CFI, and rects are hints. Reanchor keeps at most 80 characters of context.
 

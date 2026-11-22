@@ -4,3 +4,5 @@ dist/
 web-build/
 npm-debug.log*
 *.tsbuildinfo
+android/
+ios/

@@ -1,30 +1,47 @@
 /**
- * WordStore.normalize (`Words.swift`): trim Swift
- * `CharacterSet.whitespacesAndNewlines`, then `String.lowercased()`.
+ * Word ids match Swift `WordStore.normalize` byte for byte:
+ * `word.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()`.
  *
- * `lowercased()` is the Unicode default case mapping (not a locale),
- * which is what `String.prototype.toLowerCase` implements. Final sigma
- * and İ → i + combining dot follow from that mapping.
+ * No Unicode normalization. NFC and NFD spellings stay different ids.
  *
- * Whitespace is the union of Unicode category Zs, tab, and the Foundation
- * newline set (LF, VT, FF, CR, NEL, line separator, paragraph separator).
- * BOM (U+FEFF) and zero-width space are not in that set, so they stay.
+ * `CharacterSet.whitespacesAndNewlines` is Unicode general categories
+ * Zs, Zl, and Zp, plus U+000A through U+000D and U+0085. U+FEFF is not
+ * in that set (JavaScript `trim` removes it). U+0009 is not in it either.
+ *
+ * Lowercasing is per code point. `String.prototype.toLowerCase` on the
+ * whole string maps a word-final Σ to ς; Swift `lowercased()` maps each
+ * scalar, so Σ becomes σ. Single-code-point mappings that expand, such
+ * as İ → i + combining dot, are kept.
  */
 
-const TRIM_CODE_POINTS = new Set<number>([
-  0x0009, 0x000a, 0x000b, 0x000c, 0x000d, 0x0020, 0x0085, 0x00a0, 0x1680, 0x2000, 0x2001, 0x2002,
-  0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f,
-  0x3000,
-]);
+function isTrimCodePoint(codePoint: number): boolean {
+  if (codePoint >= 0x000a && codePoint <= 0x000d) return true;
+  if (codePoint === 0x0085) return true;
+  if (codePoint === 0xfeff || codePoint === 0x0009) return false;
+  const char = String.fromCodePoint(codePoint);
+  return /\p{Zs}|\p{Zl}|\p{Zp}/u.test(char);
+}
 
 export function normalizeWord(word: string): string {
-  const chars = [...word];
   let start = 0;
-  let end = chars.length;
-  const isTrim = (char: string) => TRIM_CODE_POINTS.has(char.codePointAt(0) ?? -1);
-  while (start < end && isTrim(chars[start])) start += 1;
-  while (end > start && isTrim(chars[end - 1])) end -= 1;
-  return chars.slice(start, end).join("").toLowerCase();
+  let end = word.length;
+  while (start < end) {
+    const codePoint = word.codePointAt(start) ?? 0;
+    if (!isTrimCodePoint(codePoint)) break;
+    start += codePoint > 0xffff ? 2 : 1;
+  }
+  while (end > start) {
+    const codePoint = word.codePointAt(end - 1) ?? 0;
+    if (!isTrimCodePoint(codePoint)) break;
+    end -= 1;
+  }
+  let lowered = "";
+  for (let index = start; index < end; ) {
+    const codePoint = word.codePointAt(index) ?? 0;
+    lowered += String.fromCodePoint(codePoint).toLowerCase();
+    index += codePoint > 0xffff ? 2 : 1;
+  }
+  return lowered;
 }
 
 /** `"w_" + WordStore.normalize(word)`, the id Reader writes for a lookup. */

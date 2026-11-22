@@ -7,7 +7,8 @@
     "start": "expo start",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/contract/*.test.ts src/highlight/*.test.ts"
+    "test": "tsx --test src/contract/*.test.ts src/highlight/*.test.ts",
+    "lint": "expo lint"
   },
   "dependencies": {
     "expo": "~58.0.26",
@@ -21,6 +22,8 @@
     "@expo/metro-runtime": "~58.0.17",
     "@types/node": "^22.19.1",
     "@types/react": "~19.3.0",
+    "eslint": "^9.0.0",
+    "eslint-config-expo": "~58.0.4",
     "tsx": "^4.20.6",
     "typescript": "~5.9.3"
   }
