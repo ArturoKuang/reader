@@ -19,9 +19,16 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     private var inspectorObservation: NSKeyValueObservation?
     private let sidebarHost: NSHostingController<SidebarView>
     private let panelHost: NSHostingController<RightPanelView>
-    private let center: NSViewController
-    private var pdfController: PDFContainerViewController?
-    private var epubController: EPUBContainerViewController?
+    private let paneHost = PaneHostController()
+    private var pdfPanes: [PDFContainerViewController] = []
+    private var epubPanes: [EPUBContainerViewController] = []
+    private var paneChord = false
+    private var pdfController: PDFContainerViewController? {
+        pdfPanes.indices.contains(paneHost.activeIndex) ? pdfPanes[paneHost.activeIndex] : pdfPanes.first
+    }
+    private var epubController: EPUBContainerViewController? {
+        epubPanes.indices.contains(paneHost.activeIndex) ? epubPanes[paneHost.activeIndex] : epubPanes.first
+    }
     private var keyMonitor: Any?
     private var sidebarItem: NSSplitViewItem?
     private var panelItem: NSSplitViewItem?
@@ -39,12 +46,12 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         panelHost = NSHostingController(rootView: RightPanelView(session: session))
         if session.isPDF {
             let pdf = PDFContainerViewController(session: session)
-            pdfController = pdf
-            center = pdf
+            pdfPanes = [pdf]
+            paneHost.adopt(pdf)
         } else {
             let epub = EPUBContainerViewController(session: session)
-            epubController = epub
-            center = epub
+            epubPanes = [epub]
+            paneHost.adopt(epub)
         }
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 840),
@@ -101,7 +108,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         // Full-height sidebar draws under the title bar, beside the traffic lights.
         sidebar.allowsFullHeightLayout = true
         sidebarHost.view.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let content = NSSplitViewItem(viewController: center)
+        let content = NSSplitViewItem(viewController: paneHost)
         content.minimumThickness = 320
         content.allowsFullHeightLayout = true
         let inspector = NSSplitViewItem(inspectorWithViewController: panelHost)
@@ -169,8 +176,13 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     }
 
     private func installMonitor() {
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown]) { [weak self] event in
             guard let self, event.window === self.window else { return event }
+            if event.type == .leftMouseDown {
+                self.focusPane(at: event.locationInWindow)
+                return event
+            }
+            if self.handlePaneChord(event) { return nil }
             if event.keyCode == 53 {
                 self.dismissSelectionBar()
                 if self.session.sidebar == .searchResults {
@@ -219,6 +231,9 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
 
     func windowDidResize(_ notification: Notification) {
         pdfController?.applyFittingScale()
+        if let width = window?.frame.width {
+            paneHost.stackForWindowWidth(width)
+        }
         storeWindowFrame()
     }
 
@@ -724,8 +739,103 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     @objc func submitSearch(_ sender: Any?) {
         let query = searchItem?.searchField.stringValue ?? ""
         session.findQuery = query
+        for pane in pdfPanes { pane.ownsFindSession = false }
+        for pane in epubPanes { pane.ownsFindSession = false }
         pdfController?.search(query)
         epubController?.search(query)
+    }
+
+    @objc func splitSideBySide(_ sender: Any?) { splitPane(sideBySide: true) }
+    @objc func splitStacked(_ sender: Any?) { splitPane(sideBySide: false) }
+    @objc func focusNextPane(_ sender: Any?) { focusRelativePane(backward: false) }
+    @objc func focusPreviousPane(_ sender: Any?) { focusRelativePane(backward: true) }
+
+    @objc func closePaneOrWindow(_ sender: Any?) {
+        guard paneHost.closeActive() else {
+            window?.performClose(sender)
+            return
+        }
+        pdfPanes = paneHost.panes.compactMap { $0 as? PDFContainerViewController }
+        epubPanes = paneHost.panes.compactMap { $0 as? EPUBContainerViewController }
+        activateCurrentPane()
+    }
+
+    private func splitPane(sideBySide: Bool) {
+        let wide = (window?.frame.width ?? 1000) >= 900
+        let vertical = sideBySide && wide
+        if let active = pdfController {
+            let pane = PDFContainerViewController(session: session)
+            pane.publishesPosition = false
+            pane.ownsFindSession = false
+            pdfPanes.append(pane)
+            paneHost.addPane(pane, sideBySide: vertical)
+            let position = active.currentPosition()
+            DispatchQueue.main.async {
+                pane.reveal(position)
+                pane.freezeLayout()
+            }
+        } else if epubController != nil {
+            let pane = EPUBContainerViewController(session: session)
+            pane.publishesPosition = false
+            pane.ownsFindSession = false
+            epubPanes.append(pane)
+            paneHost.addPane(pane, sideBySide: vertical)
+        }
+        for pane in pdfPanes where pane !== pdfController && pane.view.window != nil {
+            pane.freezeLayout()
+            pane.publishesPosition = false
+        }
+        for pane in epubPanes where pane !== epubController { pane.publishesPosition = false }
+    }
+
+    private func focusRelativePane(backward: Bool) {
+        paneHost.focusNext(backward: backward)
+        activateCurrentPane()
+    }
+
+    private func focusPane(at windowPoint: NSPoint) {
+        guard let index = paneHost.index(at: windowPoint), index != paneHost.activeIndex else { return }
+        paneHost.focus(at: index)
+        activateCurrentPane()
+    }
+
+    private func activateCurrentPane() {
+        for (index, pane) in pdfPanes.enumerated() {
+            let active = index == paneHost.activeIndex
+            if !active { pane.freezeLayout() }
+            pane.publishesPosition = active
+            pane.ownsFindSession = false
+        }
+        for (index, pane) in epubPanes.enumerated() {
+            pane.publishesPosition = index == paneHost.activeIndex
+            pane.ownsFindSession = false
+        }
+        pdfController?.publishCurrentPosition()
+    }
+
+    private func handlePaneChord(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if event.keyCode == 48, flags.contains(.control), !flags.contains(.command) {
+            focusRelativePane(backward: flags.contains(.shift))
+            paneChord = false
+            return true
+        }
+        let key = event.charactersIgnoringModifiers ?? ""
+        if flags.contains(.control), !flags.contains(.command), key.lowercased() == "w" {
+            paneChord = true
+            return true
+        }
+        guard paneChord else { return false }
+        paneChord = false
+        switch key {
+        case "v": splitPane(sideBySide: true)
+        case "s": splitPane(sideBySide: false)
+        case "w": focusRelativePane(backward: false)
+        case "W": focusRelativePane(backward: true)
+        case "q": closePaneOrWindow(nil)
+        default: break
+        }
+        return true
     }
 
     func showFindCount(_ index: Int, of total: Int) {

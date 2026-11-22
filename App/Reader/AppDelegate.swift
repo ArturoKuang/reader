@@ -147,7 +147,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Export All Words…", #selector(exportAllWords(_:)), "e", [.command, .shift]),
             item("Export Notes as Markdown…", #selector(ReaderWindowController.exportNotes(_:)), "e", [.command, .shift, .option]),
             separator(),
-            item("Close", #selector(NSWindow.performClose(_:)), "w", .command),
+            item("Close", #selector(ReaderWindowController.closePaneOrWindow(_:)), "w", .command),
             item("Save", #selector(NSDocument.save(_:)), "s", .command),
         ]))
         // Recent menu: the line above is awkward if submenu returns nil. Fix below after construction.
@@ -185,6 +185,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Zoom In", #selector(ReaderWindowController.zoomIn(_:)), "+", .command),
             item("Zoom Out", #selector(ReaderWindowController.zoomOut(_:)), "-", .command),
             item("Zoom to Selection", #selector(ReaderWindowController.zoomToSelection(_:)), "*", .command),
+            separator(),
+            item("Split Side by Side", #selector(ReaderWindowController.splitSideBySide(_:)), "\\", .command),
+            item("Split Stacked", #selector(ReaderWindowController.splitStacked(_:))),
+            item("Focus Next Pane", #selector(ReaderWindowController.focusNextPane(_:)), "\t", .control),
+            item("Focus Previous Pane", #selector(ReaderWindowController.focusPreviousPane(_:)), "\t", [.control, .shift]),
             separator(),
             item("Rotate Left", #selector(ReaderWindowController.rotateLeft(_:)), "l", .command),
             item("Rotate Right", #selector(ReaderWindowController.rotateRight(_:)), "r", .command),

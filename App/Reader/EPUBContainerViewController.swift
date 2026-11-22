@@ -9,6 +9,8 @@ import WebKit
 /// zoom changes the font size. Two-page mode uses CSS columns, which is an approximation.
 final class EPUBContainerViewController: NSViewController, WKScriptMessageHandler, WKNavigationDelegate {
     let session: ReaderSession
+    var publishesPosition = true
+    var ownsFindSession = false
     private var webView: WKWebView?
     private let findBar = NSSearchField()
     private var findTop: NSLayoutConstraint?
@@ -53,7 +55,9 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             findConstraint,
         ])
         fontScale = session.zoom
+        let previousAnnotations = session.onAnnotationsChanged
         session.onAnnotationsChanged = { [weak self] in
+            previousAnnotations?()
             guard let self else { return }
             self.webView?.evaluateJavaScript("window.readerPaint && window.readerPaint(\(self.highlightScript()))")
         }
@@ -94,7 +98,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         webView?.isHidden = visible
         guard visible else { return }
         let host = NSHostingController(rootView: EPUBContactSheet(session: session) { [weak self] index in
-            self?.session.page = index + 1
+            if self?.publishesPosition == true { self?.session.page = index + 1 }
             self?.session.setSidebar(.thumbnails)
             self?.loadSpine()
             (self?.view.window?.windowController as? ReaderWindowController)?.applyChrome()
@@ -110,13 +114,18 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         contactHost = host
     }
 
-    func actualSize() { fontScale = 1; session.rememberZoom(1, fit: .actual); applyLiveStyle() }
-    func zoomToFit() { fontScale = 1.15; session.rememberZoom(fontScale, fit: .fitPage); applyLiveStyle() }
-    func fitWidth() { fontScale = 1.15; session.rememberZoom(fontScale, fit: .fitWidth); applyLiveStyle() }
+    func actualSize() { fontScale = 1; storeZoom(1, fit: .actual); applyLiveStyle() }
+    func zoomToFit() { fontScale = 1.15; storeZoom(fontScale, fit: .fitPage); applyLiveStyle() }
+    func fitWidth() { fontScale = 1.15; storeZoom(fontScale, fit: .fitWidth); applyLiveStyle() }
     func zoom(by factor: Double) {
         fontScale = min(max(fontScale * factor, 0.6), 2.4)
-        session.rememberZoom(fontScale, fit: .custom)
+        storeZoom(fontScale, fit: .custom)
         applyLiveStyle()
+    }
+
+    private func storeZoom(_ scale: Double, fit: FitMode) {
+        guard publishesPosition else { return }
+        session.rememberZoom(scale, fit: fit)
     }
 
     func applyLiveStyle() {
@@ -316,6 +325,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         let placements = SpineChapters.placements(spine: epub.spine, toc: epub.toc)
         let placement = placements[index]
         let title = placement.title.isEmpty ? epub.spine[index].title : placement.title
+        guard publishesPosition else { return }
         session.updatePage(index + 1, count: count, section: title)
     }
 
@@ -423,8 +433,10 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         } else {
             let index = min(max(session.page - 1, 0), max(epub.spine.count - 1, 0))
             items = [epub.spine[index]]
-            session.sectionTitle = epub.spine[index].title
-            session.updatePage(index + 1, count: epub.spine.count, section: epub.spine[index].title)
+            if publishesPosition {
+                session.sectionTitle = epub.spine[index].title
+                session.updatePage(index + 1, count: epub.spine.count, section: epub.spine[index].title)
+            }
         }
         let columns = session.twoPages && !session.continuous ? "column-count: 2; column-gap: 32px; height: 100vh;" : ""
         acceptSpineReports = false

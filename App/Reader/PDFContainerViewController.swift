@@ -8,6 +8,11 @@ import SwiftUI
 /// markers on top and lets hits fall through everywhere except those controls.
 final class PDFContainerViewController: NSViewController {
     let session: ReaderSession
+    /// Only the active pane writes the shared page, zoom, and find hits.
+    var publishesPosition = true
+    var ownsFindSession = false
+    private var lockedFit: FitMode?
+    private var lockedZoom: Double?
     private let pdfView = ReaderPDFView()
     private let overlay = NoteOverlay()
     private let findBar = NSSearchField()
@@ -89,7 +94,11 @@ final class PDFContainerViewController: NSViewController {
         pdfView.session = session
         pdfView.prepareSelection = { [weak self] in self?.captureSelection(showBar: false) }
         pdfView.beginFind = { [weak self] in self?.toggleFind() }
-        session.onAnnotationsChanged = { [weak self] in self?.refreshAnnotations() }
+        let previousAnnotations = session.onAnnotationsChanged
+        session.onAnnotationsChanged = { [weak self] in
+            previousAnnotations?()
+            self?.refreshAnnotations()
+        }
         refreshAnnotations()
     }
 
@@ -139,7 +148,10 @@ final class PDFContainerViewController: NSViewController {
         let bounds = pdfView.bounds
         guard bounds.width > 160, bounds.height > 160, pdfView.document != nil else { return }
         let anchored = pdfView.currentDestination
-        let mode: FitMode = session.hasSavedViewState ? session.fitMode : .fitPage
+        let mode: FitMode = {
+            if !publishesPosition, let lockedFit { return lockedFit }
+            return session.hasSavedViewState ? session.fitMode : .fitPage
+        }()
         switch mode {
         case .fitPage:
             guard force || bounds.size != lastFitSize else { return }
@@ -152,7 +164,7 @@ final class PDFContainerViewController: NSViewController {
             }
             pdfView.autoScales = true
             suppressScaleSave = false
-            session.rememberZoom(pdfView.scaleFactor, fit: .fitPage)
+            storeZoom(pdfView.scaleFactor, fit: .fitPage)
         case .fitWidth:
             guard bounds.size != lastFitSize else { return }
             lastFitSize = bounds.size
@@ -169,7 +181,7 @@ final class PDFContainerViewController: NSViewController {
             lastFitSize = bounds.size
             suppressScaleSave = true
             pdfView.autoScales = false
-            let scale = min(max(session.zoom, 0.25), pdfView.maxScaleFactor)
+            let scale = min(max(lockedZoom ?? session.zoom, 0.25), pdfView.maxScaleFactor)
             pdfView.scaleFactor = scale
             suppressScaleSave = false
         }
@@ -182,6 +194,10 @@ final class PDFContainerViewController: NSViewController {
     }
 
     private func restorePositionOnce() {
+        guard publishesPosition else {
+            didRestorePosition = true
+            return
+        }
         guard !didRestorePosition, session.hasSavedViewState else {
             if !session.hasSavedViewState { session.finishViewRestore() }
             return
@@ -199,7 +215,31 @@ final class PDFContainerViewController: NSViewController {
     }
 
     func capturePositionForSave() {
+        guard publishesPosition else { return }
         session.rememberScroll(currentPosition())
+    }
+
+    func freezeLayout() {
+        lockedFit = session.fitMode
+        lockedZoom = Double(pdfView.scaleFactor)
+    }
+
+    func publishCurrentPosition() {
+        guard let page = pdfView.currentPage, let document = pdfView.document else { return }
+        let index = document.index(for: page)
+        guard index != NSNotFound else { return }
+        let number = index + 1
+        let section = session.outline.last { ($0.page ?? 0) <= number }?.title
+        session.updatePage(number, count: document.pageCount, section: section)
+        session.rememberZoom(Double(pdfView.scaleFactor), fit: lockedFit ?? session.fitMode)
+        session.rememberScroll(currentPosition())
+    }
+
+    private func storeZoom(_ scale: CGFloat, fit: FitMode) {
+        lockedFit = fit
+        lockedZoom = Double(scale)
+        guard publishesPosition else { return }
+        session.rememberZoom(Double(scale), fit: fit)
     }
 
     func applyDisplayMode() {
@@ -238,14 +278,14 @@ final class PDFContainerViewController: NSViewController {
         pdfView.autoScales = false
         pdfView.scaleFactor = 1
         suppressScaleSave = false
-        session.rememberZoom(1, fit: .actual)
+        storeZoom(1, fit: .actual)
     }
 
     func zoomToFit() {
         suppressScaleSave = true
         pdfView.autoScales = true
         suppressScaleSave = false
-        session.rememberZoom(pdfView.scaleFactor, fit: .fitPage)
+        storeZoom(pdfView.scaleFactor, fit: .fitPage)
     }
 
     func fitWidth() {
@@ -257,7 +297,7 @@ final class PDFContainerViewController: NSViewController {
         suppressScaleSave = true
         pdfView.scaleFactor = available / width
         suppressScaleSave = false
-        session.rememberZoom(pdfView.scaleFactor, fit: .fitWidth)
+        storeZoom(pdfView.scaleFactor, fit: .fitWidth)
     }
 
     func zoomIn() { pdfView.zoomIn(nil) }
@@ -271,7 +311,7 @@ final class PDFContainerViewController: NSViewController {
         let factor = min(size.width / max(bounds.width, 1), size.height / max(bounds.height, 1)) * 0.9
         pdfView.scaleFactor = min(max(factor, pdfView.minScaleFactor), pdfView.maxScaleFactor)
         pdfView.go(to: bounds, on: page)
-        session.rememberZoom(pdfView.scaleFactor, fit: .custom)
+        storeZoom(pdfView.scaleFactor, fit: .custom)
     }
 
     func nextPage() { pdfView.goToNextPage(nil) }
@@ -306,6 +346,7 @@ final class PDFContainerViewController: NSViewController {
     }
 
     func search(_ query: String) {
+        ownsFindSession = true
         findBar.stringValue = query
         session.findQuery = query
         matches = []
@@ -328,7 +369,7 @@ final class PDFContainerViewController: NSViewController {
 
     private func ownsFind(_ notification: Notification) -> Bool {
         guard let document = pdfView.document else { return false }
-        return (notification.object as? PDFDocument) === document
+        return ownsFindSession && (notification.object as? PDFDocument) === document
     }
 
     private func publishHits() {
@@ -618,16 +659,19 @@ final class PDFContainerViewController: NSViewController {
     }
 
     @objc private func pageChanged() {
+        overlay.needsLayout = true
+        guard publishesPosition else { return }
         guard let page = pdfView.currentPage, let document = pdfView.document else { return }
-        let number = document.index(for: page) + 1
+        let index = document.index(for: page)
+        guard index != NSNotFound else { return }
+        let number = index + 1
         let section = session.outline.last { ($0.page ?? 0) <= number }?.title
         session.updatePage(number, count: document.pageCount, section: section)
         session.rememberScroll(currentPosition())
-        overlay.needsLayout = true
     }
 
     @objc private func scrolled() {
-        session.rememberScroll(currentPosition())
+        if publishesPosition { session.rememberScroll(currentPosition()) }
         (view.window?.windowController as? ReaderWindowController)?.dismissSelectionBar()
     }
 
@@ -638,13 +682,13 @@ final class PDFContainerViewController: NSViewController {
         let scale = pdfView.scaleFactor
         guard scale.isFinite, scale > 0.05 else { return }
         if pdfView.autoScales {
-            session.rememberZoom(scale, fit: .fitPage)
-        } else if session.fitMode == .fitWidth {
-            session.rememberZoom(scale, fit: .fitWidth)
-        } else if abs(scale - 1) < 0.001 && session.fitMode == .actual {
-            session.rememberZoom(1, fit: .actual)
+            storeZoom(scale, fit: .fitPage)
+        } else if (lockedFit ?? session.fitMode) == .fitWidth {
+            storeZoom(scale, fit: .fitWidth)
+        } else if abs(scale - 1) < 0.001 && (lockedFit ?? session.fitMode) == .actual {
+            storeZoom(1, fit: .actual)
         } else {
-            session.rememberZoom(scale, fit: .custom)
+            storeZoom(scale, fit: .custom)
         }
     }
 
