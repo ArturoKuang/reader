@@ -85,9 +85,14 @@ final class PDFContainerViewController: NSViewController {
         pdfView.onMouseUp = { [weak self] in self?.captureSelection() }
         pdfView.highlightIDAt = { [weak self] point in self?.highlightID(atViewPoint: point) }
         pdfView.onRemoveHighlight = { [weak self] id in self?.session.deleteHighlight(id: id) }
-        pdfView.onOpenHighlight = { [weak self] id in
-            self?.session.lastAnnotationHit = id
-            self?.session.openAnnotation(id)
+        pdfView.onOpenHighlight = { [weak self] id, option in
+            guard let self else { return }
+            if option {
+                (self.view.window?.windowController as? ReaderWindowController)?.openInPane(id: id)
+                return
+            }
+            self.session.lastAnnotationHit = id
+            self.session.openAnnotation(id)
         }
         pdfView.conceptAt = { [weak self] point in self?.conceptID(atViewPoint: point) }
         pdfView.onConcept = { [weak self] id in self?.presentConcept(id) }
@@ -566,6 +571,20 @@ final class PDFContainerViewController: NSViewController {
         pdfView.go(to: rect, on: page)
     }
 
+    /// Scrolls this pane only and flashes the quote for about a second.
+    func showInPane(_ position: ReadingPosition) {
+        reveal(position)
+        guard let document = pdfView.document, let pageNumber = position.page, let page = document.page(at: pageNumber - 1) else { return }
+        guard let quote = position.quote, let string = page.string, let range = string.range(of: quote), let selection = page.selection(for: NSRange(range, in: string)) else { return }
+        pdfView.setCurrentSelection(selection, animate: true)
+        let flash = PDFAnnotation(bounds: selection.bounds(for: page), forType: .highlight, withProperties: nil)
+        flash.color = NSColor.systemYellow.withAlphaComponent(0.55)
+        page.addAnnotation(flash)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            page.removeAnnotation(flash)
+        }
+    }
+
     var noteHostView: NSView { pdfView }
 
     func noteRect(for id: String) -> NSRect? {
@@ -725,7 +744,7 @@ final class ReaderPDFView: PDFView {
     var onMouseUp: (() -> Void)?
     var highlightIDAt: ((NSPoint) -> String?)?
     var onRemoveHighlight: ((String) -> Void)?
-    var onOpenHighlight: ((String) -> Void)?
+    var onOpenHighlight: ((String, Bool) -> Void)?
     var conceptAt: ((NSPoint) -> String?)?
     var onConcept: ((String) -> Void)?
     var prepareSelection: (() -> Void)?
@@ -735,7 +754,7 @@ final class ReaderPDFView: PDFView {
         super.mouseUp(with: event)
         let point = convert(event.locationInWindow, from: nil)
         if let id = highlightIDAt?(point) {
-            onOpenHighlight?(id)
+            onOpenHighlight?(id, event.modifierFlags.contains(.option))
             return
         }
         if let id = conceptAt?(point) {
@@ -970,6 +989,10 @@ final class NoteOverlay: NSView {
 
     @objc private func open(_ sender: NSClickGestureRecognizer) {
         guard let id = (sender.view as? NSImageView)?.identifier?.rawValue else { return }
+        if sender.modifierFlags.contains(.option) || NSEvent.modifierFlags.contains(.option) {
+            (window?.windowController as? ReaderWindowController)?.openInPane(id: id)
+            return
+        }
         session?.lastAnnotationHit = id
         session?.openAnnotation(id)
     }

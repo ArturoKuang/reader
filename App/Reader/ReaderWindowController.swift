@@ -760,7 +760,31 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         activateCurrentPane()
     }
 
+    func openInPane(id: String) {
+        guard let item = session.annotations.first(where: { $0.id == id || $0.highlight?.id == id || $0.note?.id == id }) else { return }
+        openInPane(item)
+    }
+
+    func openInPane(_ item: Annotation) {
+        let position = ReadingPosition(page: item.page, cfi: item.cfi, section: item.section, quote: item.quote)
+        let created = pdfPanes.count < 2 && epubPanes.count < 2
+        if created {
+            splitPane(sideBySide: true, opening: position)
+            return
+        }
+        let target: NSViewController? = session.isPDF
+            ? pdfPanes.enumerated().first { $0.offset != paneHost.activeIndex }?.element
+            : epubPanes.enumerated().first { $0.offset != paneHost.activeIndex }?.element
+        guard let target else { return }
+        if let pdf = target as? PDFContainerViewController { pdf.showInPane(position) }
+        if let epub = target as? EPUBContainerViewController { epub.showInPane(position) }
+    }
+
     private func splitPane(sideBySide: Bool) {
+        splitPane(sideBySide: sideBySide, opening: nil)
+    }
+
+    private func splitPane(sideBySide: Bool, opening: ReadingPosition?) {
         let wide = (window?.frame.width ?? 1000) >= 900
         let vertical = sideBySide && wide
         if let active = pdfController {
@@ -769,9 +793,9 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             pane.ownsFindSession = false
             pdfPanes.append(pane)
             paneHost.addPane(pane, sideBySide: vertical)
-            let position = active.currentPosition()
+            let position = opening ?? active.currentPosition()
             DispatchQueue.main.async {
-                pane.reveal(position)
+                if opening != nil { pane.showInPane(position) } else { pane.reveal(position) }
                 pane.freezeLayout()
             }
         } else if epubController != nil {
@@ -780,6 +804,9 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             pane.ownsFindSession = false
             epubPanes.append(pane)
             paneHost.addPane(pane, sideBySide: vertical)
+            if let opening {
+                DispatchQueue.main.async { pane.showInPane(opening) }
+            }
         }
         for pane in pdfPanes where pane !== pdfController && pane.view.window != nil {
             pane.freezeLayout()

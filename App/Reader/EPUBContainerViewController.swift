@@ -210,6 +210,10 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         if let quote = position.quote, !quote.isEmpty { flash(quote) }
     }
 
+    func showInPane(_ position: ReadingPosition) {
+        reveal(position)
+    }
+
     func consumePendingJump() {
         guard spineLoaded, let link = session.pendingReaderLink else { return }
         session.pendingReaderLink = nil
@@ -253,6 +257,10 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             return
         }
         if body["kind"] as? String == "note", let id = body["id"] as? String {
+            if body["option"] as? Bool == true {
+                (view.window?.windowController as? ReaderWindowController)?.openInPane(id: id)
+                return
+            }
             session.lastAnnotationHit = id
             session.openAnnotation(id)
             return
@@ -619,7 +627,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         document.addEventListener("click", event => {
           const glyph = event.target.closest && event.target.closest(".reader-glyph");
           if (glyph && glyph.dataset.id && window.webkit) {
-            window.webkit.messageHandlers.reader.postMessage({kind: "note", id: glyph.dataset.id});
+            window.webkit.messageHandlers.reader.postMessage({kind: "note", id: glyph.dataset.id, option: !!event.altKey});
             return;
           }
           const el = event.target.closest && event.target.closest(".reader-concept, .reader-badge");
