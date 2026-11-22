@@ -18,6 +18,18 @@ final class PaneHostController: NSViewController {
         showBorder()
     }
 
+    func replace(at index: Int, with controller: NSViewController) {
+        guard panes.indices.contains(index) else { return }
+        let old = panes[index]
+        old.view.removeFromSuperview()
+        old.removeFromParent()
+        addChild(controller)
+        controller.view.wantsLayer = true
+        split.insertArrangedSubview(controller.view, at: index)
+        panes[index] = controller
+        showBorder()
+    }
+
     func addPane(_ controller: NSViewController, sideBySide: Bool) {
         split.isVertical = sideBySide
         add(controller)

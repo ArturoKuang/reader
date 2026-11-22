@@ -17,6 +17,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     private var fontScale: Double = 1
     private var contactHost: NSHostingController<EPUBContactSheet>?
     private var spineLoaded = false
+    private var displayedSpineIndex = 0
     private var acceptSpineReports = false
     private var pendingFlash: String?
 
@@ -214,6 +215,11 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         reveal(position)
     }
 
+    func publishCurrentPosition() {
+        guard publishesPosition, let epub = session.epub else { return }
+        applySpine(displayedSpineIndex, count: epub.spine.count)
+    }
+
     func consumePendingJump() {
         guard spineLoaded, let link = session.pendingReaderLink else { return }
         session.pendingReaderLink = nil
@@ -333,6 +339,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         let placements = SpineChapters.placements(spine: epub.spine, toc: epub.toc)
         let placement = placements[index]
         let title = placement.title.isEmpty ? epub.spine[index].title : placement.title
+        displayedSpineIndex = index
         guard publishesPosition else { return }
         session.updatePage(index + 1, count: count, section: title)
     }
@@ -432,6 +439,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
 
     private func loadSpine() {
         guard let epub = session.epub, let webView else { return }
+        displayedSpineIndex = min(max(session.page - 1, 0), max(epub.spine.count - 1, 0))
         let items: [EPUBSpineItem]
         if session.continuous {
             items = epub.spine
@@ -441,6 +449,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         } else {
             let index = min(max(session.page - 1, 0), max(epub.spine.count - 1, 0))
             items = [epub.spine[index]]
+            displayedSpineIndex = index
             if publishesPosition {
                 session.sectionTitle = epub.spine[index].title
                 session.updatePage(index + 1, count: epub.spine.count, section: epub.spine[index].title)
