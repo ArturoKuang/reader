@@ -105,7 +105,7 @@ final class PDFContainerViewController: NSViewController {
         guard findBar.isHidden, let window = view.window, let constraint = pdfTopConstraint else { return }
         let topInWindow = view.convert(view.bounds, to: nil).maxY
         let overlap = topInWindow - window.contentLayoutRect.maxY
-        let constant = overlap > 0.5 ? -overlap : 0
+        let constant = overlap > 0.5 ? overlap : 0
         if abs(constraint.constant - constant) > 0.5 {
             constraint.constant = constant
         }
