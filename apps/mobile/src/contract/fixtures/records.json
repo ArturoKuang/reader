@@ -1,0 +1,54 @@
+{
+  "book": {
+    "fingerprint": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    "pdfId": "4b1e77c0"
+  },
+  "highlight": {
+    "id": "h1",
+    "color": 1,
+    "page": 62,
+    "quote": "we do not see, or we forget",
+    "prefix": "of food; ",
+    "suffix": ", that the birds",
+    "section": "Ch. 3",
+    "rects": [[72, 188.3, 540.2, 230.9]],
+    "noteId": "n1",
+    "extras": { "source": "spike" }
+  },
+  "note": {
+    "id": "n1",
+    "highlightId": "h1",
+    "page": 62,
+    "quote": "we do not see, or we forget",
+    "prefix": "of food; ",
+    "suffix": ", that the birds",
+    "section": "Ch. 3",
+    "created": "2026-11-14T20:51:00Z",
+    "ai": false,
+    "scope": "passage",
+    "body": "Abundance hides constant destruction.",
+    "extras": {}
+  },
+  "word": {
+    "id": "w_progeny",
+    "word": "progeny",
+    "definition": "Offspring; descendants of a person, animal, or plant.",
+    "explanation": "all the descendants of one pair",
+    "explanationProvider": "ChatGPT",
+    "learned": false,
+    "lookups": [
+      {
+        "id": "l1",
+        "page": 63,
+        "section": "Ch. 3",
+        "quote": "progeny",
+        "prefix": "covered by the ",
+        "suffix": " of a single pair",
+        "sentence": "the earth would soon be covered by the progeny of a single pair.",
+        "date": "2026-11-14T21:12:00Z",
+        "extras": {}
+      }
+    ],
+    "extras": {}
+  }
+}
