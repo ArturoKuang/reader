@@ -280,7 +280,7 @@ struct SidebarView: View {
         }
         .onTapGesture {
             if global, mark.bookFingerprint != session.fingerprint, let path = mark.bookPath {
-                NSDocumentController.shared.openDocument(withContentsOf: URL(fileURLWithPath: path), display: true) { _, _, _ in }
+                (NSApp.keyWindow?.windowController as? ReaderWindowController)?.openBookInOtherPane(url: URL(fileURLWithPath: path), position: mark.position)
             } else if let controller = NSApp.keyWindow?.windowController as? ReaderWindowController {
                 controller.reveal(mark.position)
             }

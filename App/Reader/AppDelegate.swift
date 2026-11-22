@@ -142,6 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ]))
         main.addItem(menu("File", items: [
             item("Open…", #selector(openDocument(_:)), "o", .command),
+            item("Open in Other Pane…", #selector(ReaderWindowController.openInOtherPane(_:))),
             item("Link to Vault Book Folder…", #selector(ReaderWindowController.linkVaultFolder(_:))),
             separator(),
             item("Export All Words…", #selector(exportAllWords(_:)), "e", [.command, .shift]),

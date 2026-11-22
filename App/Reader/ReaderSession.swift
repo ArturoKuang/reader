@@ -1143,7 +1143,7 @@ final class ReaderSession: ObservableObject {
 // The mark store is mutated through a local copy. MarkController.handle takes inout MarkStore,
 // so the session method below replaces the broken pair above.
 extension ReaderSession {
-    func handleMarkEvent(_ event: NSEvent, documentFocused: Bool, position: ReadingPosition) -> (consumed: Bool, jump: ReadingPosition?) {
+    func handleMarkEvent(_ event: NSEvent, documentFocused: Bool, position: ReadingPosition) -> (consumed: Bool, jump: ReadingPosition?, otherBook: URL?) {
         let character = event.characters
         let textInput = event.window?.firstResponder is NSTextView
         let key = MarkKey(
@@ -1172,9 +1172,8 @@ extension ReaderSession {
         if changed { dirty() }
         if let toast = result.toast { showToast(toast) }
         if let jump = result.jump, jump.openOtherBook, let path = jump.bookPath {
-            NSDocumentController.shared.openDocument(withContentsOf: URL(fileURLWithPath: path), display: true) { _, _, _ in }
-            return (!result.passThrough && result.effect != .none, nil)
+            return (!result.passThrough && result.effect != .none, jump.position, URL(fileURLWithPath: path))
         }
-        return (!result.passThrough && result.effect != .none, result.jump?.position)
+        return (!result.passThrough && result.effect != .none, result.jump?.position, nil)
     }
 }

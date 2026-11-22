@@ -566,6 +566,20 @@ final class PDFContainerViewController: NSViewController {
         pdfView.go(to: rect, on: page)
     }
 
+    /// Scrolls this pane only and flashes the quote for about a second.
+    func showInPane(_ position: ReadingPosition) {
+        reveal(position)
+        guard let document = pdfView.document, let pageNumber = position.page, let page = document.page(at: pageNumber - 1) else { return }
+        guard let quote = position.quote, let string = page.string, let range = string.range(of: quote), let selection = page.selection(for: NSRange(range, in: string)) else { return }
+        pdfView.setCurrentSelection(selection, animate: true)
+        let flash = PDFAnnotation(bounds: selection.bounds(for: page), forType: .highlight, withProperties: nil)
+        flash.color = NSColor.systemYellow.withAlphaComponent(0.55)
+        page.addAnnotation(flash)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            page.removeAnnotation(flash)
+        }
+    }
+
     var noteHostView: NSView { pdfView }
 
     func noteRect(for id: String) -> NSRect? {
