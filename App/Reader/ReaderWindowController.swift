@@ -48,10 +48,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         }
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 840),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
+        window.titlebarAppearsTransparent = true
         window.titleVisibility = .visible
         window.toolbarStyle = .unified
         window.titlebarSeparatorStyle = .automatic
@@ -97,16 +98,17 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         sidebar.minimumThickness = 180
         sidebar.maximumThickness = 280
         sidebar.canCollapse = true
-        sidebar.allowsFullHeightLayout = false
+        // Full-height sidebar draws under the title bar, beside the traffic lights.
+        sidebar.allowsFullHeightLayout = true
         sidebarHost.view.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let content = NSSplitViewItem(viewController: center)
         content.minimumThickness = 320
-        content.allowsFullHeightLayout = false
+        content.allowsFullHeightLayout = true
         let inspector = NSSplitViewItem(inspectorWithViewController: panelHost)
         inspector.minimumThickness = 280
         inspector.maximumThickness = 320
         inspector.canCollapse = true
-        inspector.allowsFullHeightLayout = false
+        inspector.allowsFullHeightLayout = true
         split.splitView.dividerStyle = .thin
         split.addSplitViewItem(sidebar)
         split.addSplitViewItem(content)
@@ -276,10 +278,15 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         switch itemIdentifier {
         case .sidebarModes:
             // Before the sidebar-tracking separator, so this capsule stays in the sidebar title bar.
-            return fixedToolbarItem(itemIdentifier, view: sidebarModeControl(), label: "Sidebar")
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.view = sidebarModeControl()
+            item.label = "Sidebar"
+            return item
         case .backForward:
             // After the separator: its own capsule at the leading edge of the document.
-            let item = fixedToolbarItem(itemIdentifier, view: backForwardControl(), label: "History")
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.view = backForwardControl()
+            item.label = "History"
             item.isNavigational = true
             return item
         case .sidebarTrackingSeparator:
@@ -313,7 +320,10 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             zoom.label = "Zoom Out"
             return zoom
         case .highlight:
-            return fixedToolbarItem(itemIdentifier, view: highlightControl(), label: "Highlight")
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.view = highlightControl()
+            item.label = "Highlight"
+            return item
         case .search:
             let item = NSSearchToolbarItem(itemIdentifier: itemIdentifier)
             item.searchField.placeholderString = "Find"
@@ -347,18 +357,6 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         default:
             return nil
         }
-    }
-
-    /// Locks a custom control to its fitting size so a toolbar capsule cannot grow taller than the bar.
-    private func fixedToolbarItem(_ identifier: NSToolbarItem.Identifier, view: NSView, label: String) -> NSToolbarItem {
-        let item = NSToolbarItem(itemIdentifier: identifier)
-        item.view = view
-        item.label = label
-        let fit = view.fittingSize
-        guard fit.width > 1, fit.height > 1, fit.height <= 32 else { return item }
-        item.minSize = fit
-        item.maxSize = fit
-        return item
     }
 
     private func sidebarModeControl() -> NSSegmentedControl {

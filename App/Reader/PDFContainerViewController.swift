@@ -12,6 +12,7 @@ final class PDFContainerViewController: NSViewController {
     private let overlay = NoteOverlay()
     private let findBar = NSSearchField()
     private var findTop: NSLayoutConstraint?
+    private var pdfTopConstraint: NSLayoutConstraint?
     private var matches: [PDFSelection] = []
     private var matchIndex = 0
     private var contactHost: NSHostingController<ContactSheetView>?
@@ -53,13 +54,15 @@ final class PDFContainerViewController: NSViewController {
         findBar.action = #selector(findFromBar)
         findBar.isHidden = true
         view.addSubview(findBar)
-        let findConstraint = findBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: -40)
+        let findConstraint = findBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8)
         findTop = findConstraint
+        let pdfTop = pdfView.topAnchor.constraint(equalTo: view.topAnchor)
+        pdfTopConstraint = pdfTop
         NSLayoutConstraint.activate([
             pdfView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             pdfView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             pdfView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            pdfView.topAnchor.constraint(equalTo: findBar.bottomAnchor, constant: 4),
+            pdfTop,
             overlay.leadingAnchor.constraint(equalTo: pdfView.leadingAnchor),
             overlay.trailingAnchor.constraint(equalTo: pdfView.trailingAnchor),
             overlay.topAnchor.constraint(equalTo: pdfView.topAnchor),
@@ -92,7 +95,28 @@ final class PDFContainerViewController: NSViewController {
 
     override func viewDidLayout() {
         super.viewDidLayout()
+        placePDFBelowToolbar()
         applyFittingScale()
+    }
+
+    /// The PDF scroll view fills the full-height pane, which runs under the toolbar.
+    /// Move the view down so the page starts at the bottom edge of the bar.
+    private func placePDFBelowToolbar() {
+        guard findBar.isHidden, let window = view.window, let constraint = pdfTopConstraint else { return }
+        let topInWindow = view.convert(view.bounds, to: nil).maxY
+        let overlap = topInWindow - window.contentLayoutRect.maxY
+        let constant = overlap > 0.5 ? -overlap : 0
+        if abs(constraint.constant - constant) > 0.5 {
+            constraint.constant = constant
+        }
+        if let scroll = enclosingScrollClip(in: pdfView)?.enclosingScrollView {
+            scroll.automaticallyAdjustsContentInsets = false
+            if scroll.contentInsets.top != 0 {
+                var insets = scroll.contentInsets
+                insets.top = 0
+                scroll.contentInsets = insets
+            }
+        }
     }
 
     override func viewDidAppear() {
@@ -268,6 +292,10 @@ final class PDFContainerViewController: NSViewController {
     func toggleFind() {
         findBar.isHidden = false
         findTop?.constant = 8
+        pdfTopConstraint?.isActive = false
+        let belowFind = pdfView.topAnchor.constraint(equalTo: findBar.bottomAnchor, constant: 4)
+        belowFind.isActive = true
+        pdfTopConstraint = belowFind
         if findBar.stringValue.isEmpty { findBar.stringValue = session.findQuery }
         view.layoutSubtreeIfNeeded()
         DispatchQueue.main.async { [weak self] in
