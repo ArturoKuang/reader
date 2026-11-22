@@ -6,6 +6,7 @@ struct AnnotationBrowser: View {
     @ObservedObject var session: ReaderSession
     var onJump: (Annotation) -> Void
     @State private var editing: String?
+    @State private var drafts: [String: String] = [:]
     @State private var vaultSettings = false
     @State private var suppressJump = false
     @State private var conceptCache = ConceptLabelCache()
@@ -79,9 +80,8 @@ struct AnnotationBrowser: View {
                 .contextMenu(forSelectionType: String.self, menu: { ids in
                     self.selectionMenu(ids)
                 }, primaryAction: { ids in
-                    guard let id = ids.first else { return }
-                    editing = id
-                    session.beginNoteEdit(id: id)
+                    guard let id = ids.first, let item = session.annotations.first(where: { $0.id == id }) else { return }
+                    beginEditing(item)
                 })
                 .onDeleteCommand { session.deleteSelectedAnnotations() }
                 .onKeyPress(phases: .down) { press in
@@ -123,15 +123,17 @@ struct AnnotationBrowser: View {
                 .frame(width: 3)
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.quote).font(.callout).foregroundStyle(.secondary).lineLimit(3)
-                if editing == item.id {
-                    NoteDraftEditor(initial: item.body) { text in
-                        session.queueNoteBody(id: item.id, body: text)
+                if isEditing(item) {
+                    let key = noteKey(item)
+                    NoteDraftEditor(initial: drafts[key] ?? item.body) { text in
+                        drafts[key] = text
+                        session.queueNoteBody(id: key, body: text)
                     } finish: {
-                        let id = item.id
+                        drafts[key] = nil
                         editing = nil
-                        session.endNoteEdit(id: id)
+                        session.endNoteEdit(id: key)
                     }
-                    .id(item.id)
+                    .id(key)
                 } else if !item.body.isEmpty {
                     Text(item.body).font(.body)
                 }
@@ -153,14 +155,26 @@ struct AnnotationBrowser: View {
         .contentShape(Rectangle())
     }
 
+    private func noteKey(_ item: Annotation) -> String {
+        item.note?.id ?? item.highlight?.noteID ?? item.id
+    }
+
+    private func isEditing(_ item: Annotation) -> Bool {
+        guard let editing else { return false }
+        return editing == item.id || editing == item.note?.id || editing == item.highlight?.noteID
+    }
+
+    private func beginEditing(_ item: Annotation) {
+        let key = noteKey(item)
+        editing = key
+        session.beginNoteEdit(id: key)
+    }
+
     @ViewBuilder private func selectionMenu(_ ids: Set<String>) -> some View {
         if ids.count > 1 {
             Button("Delete \(ids.count) Items") { session.deleteAnnotations(ids: ids) }
         } else if let id = ids.first, let item = session.annotations.first(where: { $0.id == id }) {
-            Button("Edit Note") {
-                editing = id
-                session.beginNoteEdit(id: id)
-            }
+            Button("Edit Note") { beginEditing(item) }
             Menu("Color") {
                 ForEach(1...6, id: \.self) { color in
                     Button(HighlightCallout.name(for: color).capitalized) {
@@ -287,7 +301,7 @@ private struct NoteDraftEditor: View {
                 guard !loaded else { return }
                 loaded = true
                 draft = initial
-                focused = true
+                DispatchQueue.main.async { focused = true }
             }
             .onChange(of: draft) { _, text in
                 guard loaded, text != initial else { return }

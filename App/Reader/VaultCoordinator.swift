@@ -136,22 +136,33 @@ final class VaultCoordinator {
                     ids.insert(block.id)
                     let page = block.link.pageNumber
                     let rects = keptRects[block.id] ?? []
+                    let storedCFI = PassageIdentity.cfi(block.link.location)
+                    let hasBody = !block.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     if let color = block.color {
-                        let linked = !block.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        highlights.append(HighlightEntry(id: block.id, color: color, page: page, cfi: block.link.location, quote: block.quote, section: chapter.map { "Chapter \($0)" }, rects: rects, noteID: linked ? block.id : nil))
-                        if linked {
-                            notes.append(NoteEntry(id: block.id, page: page, cfi: block.link.location, quote: block.quote, section: chapter.map { "Chapter \($0)" }, body: block.body))
+                        let sessionNoteID = session.highlights.first { $0.id == block.id }?.noteID
+                        let noteID = sessionNoteID ?? (hasBody ? block.id : nil)
+                        highlights.append(HighlightEntry(id: block.id, color: color, page: page, cfi: storedCFI, quote: block.quote, section: chapter.map { "Chapter \($0)" }, rects: rects, noteID: noteID))
+                        if hasBody {
+                            let noteIdentity = noteID ?? block.id
+                            notes.append(NoteEntry(id: noteIdentity, page: page, cfi: storedCFI, quote: block.quote, section: chapter.map { "Chapter \($0)" }, body: block.body))
+                            ids.insert(noteIdentity)
+                        } else if let noteID, let existing = session.notes.first(where: { $0.id == noteID }) {
+                            var kept = existing
+                            kept.cfi = PassageIdentity.cfi(kept.cfi)
+                            kept.page = kept.page ?? page
+                            notes.append(kept)
+                            ids.insert(noteID)
                         }
-                    } else {
-                        notes.append(NoteEntry(id: block.id, page: page, cfi: block.link.location, quote: block.quote, section: chapter.map { "Chapter \($0)" }, body: block.body))
+                    } else if hasBody {
+                        notes.append(NoteEntry(id: block.id, page: page, cfi: storedCFI, quote: block.quote, section: chapter.map { "Chapter \($0)" }, body: block.body))
                     }
                 }
             }
         }
         if mergePending {
             for note in session.notes where !ids.contains(note.id) {
-                let alreadyShown = highlights.contains { $0.quote == note.quote && $0.page == note.page && $0.cfi == note.cfi }
-                    || notes.contains { $0.quote == note.quote && $0.page == note.page && $0.cfi == note.cfi }
+                let alreadyShown = highlights.contains { PassageIdentity.same(quote: $0.quote, page: $0.page, cfi: $0.cfi, otherQuote: note.quote, otherPage: note.page, otherCFI: note.cfi) }
+                    || notes.contains { PassageIdentity.same(quote: $0.quote, page: $0.page, cfi: $0.cfi, otherQuote: note.quote, otherPage: note.page, otherCFI: note.cfi) }
                 if alreadyShown { continue }
                 notes.append(note)
             }

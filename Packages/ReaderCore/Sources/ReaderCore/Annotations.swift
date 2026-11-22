@@ -74,6 +74,18 @@ public struct AnnotationCounts: Equatable, Sendable {
     }
 }
 
+/// A live PDF note stores the page and leaves `cfi` nil. The vault writes that page as `page=N`.
+public enum PassageIdentity {
+    public static func cfi(_ location: String?) -> String? {
+        guard let location, !location.isEmpty, !location.hasPrefix("page=") else { return nil }
+        return location
+    }
+
+    public static func same(quote: String, page: Int?, cfi: String?, otherQuote: String, otherPage: Int?, otherCFI: String?) -> Bool {
+        quote == otherQuote && page == otherPage && self.cfi(cfi) == self.cfi(otherCFI)
+    }
+}
+
 public enum AnnotationIndex {
     public static func items(highlights: [HighlightEntry], notes: [NoteEntry]) -> [Annotation] {
         var notesByID = Dictionary(uniqueKeysWithValues: notes.map { ($0.id, $0) })
@@ -98,7 +110,7 @@ public enum AnnotationIndex {
 
     /// A highlight and a note written again under the highlight's id describe one passage.
     private static func samePassage(_ item: Annotation, as note: NoteEntry) -> Bool {
-        item.quote == note.quote && item.page == note.page && item.cfi == note.cfi
+        PassageIdentity.same(quote: item.quote, page: item.page, cfi: item.cfi, otherQuote: note.quote, otherPage: note.page, otherCFI: note.cfi)
     }
 
     public static func grouped(_ items: [Annotation]) -> [AnnotationGroup] {
@@ -284,7 +296,9 @@ public enum AnnotationEdit {
     /// Removes a note that repeats a highlight's passage after the note was saved under the highlight's id.
     public static func dropDuplicateNotes(highlights: inout [HighlightEntry], notes: inout [NoteEntry]) {
         notes.removeAll { note in
-            guard let highlight = highlights.first(where: { $0.quote == note.quote && $0.page == note.page && $0.cfi == note.cfi }) else { return false }
+            guard let highlight = highlights.first(where: {
+                PassageIdentity.same(quote: $0.quote, page: $0.page, cfi: $0.cfi, otherQuote: note.quote, otherPage: note.page, otherCFI: note.cfi)
+            }) else { return false }
             if highlight.noteID == note.id { return false }
             return highlight.noteID != nil
         }
@@ -477,6 +491,7 @@ public enum VaultAnnotationSync {
                     chapter: item.section.flatMap { ChapterFiles.number(in: $0) }
                 ))
             } else if let note = item.note {
+                if note.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
                 let location = note.cfi ?? note.page.map { "page=\($0)" }
                 blocks.append(VaultNoteBlock(
                     id: note.id,

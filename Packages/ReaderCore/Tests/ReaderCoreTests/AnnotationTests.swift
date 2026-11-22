@@ -36,6 +36,31 @@ final class AnnotationTests: XCTestCase {
         XCTAssertEqual(items.map(\.id), ["a", "c", "b"])
     }
 
+    func testPDFPageLocationIsTheSamePassageAndEmptyNoteIsNotASecondBlock() {
+        XCTAssertNil(PassageIdentity.cfi("page=1"))
+        XCTAssertEqual(PassageIdentity.cfi("epubcfi(/6/4)"), "epubcfi(/6/4)")
+        XCTAssertTrue(PassageIdentity.same(quote: "hard to vary", page: 1, cfi: nil, otherQuote: "hard to vary", otherPage: 1, otherCFI: "page=1"))
+        XCTAssertFalse(PassageIdentity.same(quote: "hard to vary", page: 1, cfi: nil, otherQuote: "hard to vary", otherPage: 2, otherCFI: "page=2"))
+        let highlight = HighlightEntry(id: "h1", color: 1, page: 1, cfi: "page=1", quote: "hard to vary")
+        let note = NoteEntry(id: "n1", page: 1, cfi: nil, quote: "hard to vary", body: "")
+        let shown = AnnotationIndex.items(highlights: [highlight], notes: [note])
+        XCTAssertEqual(shown.map(\.id), ["h1"])
+        XCTAssertEqual(shown.first?.note?.id, "n1")
+        var highlights = [HighlightEntry(id: "h1", color: 1, page: 1, cfi: "page=1", quote: "hard to vary", noteID: "n1")]
+        var notes = [note]
+        AnnotationEdit.dropDuplicateNotes(highlights: &highlights, notes: &notes)
+        XCTAssertEqual(notes.map(\.id), ["n1"])
+        let written = VaultAnnotationSync.render(
+            existing: "",
+            bookPath: "/Book.pdf",
+            annotations: [
+                Annotation(highlight: HighlightEntry(id: "h1", color: 1, page: 1, quote: "hard to vary"), note: nil),
+                Annotation(highlight: nil, note: note),
+            ]
+        )
+        XCTAssertEqual(VaultNoteFile.blocks(written).map(\.id), ["h1"])
+    }
+
     func testEditingKeepsIdsAndDropsTheRewrittenCopy() {
         var package = SidecarPackage.empty(identity: FrontMatter(kind: "notes", document: "Book.pdf", fingerprint: "sha256:x"))
         let anchor = AnnotationAnchor(text: "hard to vary", page: 4, section: "Chapter 4")

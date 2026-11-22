@@ -71,8 +71,8 @@ final class PDFContainerViewController: NSViewController {
         applyDisplayMode()
         // Do not scale here. bounds are still zero, and PDFView would stick at minScaleFactor (10%).
         NotificationCenter.default.addObserver(self, selector: #selector(pageChanged), name: .PDFViewPageChanged, object: pdfView)
-        NotificationCenter.default.addObserver(self, selector: #selector(foundMatch(_:)), name: .PDFDocumentDidFindMatch, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(findFinished(_:)), name: .PDFDocumentDidEndFind, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(foundMatch(_:)), name: .PDFDocumentDidFindMatch, object: pdfView.document)
+        NotificationCenter.default.addObserver(self, selector: #selector(findFinished(_:)), name: .PDFDocumentDidEndFind, object: pdfView.document)
         NotificationCenter.default.addObserver(self, selector: #selector(scaleChanged), name: .PDFViewScaleChanged, object: pdfView)
         pdfView.onMouseUp = { [weak self] in self?.captureSelection() }
         pdfView.highlightIDAt = { [weak self] point in self?.highlightID(atViewPoint: point) }
@@ -285,6 +285,7 @@ final class PDFContainerViewController: NSViewController {
     }
 
     @objc private func foundMatch(_ notification: Notification) {
+        guard ownsFind(notification) else { return }
         guard let selection = notification.userInfo?["PDFDocumentFoundSelection"] as? PDFSelection else { return }
         matches.append(selection)
         publishHits()
@@ -292,20 +293,33 @@ final class PDFContainerViewController: NSViewController {
     }
 
     @objc private func findFinished(_ notification: Notification) {
+        guard ownsFind(notification) else { return }
         publishHits()
         showCurrentMatch()
+    }
+
+    private func ownsFind(_ notification: Notification) -> Bool {
+        guard let document = pdfView.document else { return false }
+        return (notification.object as? PDFDocument) === document
     }
 
     private func publishHits() {
         guard let document = pdfView.document else { return }
         session.searchHits = matches.enumerated().map { index, selection in
-            let page = selection.pages.first.map { document.index(for: $0) + 1 } ?? 1
+            let page = pageNumber(selection, in: document)
             let copy = selection.copy() as! PDFSelection
             copy.extendForLineBoundaries()
             let snippet = copy.string ?? selection.string ?? session.findQuery
             return SearchHit(id: index, page: page, snippet: snippet, section: session.outline.last { ($0.page ?? 0) <= page }?.title ?? "")
         }
         (view.window?.windowController as? ReaderWindowController)?.showFindCount(min(matchIndex + 1, max(matches.count, 1)), of: matches.count)
+    }
+
+    private func pageNumber(_ selection: PDFSelection, in document: PDFDocument) -> Int {
+        guard let page = selection.pages.first else { return 1 }
+        let index = document.index(for: page)
+        guard index != NSNotFound, index >= 0, index < document.pageCount else { return 1 }
+        return index + 1
     }
 
     private func showCurrentMatch() {
