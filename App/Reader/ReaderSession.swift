@@ -1170,11 +1170,38 @@ extension ReaderSession {
         package.marks.marks = store.local
         globalMarks = store.global
         if changed { dirty() }
-        if let toast = result.toast { showToast(toast) }
+        if result.effect == .showList { setSidebar(.marks) }
+        if let toast = result.toast, result.effect != .showList { showToast(toast) }
         if let jump = result.jump, jump.openOtherBook, let path = jump.bookPath {
             NSDocumentController.shared.openDocument(withContentsOf: URL(fileURLWithPath: path), display: true) { _, _, _ in }
             return (!result.passThrough && result.effect != .none, nil)
         }
         return (!result.passThrough && result.effect != .none, result.jump?.position)
+    }
+
+    func removeMark(id: String) {
+        var store = MarkStore(local: package.marks.marks, global: globalMarks)
+        let previousLocal = package.marks.marks
+        let previousGlobal = globalMarks
+        guard store.remove(id: id) else { return }
+        package.marks.marks = store.local
+        globalMarks = store.global
+        undoManager?.registerUndo(withTarget: self) { session in
+            session.restoreMarks(local: previousLocal, global: previousGlobal)
+        }
+        undoManager?.setActionName("Delete Mark")
+        dirty()
+    }
+
+    private func restoreMarks(local: [MarkEntry], global: [MarkEntry]) {
+        let previousLocal = package.marks.marks
+        let previousGlobal = globalMarks
+        package.marks.marks = local
+        globalMarks = global
+        undoManager?.registerUndo(withTarget: self) { session in
+            session.restoreMarks(local: previousLocal, global: previousGlobal)
+        }
+        undoManager?.setActionName("Delete Mark")
+        dirty()
     }
 }

@@ -26,6 +26,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     private var sidebarItem: NSSplitViewItem?
     private var panelItem: NSSplitViewItem?
     private var slideshowTimer: Timer?
+    private var markPause: Timer?
+    private var markOverlay: NSHostingController<MarkJumpOverlay>?
     private var reappliedSavedFrame = false
     private let notePopover = NotePopoverController()
     private let selectionBar = SelectionBarController()
@@ -186,6 +188,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             }
             let position = self.pdfController?.currentPosition() ?? self.epubController?.currentPosition() ?? ReadingPosition(page: self.session.page, zoom: self.session.zoom)
             let handled = self.session.handleMarkEvent(event, documentFocused: true, position: position)
+            self.noteMarkChord(event, consumed: handled.consumed, jumped: handled.jump != nil)
             if handled.consumed {
                 if let jump = handled.jump {
                     self.reveal(jump)
@@ -194,6 +197,57 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             }
             return event
         }
+    }
+
+    private func noteMarkChord(_ event: NSEvent, consumed: Bool, jumped: Bool) {
+        let character = event.characters ?? ""
+        if jumped || event.keyCode == 53 {
+            hideMarkOverlay()
+            return
+        }
+        guard consumed, character == "`" || character == "'" else {
+            if consumed { hideMarkOverlay() }
+            return
+        }
+        markPause?.invalidate()
+        markPause = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { [weak self] _ in
+            self?.showMarkOverlay()
+        }
+    }
+
+    private func showMarkOverlay() {
+        guard markOverlay == nil, let content = window?.contentView else { return }
+        let host = NSHostingController(rootView: MarkJumpOverlay(session: session, jump: { [weak self] mark in
+            self?.jumpFromOverlay(mark)
+        }, close: { [weak self] in
+            self?.hideMarkOverlay()
+        }))
+        host.view.translatesAutoresizingMaskIntoConstraints = false
+        host.view.wantsLayer = true
+        host.view.layer?.cornerRadius = 10
+        content.addSubview(host.view)
+        NSLayoutConstraint.activate([
+            host.view.centerXAnchor.constraint(equalTo: content.centerXAnchor),
+            host.view.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            host.view.widthAnchor.constraint(equalToConstant: 320),
+        ])
+        markOverlay = host
+    }
+
+    private func jumpFromOverlay(_ mark: MarkEntry) {
+        hideMarkOverlay()
+        if mark.scope == .global, mark.bookFingerprint != session.fingerprint, let path = mark.bookPath {
+            NSDocumentController.shared.openDocument(withContentsOf: URL(fileURLWithPath: path), display: true) { _, _, _ in }
+            return
+        }
+        reveal(mark.position)
+    }
+
+    private func hideMarkOverlay() {
+        markPause?.invalidate()
+        markPause = nil
+        markOverlay?.view.removeFromSuperview()
+        markOverlay = nil
     }
 
     private func restoreWindowFrame(_ window: NSWindow) {
@@ -458,6 +512,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             ("Table of Contents", #selector(showContents(_:)), .tableOfContents),
             ("Highlights and Notes", #selector(showHighlightsAndNotes(_:)), .highlightsAndNotes),
             ("Bookmarks", #selector(showBookmarks(_:)), .bookmarks),
+            ("Marks", #selector(showMarks(_:)), .marks),
         ]
         for entry in entries {
             let item = NSMenuItem(title: entry.0, action: entry.1, keyEquivalent: "")
@@ -482,6 +537,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     @objc func showContents(_ sender: Any?) { session.setSidebar(.tableOfContents); applyChrome() }
     @objc func showHighlightsAndNotes(_ sender: Any?) { session.setSidebar(.highlightsAndNotes); applyChrome() }
     @objc func showBookmarks(_ sender: Any?) { session.setSidebar(.bookmarks); applyChrome() }
+    @objc func showMarks(_ sender: Any?) { session.setSidebar(.marks); applyChrome() }
     @objc func showContactSheet(_ sender: Any?) {
         if session.sidebar != .contactSheet { previousSidebar = session.sidebar }
         session.setSidebar(.contactSheet)
@@ -849,6 +905,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         case #selector(showContents(_:)): menuItem.state = session.sidebar == .tableOfContents ? .on : .off
         case #selector(showHighlightsAndNotes(_:)): menuItem.state = session.sidebar == .highlightsAndNotes ? .on : .off
         case #selector(showBookmarks(_:)): menuItem.state = session.sidebar == .bookmarks ? .on : .off
+        case #selector(showMarks(_:)): menuItem.state = session.sidebar == .marks ? .on : .off
         case #selector(toggleContinuous(_:)): menuItem.state = readingLayout == .continuous ? .on : .off
         case #selector(singlePage(_:)): menuItem.state = readingLayout == .single ? .on : .off
         case #selector(twoPages(_:)): menuItem.state = readingLayout == .twoPages ? .on : .off

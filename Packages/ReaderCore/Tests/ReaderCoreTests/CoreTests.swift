@@ -304,6 +304,30 @@ final class CoreTests: XCTestCase {
         XCTAssertFalse(localText.contains("\"symbol\":\"a\""))
     }
 
+    func testMarkListOrdersLinesAndQuestionMarkOpensTheList() {
+        let here = ReadingPosition(page: 4, section: "Chapter 4", quote: "hard to vary\nmore")
+        let local = MarkEntry(id: "m1", symbol: "b", position: here, documentTitle: "Book", setAt: "t")
+        let earlier = MarkEntry(id: "m0", symbol: "a", position: ReadingPosition(page: 1, section: "Intro"), documentTitle: "Book", setAt: "t")
+        let global = MarkEntry(id: "g1", symbol: "A", position: ReadingPosition(page: 9, quote: "global quote"), bookPath: "/other.pdf", documentTitle: "Other", setAt: "t")
+        let lines = MarkList.lines(local: [local, earlier], global: [global])
+        XCTAssertEqual(lines.map(\.symbol), ["a", "b", "A"])
+        XCTAssertEqual(lines[0].location, "p. 1")
+        XCTAssertEqual(lines[0].snippet, "Intro")
+        XCTAssertEqual(lines[1].snippet, "hard to vary")
+        XCTAssertEqual(lines[2].snippet, "Other — global quote")
+        var store = MarkStore(local: [local], global: [global])
+        XCTAssertTrue(store.remove(id: "m1"))
+        XCTAssertTrue(store.local.isEmpty)
+        XCTAssertEqual(store.global.map(\.id), ["g1"])
+        var chord = MarkChord.idle
+        var history = NavigationHistory()
+        let opened = MarkController.handle(chord: &chord, key: MarkKey(character: "`", documentFocused: true, textInputFocused: false), store: &store, current: here, history: &history, bookFingerprint: "sha256:a", bookPath: "/a.pdf", title: "Book", now: "t", makeID: { "x" })
+        XCTAssertEqual(opened.effect, .consume)
+        let listed = MarkController.handle(chord: &chord, key: MarkKey(character: "?", documentFocused: true, textInputFocused: false), store: &store, current: here, history: &history, bookFingerprint: "sha256:a", bookPath: "/a.pdf", title: "Book", now: "t", makeID: { "x" })
+        XCTAssertEqual(listed.effect, .showList)
+        XCTAssertEqual(chord, .idle)
+    }
+
     func testSidecarCreateRenameMoveFallbackAndRelink() throws {
         let root = try temporaryDirectory()
         let fs = LocalFileSystem()

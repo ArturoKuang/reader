@@ -28,6 +28,7 @@ public enum SidebarMode: String, Codable, Equatable, Sendable, CaseIterable {
     case tableOfContents
     case highlightsAndNotes
     case bookmarks
+    case marks
     case contactSheet
     case searchResults
 }
