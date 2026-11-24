@@ -329,4 +329,35 @@ final class VaultTests: XCTestCase {
         XCTAssertEqual(AIError.missingKey(provider: "ChatGPT").userMessage, "Add a ChatGPT API key in Settings.")
         XCTAssertEqual(AIError.missingCLI(name: "Claude Code").userMessage, "Claude Code was not found. Set its path in Settings.")
     }
+
+    func testPDFLookupHeadingAndVocabularyFileName() throws {
+        let fs = MemoryFileSystem()
+        try fs.createDirectory("/vault/books/boi")
+        let settings = VaultBookSettings()
+        let written = VaultPaths.vocabularyFile(bookFolder: "/vault/books/boi", settings: settings, fs: fs)
+        XCTAssertEqual(written, "/vault/books/boi/words.md")
+        XCTAssertEqual(ObsidianLink.displayPath(vaultRoot: "/vault", absolute: written), "books/boi/words.md")
+        try fs.createDirectory("/vault/books/boi/learner")
+        try fs.write("/vault/books/boi/learner/vocabulary.md", Data("# Vocabulary\n".utf8))
+        XCTAssertTrue(VaultPaths.vocabularyFile(bookFolder: "/vault/books/boi", settings: settings, fs: fs).hasSuffix("learner/vocabulary.md"))
+
+        let entry = VocabEntry(
+            id: "w_epistemology",
+            word: "epistemology",
+            chapter: nil,
+            page: 3,
+            meaning: "The study of knowledge.",
+            bookContext: "epistemology matters",
+            plainLanguage: nil,
+            example: nil,
+            added: "November 24, 2026",
+            readerOwned: true
+        )
+        let markdown = VocabularyFile.upsert("", title: "Book", entry: entry)
+        XCTAssertTrue(markdown.contains("## Page 3"))
+        XCTAssertFalse(markdown.contains("?"))
+        XCTAssertEqual(VocabularyFile.parse(markdown).first?.page, 3)
+        XCTAssertNil(VocabularyFile.parse(markdown).first?.chapter)
+        XCTAssertNil(VocabularyFile.sectionHeading(for: VocabEntry(id: "w", word: "x", chapter: nil, meaning: "", bookContext: "", added: "", readerOwned: true)))
+    }
 }

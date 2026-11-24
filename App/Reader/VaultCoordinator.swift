@@ -280,10 +280,12 @@ final class VaultCoordinator {
         let title = session.bookURL.deletingPathExtension().lastPathComponent
         for word in session.words where word.id.hasPrefix("w_") {
             let added = LongDate.format(year: Calendar.current.component(.year, from: Date()), month: Calendar.current.component(.month, from: Date()), day: Calendar.current.component(.day, from: Date()))
+            let lookup = word.lookups.first
             let entry = VocabEntry(
                 id: word.id,
                 word: word.word,
-                chapter: word.lookups.first?.section.flatMap { ChapterFiles.number(in: $0) },
+                chapter: lookup?.section.flatMap { ChapterFiles.number(in: $0) },
+                page: lookup?.page,
                 meaning: VocabularyFile.shortMeaning(word.definition),
                 bookContext: word.lookups.first?.sentence ?? word.lookups.first?.quote ?? word.word,
                 plainLanguage: word.explanation,
