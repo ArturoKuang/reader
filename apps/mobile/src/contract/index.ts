@@ -21,4 +21,4 @@ export {
   noteSidecarObject,
   readerComment,
 } from "./sidecar";
-export { normalizeWord, wordId } from "./wordId";
+export { codePointsOf, normalizeWord, wordId } from "./wordId";

@@ -6,7 +6,11 @@
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
-    "platforms": ["ios", "android", "web"],
+    "platforms": [
+      "ios",
+      "android",
+      "web"
+    ],
     "web": {
       "bundler": "metro"
     },
@@ -16,6 +20,9 @@
     },
     "android": {
       "package": "com.reader"
-    }
+    },
+    "plugins": [
+      "expo-asset"
+    ]
   }
 }

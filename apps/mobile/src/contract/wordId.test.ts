@@ -12,7 +12,8 @@ test("word ids are w_ plus the normalized word", () => {
   assert.equal(wordId("  New York  "), "w_new york");
   assert.equal(normalizeWord("Don't"), "don't");
   assert.equal(wordId("well-known"), "w_well-known");
-  assert.equal(wordId(" \n "), "w_");
+  assert.equal(wordId(" \n "), null);
+  assert.equal(wordId("\t \n"), null);
 });
 
 test("U+0085 is trimmed and U+FEFF is not", () => {
@@ -24,14 +25,15 @@ test("U+0085 is trimmed and U+FEFF is not", () => {
   assert.notEqual(normalizeWord("\uFEFFword"), "\uFEFFword".trim());
 });
 
-test("the trim set is Unicode Z* plus U+000A–U+000D and U+0085", () => {
+test("the trim set is Unicode Z* plus U+0009–U+000D and U+0085", () => {
   assert.equal(normalizeWord("\u00A0Progeny\u00A0"), "progeny");
   assert.equal(normalizeWord("\u2028word\u2029"), "word");
   assert.equal(normalizeWord("\nword\n"), "word");
   assert.equal(normalizeWord("\r\nword\r\n"), "word");
   assert.equal(normalizeWord("\u3000word\u3000"), "word");
   assert.equal(normalizeWord("\u000Bword\u000C"), "word");
-  assert.equal(normalizeWord("\u0009word"), "\u0009word");
+  assert.equal(normalizeWord("\u0009word\u0009"), "word");
+  assert.equal(normalizeWord("ice\u0009cream"), "ice\u0009cream");
   assert.equal(normalizeWord("\u200Bword"), "\u200Bword");
 });
 
