@@ -29,6 +29,10 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
+    deinit {
+        session.unwatchAnnotations(self)
+    }
+
     override func loadView() {
         view = NSView()
         let configuration = WKWebViewConfiguration()
@@ -56,9 +60,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             findConstraint,
         ])
         fontScale = session.zoom
-        let previousAnnotations = session.onAnnotationsChanged
-        session.onAnnotationsChanged = { [weak self] in
-            previousAnnotations?()
+        session.watchAnnotations(self) { [weak self] in
             guard let self else { return }
             self.webView?.evaluateJavaScript("window.readerPaint && window.readerPaint(\(self.highlightScript()))")
         }

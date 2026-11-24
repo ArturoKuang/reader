@@ -6,11 +6,17 @@ final class PaneHostController: NSViewController {
     let split = NSSplitView()
     private(set) var panes: [NSViewController] = []
     private(set) var activeIndex = 0
+    private var needsEqualShare = false
 
     override func loadView() {
         split.isVertical = true
         split.dividerStyle = .thin
         view = split
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        equalizeIfNeeded()
     }
 
     func adopt(_ controller: NSViewController) {
@@ -76,8 +82,33 @@ final class PaneHostController: NSViewController {
     private func add(_ controller: NSViewController) {
         addChild(controller)
         controller.view.wantsLayer = true
+        for index in split.subviews.indices {
+            split.setHoldingPriority(.defaultLow, forSubviewAt: index)
+        }
+        if !panes.isEmpty { needsEqualShare = true }
         split.addArrangedSubview(controller.view)
+        if let index = split.subviews.firstIndex(where: { $0 === controller.view }) {
+            split.setHoldingPriority(.defaultLow, forSubviewAt: index)
+        }
         panes.append(controller)
+        DispatchQueue.main.async { [weak self] in
+            self?.equalizeIfNeeded()
+        }
+    }
+
+    private func equalizeIfNeeded() {
+        guard needsEqualShare, panes.count > 1 else { return }
+        let vertical = split.isVertical
+        let total = vertical ? split.bounds.width : split.bounds.height
+        guard total > 40 else { return }
+        needsEqualShare = false
+        let divider = split.dividerThickness
+        let share = (total - divider * CGFloat(panes.count - 1)) / CGFloat(panes.count)
+        var position = share
+        for index in 0..<(panes.count - 1) {
+            split.setPosition(position, ofDividerAt: index)
+            position += share + divider
+        }
     }
 
     private func showBorder() {
