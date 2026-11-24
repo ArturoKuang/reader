@@ -194,6 +194,7 @@ final class VaultCoordinator {
         settings.view = session.package.state
         settings.claudeSessionID = session.claudeSessionID
         settings.showConceptMarkers = session.showConceptMarkers
+        session.persistVaultMarks()
         try? settings.save(bookFolder: location.bookFolder, fs: fs)
     }
 

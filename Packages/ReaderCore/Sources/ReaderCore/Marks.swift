@@ -328,6 +328,88 @@ public enum MarkController {
     }
 }
 
+/// Local marks for a vault book. They stay in Application Support, not in the vault's notes.
+public enum BookMarks {
+    public static func path(applicationSupport: String, fingerprint: String) -> String {
+        let safe = fingerprint
+            .replacingOccurrences(of: ":", with: "-")
+            .replacingOccurrences(of: "/", with: "-")
+        return Paths.join(applicationSupport, "book-marks/\(safe).md")
+    }
+
+    public static func load(applicationSupport: String, fingerprint: String, fs: FileSystem) -> [MarkEntry] {
+        let file = path(applicationSupport: applicationSupport, fingerprint: fingerprint)
+        guard fs.exists(file), let text = try? fs.readString(file) else { return [] }
+        return MarksDocument.parse(text, forcedScope: .local).marks
+    }
+
+    public static func save(
+        _ marks: [MarkEntry],
+        applicationSupport: String,
+        fingerprint: String,
+        document: String,
+        fs: FileSystem
+    ) throws {
+        let file = path(applicationSupport: applicationSupport, fingerprint: fingerprint)
+        let rendered = MarksDocument(
+            frontMatter: FrontMatter(kind: "marks", document: document, fingerprint: fingerprint),
+            marks: marks
+        ).render()
+        try fs.createDirectory(Paths.parent(file))
+        try fs.writeString(file, rendered)
+    }
+}
+
+/// One in-memory copy of the global marks, shared by every open book.
+public final class GlobalMarkHub {
+    public static let shared = GlobalMarkHub()
+
+    public private(set) var marks: [MarkEntry] = []
+    public private(set) var loaded = false
+    private var observers: [UUID: ([MarkEntry]) -> Void] = [:]
+
+    public init() {}
+
+    public func ensureLoaded(applicationSupport: String, fs: FileSystem) {
+        guard !loaded else { return }
+        marks = GlobalMarks.load(applicationSupport: applicationSupport, fs: fs)
+        loaded = true
+    }
+
+    public func observe(_ id: UUID, _ handler: @escaping ([MarkEntry]) -> Void) {
+        observers[id] = handler
+    }
+
+    public func unobserve(_ id: UUID) {
+        observers.removeValue(forKey: id)
+    }
+
+    /// Saves and tells every other observer. The caller already has `marks`.
+    public func publish(_ marks: [MarkEntry], source: UUID, applicationSupport: String, fs: FileSystem) {
+        guard marks != self.marks else { return }
+        self.marks = marks
+        loaded = true
+        try? GlobalMarks.save(marks, applicationSupport: applicationSupport, fs: fs)
+        let others = observers.filter { $0.key != source }
+        for handler in others.values {
+            handler(marks)
+        }
+    }
+}
+
+/// The position to open when a global mark targets a book that is not on screen yet.
+public enum MarkOpenQueue {
+    private static var pending: [String: ReadingPosition] = [:]
+
+    public static func store(path: String, position: ReadingPosition) {
+        pending[path] = position
+    }
+
+    public static func take(path: String) -> ReadingPosition? {
+        pending.removeValue(forKey: path)
+    }
+}
+
 public enum GlobalMarks {
     public static func path(applicationSupport: String) -> String {
         Paths.join(applicationSupport, "global-marks.md")

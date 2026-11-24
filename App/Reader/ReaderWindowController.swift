@@ -237,7 +237,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     private func jumpFromOverlay(_ mark: MarkEntry) {
         hideMarkOverlay()
         if mark.scope == .global, mark.bookFingerprint != session.fingerprint, let path = mark.bookPath {
-            NSDocumentController.shared.openDocument(withContentsOf: URL(fileURLWithPath: path), display: true) { _, _, _ in }
+            ReaderDocument.openMark(path: path, position: mark.position)
             return
         }
         reveal(mark.position)

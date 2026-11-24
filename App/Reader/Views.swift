@@ -312,9 +312,13 @@ struct SidebarView: View {
                         }
                     }
                     .contentShape(Rectangle())
-                    .onTapGesture { jumpToMark(id: line.id) }
+                    .tag(line.id)
                 }
                 .listStyle(.sidebar)
+                .onChange(of: markSelection) { _, id in
+                    guard let id else { return }
+                    jumpToMark(id: id)
+                }
                 .onKeyPress(keys: [.return], phases: .down) { _ in
                     guard let markSelection else { return .ignored }
                     jumpToMark(id: markSelection)
@@ -333,7 +337,7 @@ struct SidebarView: View {
         let mark = session.marks.first { $0.id == id } ?? session.globalMarks.first { $0.id == id }
         guard let mark else { return }
         if mark.scope == .global, mark.bookFingerprint != session.fingerprint, let path = mark.bookPath {
-            NSDocumentController.shared.openDocument(withContentsOf: URL(fileURLWithPath: path), display: true) { _, _, _ in }
+            ReaderDocument.openMark(path: path, position: mark.position)
             return
         }
         guard let controller = NSApp.keyWindow?.windowController as? ReaderWindowController else { return }
@@ -395,7 +399,7 @@ struct SidebarView: View {
         }
         .onTapGesture {
             if global, mark.bookFingerprint != session.fingerprint, let path = mark.bookPath {
-                NSDocumentController.shared.openDocument(withContentsOf: URL(fileURLWithPath: path), display: true) { _, _, _ in }
+                ReaderDocument.openMark(path: path, position: mark.position)
             } else if let controller = NSApp.keyWindow?.windowController as? ReaderWindowController {
                 controller.reveal(mark.position)
             }
