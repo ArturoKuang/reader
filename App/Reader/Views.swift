@@ -152,8 +152,36 @@ struct SidebarView: View {
     @State private var outlineSelection: String?
     @State private var markSelection: String?
 
+    private var sidebarPick: Binding<SidebarMode?> {
+        Binding(
+            get: {
+                switch session.sidebar {
+                case .thumbnails, .tableOfContents, .marks:
+                    return session.sidebar
+                default:
+                    return nil
+                }
+            },
+            set: { mode in
+                guard let mode else { return }
+                session.setSidebar(mode)
+            }
+        )
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            Picker("Sidebar", selection: sidebarPick) {
+                Text("Pages").tag(Optional(SidebarMode.thumbnails))
+                Text("Contents").tag(Optional(SidebarMode.tableOfContents))
+                Text("Marks").tag(Optional(SidebarMode.marks))
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .controlSize(.small)
+            .padding(.horizontal, 8)
+            .padding(.top, 8)
+            .padding(.bottom, 4)
             if let notice = session.notice {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(notice).font(.caption)
