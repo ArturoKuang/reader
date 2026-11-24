@@ -6,7 +6,7 @@ final class ReaderDocument: NSDocument {
     private var vault: VaultCoordinator?
     private var bookData = Data()
     private static var pendingVaultNotice: String?
-    private static var queuedLinks: [String: ReaderLink] = []
+    private static var queuedLinks: [String: ReaderLink] = [:]
 
     /// Holds a deep link until `read` builds the session, so the first layout can land on it.
     static func queue(_ link: ReaderLink) {
