@@ -356,12 +356,21 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     }
 
     private func highlightScript() -> String {
-        let items = session.highlights.compactMap { highlight -> String? in
-            let quote = highlight.quote.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-            guard !quote.isEmpty else { return nil }
-            return "{\"quote\":\"\(quote)\",\"color\":\(highlight.color)}"
+        let objects: [[String: Any]] = HighlightPaint.marks(for: session.highlights).map { mark in
+            var object: [String: Any] = [
+                "quote": mark.quote,
+                "color": mark.color,
+                "prefix": mark.prefix,
+                "suffix": mark.suffix,
+            ]
+            if let chapter = mark.chapter { object["chapter"] = chapter }
+            if let spine = mark.spineIndex { object["spine"] = spine }
+            return object
         }
-        return "[\(items.joined(separator: ","))]"
+        guard JSONSerialization.isValidJSONObject(objects),
+              let data = try? JSONSerialization.data(withJSONObject: objects),
+              let json = String(data: data, encoding: .utf8) else { return "[]" }
+        return json.replacingOccurrences(of: "<", with: "\\u003c")
     }
 
     private func epubAppearance() -> (font: String, line: String, margin: Int, background: String, foreground: String, align: String) {
@@ -526,24 +535,50 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
           return -1;
         }
         window.readerPaint = function(marks) {
+          document.querySelectorAll("span[class^='reader-hl-']").forEach(span => {
+            if (!span.parentNode) return;
+            span.parentNode.insertBefore(document.createTextNode(span.textContent || ""), span);
+            span.parentNode.removeChild(span);
+          });
+          if (document.body.normalize) document.body.normalize();
           (marks || []).forEach(mark => {
             if (!mark.quote) return;
             const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
             while (walker.nextNode()) {
               const node = walker.currentNode;
-              if (!node.nodeValue || !node.parentNode) continue;
-              if (node.parentNode.closest && node.parentNode.closest("[class*='reader-hl']")) continue;
-              const at = node.nodeValue.indexOf(mark.quote);
-              if (at < 0) continue;
-              const span = document.createElement("span");
-              span.className = "reader-hl-" + (mark.color || 1);
-              span.textContent = mark.quote;
-              const text = node.nodeValue;
-              node.parentNode.insertBefore(document.createTextNode(text.slice(0, at)), node);
-              node.parentNode.insertBefore(span, node);
-              node.parentNode.insertBefore(document.createTextNode(text.slice(at + mark.quote.length)), node);
-              node.parentNode.removeChild(node);
-              break;
+              const value = node.nodeValue;
+              if (!value || !node.parentNode) continue;
+              const section = node.parentElement && node.parentElement.closest && node.parentElement.closest("section[data-index]");
+              const spine = section && section.dataset.index !== "" ? Number(section.dataset.index) : null;
+              const chapterText = section ? (section.dataset.chapter || "") : "";
+              const chapter = chapterText === "" ? null : Number(chapterText);
+              const hasSpine = Object.prototype.hasOwnProperty.call(mark, "spine");
+              const hasChapter = Object.prototype.hasOwnProperty.call(mark, "chapter");
+              if (hasSpine && spine !== mark.spine) continue;
+              if (!hasSpine && hasChapter && chapter !== mark.chapter) continue;
+              let from = 0;
+              let painted = false;
+              while (from < value.length) {
+                const at = value.indexOf(mark.quote, from);
+                if (at < 0) break;
+                const before = value.slice(0, at);
+                const after = value.slice(at + mark.quote.length);
+                const prefixOK = !mark.prefix || before.endsWith(mark.prefix);
+                const suffixOK = !mark.suffix || after.startsWith(mark.suffix);
+                if (prefixOK && suffixOK) {
+                  const span = document.createElement("span");
+                  span.className = "reader-hl-" + (mark.color || 1);
+                  span.textContent = value.slice(at, at + mark.quote.length);
+                  node.parentNode.insertBefore(document.createTextNode(value.slice(0, at)), node);
+                  node.parentNode.insertBefore(span, node);
+                  node.parentNode.insertBefore(document.createTextNode(after), node);
+                  node.parentNode.removeChild(node);
+                  painted = true;
+                  break;
+                }
+                from = at + mark.quote.length;
+              }
+              if (painted) break;
             }
           });
         };

@@ -273,4 +273,29 @@ final class AnnotationTests: XCTestCase {
         XCTAssertNil(VaultNoteFile.blocks(removed).first { $0.id == "h1" })
         XCTAssertNotNil(VaultNoteFile.blocks(removed).first { $0.id == "n-old" })
     }
+
+    func testHighlightPaintStaysOnTheRecordedChapter() {
+        let cfi = EPUBCFI.make(spineIndex: 0, start: 11, end: 23).value
+        let highlight = HighlightEntry(
+            id: "h1",
+            color: 1,
+            cfi: cfi,
+            quote: "hard to vary",
+            prefix: "is ",
+            suffix: " because",
+            section: "Chapter 1"
+        )
+        let marks = HighlightPaint.marks(for: [highlight])
+        XCTAssertEqual(marks.count, 1)
+        XCTAssertEqual(marks[0].spineIndex, 0)
+        XCTAssertEqual(marks[0].chapter, 1)
+        let text = "An idea is hard to vary because it explains."
+        XCTAssertNotNil(HighlightPaint.occurrence(of: marks[0], in: text, chapter: 1, spineIndex: 0))
+        XCTAssertNil(HighlightPaint.occurrence(of: marks[0], in: text, chapter: 2, spineIndex: 1))
+        XCTAssertNil(HighlightPaint.occurrence(of: marks[0], in: "hard to vary later", chapter: 1, spineIndex: 0))
+        var byChapter = marks[0]
+        byChapter.spineIndex = nil
+        XCTAssertNotNil(HighlightPaint.occurrence(of: byChapter, in: text, chapter: 1, spineIndex: nil))
+        XCTAssertNil(HighlightPaint.occurrence(of: byChapter, in: text, chapter: 2, spineIndex: nil))
+    }
 }
