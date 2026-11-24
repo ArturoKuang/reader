@@ -14,6 +14,7 @@ import type { TextSlice } from "../highlight/locate";
 import { reprintChapter, sampleBook, sampleHighlight, sampleNote, samplePages } from "../highlight/sample";
 import { captureAnchor, wordSpans } from "../highlight/selection";
 import { addHighlight, reanchorRecords, removeHighlight, saveNote } from "../highlight/store";
+import { makeId } from "../reader/ids";
 import { highlightPaint, tokens } from "./tokens";
 
 interface Selection {
@@ -22,11 +23,6 @@ interface Selection {
   focus: number;
 }
 
-function makeId(prefix: string): string {
-  const bytes = new Uint8Array(16);
-  globalThis.crypto.getRandomValues(bytes);
-  return `${prefix}_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-}
 
 function colorHex(color: number): string {
   return tokens.highlight.palette.find((swatch) => swatch.id === color)?.hex ?? tokens.highlight.palette[0].hex;

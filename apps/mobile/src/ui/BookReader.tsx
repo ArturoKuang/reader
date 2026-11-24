@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ComponentType, type Ref } from "react
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   ActivityIndicator,
+  BackHandler,
   Pressable,
   StyleSheet,
   Text,
@@ -19,15 +20,10 @@ import { readAssetBase64, viewerRoot } from "../reader/installViewer";
 import { epubBook, epubModule, pdfBook, pdfModule, sampleTitles } from "../reader/samples";
 import { emptyShelf, parseShelf, serializeShelf, shelfKey } from "../reader/shelf";
 import type { BookShelf } from "../reader/shelf";
+import { makeId } from "../reader/ids";
 import { tokens } from "./tokens";
 
 type Format = "pdf" | "epub";
-
-function makeId(prefix: string): string {
-  const bytes = new Uint8Array(16);
-  globalThis.crypto.getRandomValues(bytes);
-  return `${prefix}_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-}
 
 function hexFor(color: number): string {
   return tokens.highlight.palette.find((swatch) => swatch.id === color)?.hex ?? "#F2C94C";
@@ -51,6 +47,14 @@ function toViewer(highlight: HighlightRecord): ViewerHighlight {
 
 export function ReaderHome() {
   const [format, setFormat] = useState<Format | null>(null);
+  useEffect(() => {
+    if (!format) return;
+    const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
+      setFormat(null);
+      return true;
+    });
+    return () => subscription.remove();
+  }, [format]);
   if (!format) {
     return (
       <View style={styles.home}>
