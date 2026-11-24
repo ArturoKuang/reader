@@ -1,3 +1,15 @@
+if (typeof Promise.try !== "function") {
+  Promise.try = function (callbackfn) {
+    "use strict";
+    if (typeof callbackfn !== "function") {
+      throw new TypeError("Promise.try requires a function");
+    }
+    var args = Array.prototype.slice.call(arguments, 1);
+    return new Promise(function (resolve) {
+      resolve(callbackfn.apply(undefined, args));
+    });
+  };
+}
 /**
  * @licstart The following is the entire license notice for the
  * JavaScript code in this page

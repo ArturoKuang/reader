@@ -6,9 +6,23 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const srcRoot = join(root, "node_modules", "foliate-js");
 const outRoot = join(root, "assets", "vendor");
 
+const promiseTry = `if (typeof Promise.try !== "function") {
+  Promise.try = function (callbackfn) {
+    "use strict";
+    if (typeof callbackfn !== "function") {
+      throw new TypeError("Promise.try requires a function");
+    }
+    var args = Array.prototype.slice.call(arguments, 1);
+    return new Promise(function (resolve) {
+      resolve(callbackfn.apply(undefined, args));
+    });
+  };
+}
+`;
+
 const files = [
-  ["pdfjs/pdf.min.mjs", join(root, "node_modules/pdfjs-dist/build/pdf.min.mjs")],
-  ["pdfjs/pdf.worker.min.mjs", join(root, "node_modules/pdfjs-dist/build/pdf.worker.min.mjs")],
+  ["pdfjs/pdf.min.mjs", join(root, "node_modules/pdfjs-dist/build/pdf.min.mjs"), promiseTry],
+  ["pdfjs/pdf.worker.min.mjs", join(root, "node_modules/pdfjs-dist/build/pdf.worker.min.mjs"), promiseTry],
   ...[
     "view.js",
     "epubcfi.js",
@@ -29,10 +43,11 @@ const files = [
 ];
 
 const entries = [];
-for (const [dest, from] of files) {
+for (const [dest, from, prefix] of files) {
   const target = join(outRoot, `${dest}.bin`);
   mkdirSync(dirname(target), { recursive: true });
-  writeFileSync(target, readFileSync(from));
+  const body = readFileSync(from);
+  writeFileSync(target, prefix ? Buffer.concat([Buffer.from(prefix), body]) : body);
   entries.push(`  ${JSON.stringify(dest)}: require(${JSON.stringify(`../../assets/vendor/${dest}.bin`)}) as number,`);
 }
 
