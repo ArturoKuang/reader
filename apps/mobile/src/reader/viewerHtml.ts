@@ -4,18 +4,61 @@ function emit(message) {
   const raw = JSON.stringify(message);
   if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(raw);
 }
-function lastGraphemes(text, count) {
+function graphemeParts(text) {
+  if (typeof Intl !== "undefined" && typeof Intl.Segmenter === "function") {
+    try {
+      const parts = [];
+      for (const piece of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text)) {
+        parts.push(piece.segment);
+      }
+      return parts;
+    } catch (error) {
+      /* Chromium has Segmenter; keep the hand-written walk if it throws. */
+    }
+  }
+  const ZWJ = 0x200d;
+  const points = [];
+  for (let index = 0; index < text.length; ) {
+    const codePoint = text.codePointAt(index) || 0;
+    points.push(codePoint);
+    index += codePoint > 0xffff ? 2 : 1;
+  }
+  const regional = (codePoint) => codePoint >= 0x1f1e6 && codePoint <= 0x1f1ff;
+  const extendsCluster = (codePoint) =>
+    /\\p{M}/u.test(String.fromCodePoint(codePoint)) ||
+    (codePoint >= 0xfe00 && codePoint <= 0xfe0f) ||
+    (codePoint >= 0xe0100 && codePoint <= 0xe01ef) ||
+    (codePoint >= 0x1f3fb && codePoint <= 0x1f3ff);
   const parts = [];
-  for (const piece of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text)) parts.push(piece.segment);
+  let cursor = 0;
+  while (cursor < points.length) {
+    let end = cursor + 1;
+    if (regional(points[cursor]) && regional(points[cursor + 1])) end = cursor + 2;
+    else {
+      while (end < points.length) {
+        const current = points[end];
+        if (extendsCluster(current)) {
+          end += 1;
+          continue;
+        }
+        if (current === ZWJ && end + 1 < points.length) {
+          end += 2;
+          continue;
+        }
+        break;
+      }
+    }
+    parts.push(String.fromCodePoint.apply(null, points.slice(cursor, end)));
+    cursor = end;
+  }
+  return parts;
+}
+function lastGraphemes(text, count) {
+  const parts = graphemeParts(text);
   return parts.slice(Math.max(0, parts.length - count)).join("");
 }
 function firstGraphemes(text, count) {
-  const parts = [];
-  for (const piece of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text)) {
-    parts.push(piece.segment);
-    if (parts.length >= count) break;
-  }
-  return parts.join("");
+  return graphemeParts(text).slice(0, count).join("");
 }
 function plainText(root) {
   let text = "";

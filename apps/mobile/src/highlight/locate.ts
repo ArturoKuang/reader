@@ -4,6 +4,8 @@
  * characters of surrounding text. An EPUB slice also builds a CFI hint.
  */
 
+import { graphemeClusters, takeFirstGraphemes, takeLastGraphemes } from "./graphemes";
+
 export const ANCHOR_CONTEXT = 80;
 
 export interface TextSlice {
@@ -24,24 +26,6 @@ export interface AnchorHit {
   /** UTF-16 index of the quote in the matched slice. For painting. */
   start: number;
   end: number;
-}
-
-const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-
-function graphemes(text: string): string[] {
-  const parts: string[] = [];
-  for (const piece of segmenter.segment(text)) parts.push(piece.segment);
-  return parts;
-}
-
-function lastGraphemes(text: string, count: number): string {
-  const parts = graphemes(text);
-  return parts.slice(Math.max(0, parts.length - count)).join("");
-}
-
-function firstGraphemes(text: string, count: number): string {
-  const parts = graphemes(text);
-  return parts.slice(0, count).join("");
 }
 
 /** `epubcfi(/6/{(spineIndex+1)*2}!/4,/1:{start},/1:{end})` */
@@ -121,17 +105,17 @@ function hit(
   index: number,
   confidence: AnchorHit["confidence"],
 ): AnchorHit {
-  const start = graphemes(before).length;
+  const start = graphemeClusters(before).length;
   const cfi =
     slice.spineIndex === undefined
       ? undefined
-      : epubCfi(slice.spineIndex, start, start + graphemes(quote).length);
+      : epubCfi(slice.spineIndex, start, start + graphemeClusters(quote).length);
   return {
     page: slice.page,
     spineIndex: slice.spineIndex,
     section: slice.section,
-    prefix: lastGraphemes(before, ANCHOR_CONTEXT),
-    suffix: firstGraphemes(after, ANCHOR_CONTEXT),
+    prefix: takeLastGraphemes(before, ANCHOR_CONTEXT),
+    suffix: takeFirstGraphemes(after, ANCHOR_CONTEXT),
     cfi,
     confidence,
     start: index,
