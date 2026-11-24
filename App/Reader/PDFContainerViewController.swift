@@ -21,6 +21,9 @@ final class PDFContainerViewController: NSViewController {
     private var conceptIDs: [ObjectIdentifier: String] = [:]
     private var lookupPopover: NSPopover?
     private var didRestorePosition = false
+    private var didFinishOpeningLayout = false
+    private var applyingJump = false
+    private var stickJump: PDFJump?
     private var suppressScaleSave = false
     private var lastFitSize: CGSize = .zero
 
@@ -124,8 +127,14 @@ final class PDFContainerViewController: NSViewController {
         // Layout during appearance can still be short of the final window size.
         lastFitSize = .zero
         DispatchQueue.main.async { [weak self] in
-            self?.applyFittingScale(force: true)
-            self?.restorePositionOnce()
+            guard let self else { return }
+            self.applyFittingScale(force: true)
+            self.restorePositionOnce()
+            if let stickJump = self.stickJump {
+                self.showJump(stickJump, flash: false)
+            }
+            self.stickJump = nil
+            self.didFinishOpeningLayout = true
         }
         guard let clip = enclosingScrollClip(in: pdfView) else { return }
         clip.postsBoundsChangedNotifications = true
@@ -142,7 +151,10 @@ final class PDFContainerViewController: NSViewController {
         let mode: FitMode = session.hasSavedViewState ? session.fitMode : .fitPage
         switch mode {
         case .fitPage:
-            guard force || bounds.size != lastFitSize else { return }
+            guard force || bounds.size != lastFitSize else {
+                restorePositionOnce()
+                return
+            }
             lastFitSize = bounds.size
             suppressScaleSave = true
             pdfView.autoScales = true
@@ -154,18 +166,27 @@ final class PDFContainerViewController: NSViewController {
             suppressScaleSave = false
             session.rememberZoom(pdfView.scaleFactor, fit: .fitPage)
         case .fitWidth:
-            guard bounds.size != lastFitSize else { return }
+            guard bounds.size != lastFitSize else {
+                restorePositionOnce()
+                return
+            }
             lastFitSize = bounds.size
             fitWidth()
         case .actual:
-            guard lastFitSize == .zero else { return }
+            guard lastFitSize == .zero else {
+                restorePositionOnce()
+                return
+            }
             lastFitSize = bounds.size
             suppressScaleSave = true
             pdfView.autoScales = false
             pdfView.scaleFactor = 1
             suppressScaleSave = false
         case .custom:
-            guard lastFitSize == .zero else { return }
+            guard lastFitSize == .zero else {
+                restorePositionOnce()
+                return
+            }
             lastFitSize = bounds.size
             suppressScaleSave = true
             pdfView.autoScales = false
@@ -173,23 +194,32 @@ final class PDFContainerViewController: NSViewController {
             pdfView.scaleFactor = scale
             suppressScaleSave = false
         }
-        if let anchored {
+        // A deep link is applied after the scale change. Snapping back to the
+        // pre-scale destination would put a vault link on the saved page.
+        if stickJump == nil, let anchored {
             suppressScaleSave = true
             pdfView.go(to: anchored)
             suppressScaleSave = false
         }
         restorePositionOnce()
+        if let stickJump {
+            showJump(stickJump, flash: false)
+        }
     }
 
     private func restorePositionOnce() {
-        guard !didRestorePosition, session.hasSavedViewState else {
-            if !session.hasSavedViewState { session.finishViewRestore() }
+        guard !didRestorePosition else { return }
+        guard pdfView.bounds.width > 160, pdfView.document != nil else { return }
+        didRestorePosition = true
+        if session.pendingReaderLink != nil {
+            applyPendingLinkNow()
+            session.finishViewRestore()
             return
         }
-        guard pdfView.bounds.width > 160 else { return }
-        didRestorePosition = true
-        let state = session.package.state
-        reveal(ReadingPosition(page: state.page, scrollY: state.scrollY, zoom: nil))
+        if session.hasSavedViewState {
+            let state = session.package.state
+            reveal(ReadingPosition(page: state.page, scrollY: state.scrollY, zoom: nil))
+        }
         session.finishViewRestore()
     }
 
@@ -538,22 +568,69 @@ final class PDFContainerViewController: NSViewController {
     }
 
     func consumePendingJump() {
-        guard let link = session.pendingReaderLink else { return }
+        guard session.pendingReaderLink != nil, !applyingJump else { return }
+        guard view.window != nil, pdfView.bounds.width > 160, pdfView.document != nil else { return }
+        // The opening fit ends in `restorePositionOnce`. Applying the link earlier
+        // lets that fit put the saved page back on screen.
+        if !didRestorePosition { return }
+        applyPendingLinkNow()
+    }
+
+    private func applyPendingLinkNow() {
+        guard !applyingJump, let link = session.pendingReaderLink else { return }
+        guard let jump = PDFJumpResolver.resolve(link: link, highlights: session.highlights, notes: session.notes) else {
+            session.pendingReaderLink = nil
+            return
+        }
         session.pendingReaderLink = nil
-        let quote = session.highlights.first { $0.id == link.id }?.quote ?? session.notes.first { $0.id == link.id }?.quote
-        let page = link.pageNumber ?? session.highlights.first { $0.id == link.id }?.page
-        guard let page, let document = pdfView.document, let pdfPage = document.page(at: page - 1) else { return }
-        if let quote, let string = pdfPage.string, let range = string.range(of: quote), let selection = pdfPage.selection(for: NSRange(range, in: string)) {
+        if !didFinishOpeningLayout {
+            stickJump = jump
+        }
+        showJump(jump, flash: true)
+    }
+
+    private func showJump(_ jump: PDFJump, flash: Bool) {
+        guard !applyingJump, let document = pdfView.document else { return }
+        let index = min(max(jump.page - 1, 0), max(document.pageCount - 1, 0))
+        guard let page = document.page(at: index) else { return }
+        applyingJump = true
+        defer { applyingJump = false }
+        if let rect = unionRect(jump.rects) {
+            pdfView.go(to: rect, on: page)
+            if flash { flashRect(rect, on: page) }
+        } else if let quote = jump.quote, let string = page.string, let range = string.range(of: quote), let selection = page.selection(for: NSRange(range, in: string)) {
             pdfView.go(to: selection)
-            pdfView.setCurrentSelection(selection, animate: true)
-            let flash = PDFAnnotation(bounds: selection.bounds(for: pdfPage), forType: .highlight, withProperties: nil)
-            flash.color = NSColor.systemYellow.withAlphaComponent(0.55)
-            pdfPage.addAnnotation(flash)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                pdfPage.removeAnnotation(flash)
-            }
+            pdfView.setCurrentSelection(selection, animate: false)
+            if flash { flashRect(selection.bounds(for: page), on: page) }
         } else {
-            reveal(ReadingPosition(page: page))
+            reveal(ReadingPosition(page: document.index(for: page) + 1, scrollY: jump.scrollY, pdfY: jump.pdfY))
+        }
+        let number = document.index(for: page) + 1
+        let section = session.outline.last { ($0.page ?? 0) <= number }?.title
+        session.updatePage(number, count: document.pageCount, section: section)
+        if didFinishOpeningLayout {
+            stickJump = nil
+        }
+    }
+
+    private func unionRect(_ rects: [[Double]]) -> NSRect? {
+        var result: NSRect?
+        for rect in rects where rect.count >= 4 {
+            let width = rect[2] - rect[0]
+            let height = rect[3] - rect[1]
+            guard width > 0.5, height > 0.5 else { continue }
+            let next = NSRect(x: rect[0], y: rect[1], width: width, height: height)
+            result = result.map { $0.union(next) } ?? next
+        }
+        return result
+    }
+
+    private func flashRect(_ rect: NSRect, on page: PDFPage) {
+        let flash = PDFAnnotation(bounds: rect, forType: .highlight, withProperties: nil)
+        flash.color = NSColor.systemYellow.withAlphaComponent(0.55)
+        page.addAnnotation(flash)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            page.removeAnnotation(flash)
         }
     }
 

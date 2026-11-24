@@ -6,6 +6,20 @@ final class ReaderDocument: NSDocument {
     private var vault: VaultCoordinator?
     private var bookData = Data()
     private static var pendingVaultNotice: String?
+    private static var queuedLinks: [String: ReaderLink] = []
+
+    /// Holds a deep link until `read` builds the session, so the first layout can land on it.
+    static func queue(_ link: ReaderLink) {
+        queuedLinks[key(link.path)] = link
+    }
+
+    static func takeQueuedLink(for path: String) -> ReaderLink? {
+        queuedLinks.removeValue(forKey: key(path))
+    }
+
+    private static func key(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+    }
 
     override class var autosavesInPlace: Bool { true }
     override class var preservesVersions: Bool { false }
@@ -37,6 +51,9 @@ final class ReaderDocument: NSDocument {
                 session.page = max(session.package.state.page, 1)
             }
             coordinator.attach(session)
+            if let link = Self.takeQueuedLink(for: opened.url.path) {
+                session.pendingReaderLink = link
+            }
             var index = LibraryIndex.load(from: AppPaths.indexFile, fs: fs)
             SidecarStore.noteVaultBook(
                 bookPath: opened.url.path,
@@ -64,6 +81,9 @@ final class ReaderDocument: NSDocument {
         )
         try index.save(to: AppPaths.indexFile, fs: fs)
         let session = ReaderSession(bookURL: opened.url, bookData: opened.data, open: result)
+        if let link = Self.takeQueuedLink(for: opened.url.path) {
+            session.pendingReaderLink = link
+        }
         if let notice = Self.pendingVaultNotice {
             session.notice = notice
             Self.pendingVaultNotice = nil
@@ -92,8 +112,17 @@ final class ReaderDocument: NSDocument {
 
     /// Autosave writes the sidecar only. The book file is never replaced.
     func reveal(_ link: ReaderLink) {
-        session?.pendingReaderLink = link
-        session?.onAnnotationsChanged?()
+        _ = Self.takeQueuedLink(for: link.path)
+        guard let session else {
+            Self.queue(link)
+            return
+        }
+        session.pendingReaderLink = link
+        let controllers = windowControllers.compactMap { $0 as? ReaderWindowController }
+        if controllers.isEmpty { return }
+        for controller in controllers {
+            controller.applyPendingLink()
+        }
     }
 
     override func save(to url: URL, ofType typeName: String, for saveOperation: NSDocument.SaveOperationType, completionHandler: @escaping (Error?) -> Void) {

@@ -90,6 +90,12 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         applyChrome()
     }
 
+    /// Lands a `reader://` link once the PDF or EPUB view can move.
+    func applyPendingLink() {
+        pdfController?.consumePendingJump()
+        epubController?.consumePendingJump()
+    }
+
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 

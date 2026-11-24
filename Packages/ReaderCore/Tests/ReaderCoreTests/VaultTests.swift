@@ -223,6 +223,40 @@ final class VaultTests: XCTestCase {
         XCTAssertEqual(try CLIOutput.parseClaude(stdout), "Why?")
         let link = ReaderLink(path: "/book.pdf", location: "page=4&y=12", id: "h1")
         XCTAssertEqual(ReaderLink.parse(link.url)?.pageNumber, 4)
+        XCTAssertEqual(ReaderLink.parse(link.url)?.verticalOffset, 12)
+    }
+
+    func testPDFVaultLinkResolvesTheHighlightThenThePage() {
+        let encoded = "reader://open?path=/books/book.pdf&loc=page%3D3&id=h_highlight&fp=sha256%3Aabc"
+        let parsed = ReaderLink.parse(encoded)
+        XCTAssertEqual(parsed?.path, "/books/book.pdf")
+        XCTAssertEqual(parsed?.pageNumber, 3)
+        XCTAssertEqual(parsed?.id, "h_highlight")
+        XCTAssertEqual(parsed?.fingerprint, "sha256:abc")
+        XCTAssertNil(parsed?.scrollFraction)
+
+        let fraction = ReaderLink.parse("reader://open?path=/books/book.pdf&loc=page%3D3%26fp%3D0.25")
+        XCTAssertEqual(fraction?.pageNumber, 3)
+        XCTAssertEqual(fraction?.scrollFraction, 0.25)
+        XCTAssertEqual(ReaderLink.parse("reader://open?path=/books/book.pdf&loc=page%253D2")?.pageNumber, 2)
+
+        let highlight = HighlightEntry(id: "h_highlight", color: 1, page: 3, quote: "on page three", rects: [[8, 10, 40, 22]])
+        let byID = PDFJumpResolver.resolve(link: ReaderLink(path: "/books/book.pdf", location: "page=1", id: "h_highlight"), highlights: [highlight], notes: [])
+        XCTAssertEqual(byID?.page, 3)
+        XCTAssertEqual(byID?.rects, [[8, 10, 40, 22]])
+        XCTAssertEqual(byID?.quote, "on page three")
+
+        let bare = ReaderLink(path: "/books/book.pdf", location: "page=3&fp=0.4&y=80")
+        let byPage = PDFJumpResolver.resolve(link: bare, highlights: [], notes: [])
+        XCTAssertEqual(byPage?.page, 3)
+        XCTAssertEqual(byPage?.scrollY, 0.4)
+        XCTAssertEqual(byPage?.pdfY, 80)
+        XCTAssertTrue(byPage?.rects.isEmpty == true)
+
+        let note = NoteEntry(id: "n1", page: 2, quote: "a note", body: "body")
+        let byNote = PDFJumpResolver.resolve(link: ReaderLink(path: "/books/book.pdf", id: "n1"), highlights: [], notes: [note])
+        XCTAssertEqual(byNote?.page, 2)
+        XCTAssertEqual(byNote?.quote, "a note")
     }
 
     func testChapterTextFileNames() throws {
