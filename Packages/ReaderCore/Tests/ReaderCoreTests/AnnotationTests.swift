@@ -307,5 +307,10 @@ final class AnnotationTests: XCTestCase {
         XCTAssertEqual(FindSelection.index(starts: [10, 40], cursor: 90), 0)
         XCTAssertEqual(FindSelection.step(count: 3, current: 0, forward: true), 1)
         XCTAssertNil(FindSelection.index(starts: [], cursor: 0))
+        let typed = "quick brown fox"
+        XCTAssertEqual(FindQuery.command(query: typed, previous: "quick brown fo", hasMatches: true, committed: false), .begin)
+        XCTAssertEqual(FindQuery.command(query: typed, previous: typed, hasMatches: true, committed: false), .stay)
+        XCTAssertEqual(FindQuery.command(query: typed, previous: typed, hasMatches: true, committed: true), .step)
+        XCTAssertEqual(FindQuery.command(query: typed, previous: typed, hasMatches: false, committed: true), .begin)
     }
 }

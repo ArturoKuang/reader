@@ -17,3 +17,27 @@ public enum FindSelection {
         return (current - 1 + count) % count
     }
 }
+
+public enum FindCommand: Equatable, Sendable {
+    /// The query changed, or there are no matches yet. Select the first hit.
+    case begin
+    /// Return on a query the toolbar already searched. Leave the current hit selected.
+    case stay
+    /// A later Return. Move to the next match.
+    case step
+}
+
+public enum FindQuery {
+    /// Live search calls this on every edit and again when Return is pressed.
+    /// The first Return after a query already has matches stays put. Only a Return after that advances.
+    /// `committed` is true once Return has accepted this exact query.
+    public static func command(query: String, previous: String, hasMatches: Bool, committed: Bool) -> FindCommand {
+        if query != previous || !hasMatches {
+            return .begin
+        }
+        if !committed {
+            return .stay
+        }
+        return .step
+    }
+}

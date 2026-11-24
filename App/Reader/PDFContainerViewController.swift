@@ -17,7 +17,7 @@ final class PDFContainerViewController: NSViewController {
     private var matchIndex = 0
     private var pickInitialMatch = false
     private var lastFindQuery = ""
-    private var lastFindAt = Date.distantPast
+    private var findCommitted = false
     private var contactHost: NSHostingController<ContactSheetView>?
     private var annotations: [PDFAnnotation] = []
     private var highlightIDs: [ObjectIdentifier: String] = [:]
@@ -341,19 +341,19 @@ final class PDFContainerViewController: NSViewController {
     func search(_ query: String) {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        let now = Date()
-        if trimmed == lastFindQuery, now.timeIntervalSince(lastFindAt) < 0.25 {
-            return
-        }
-        let again = trimmed == lastFindQuery && !matches.isEmpty
-        lastFindQuery = trimmed
-        lastFindAt = now
+        let hasMatches = !matches.isEmpty && matches.first?.string?.localizedCaseInsensitiveContains(trimmed) == true
+        let command = FindQuery.command(query: trimmed, previous: lastFindQuery, hasMatches: hasMatches, committed: findCommitted)
         findBar.stringValue = trimmed
         session.findQuery = trimmed
-        if again {
-            stepMatch(forward: true)
-        } else {
+        switch command {
+        case .begin:
+            lastFindQuery = trimmed
+            findCommitted = false
             startFind(trimmed)
+        case .stay:
+            findCommitted = true
+        case .step:
+            stepMatch(forward: true)
         }
     }
 
@@ -431,7 +431,7 @@ final class PDFContainerViewController: NSViewController {
         guard !query.isEmpty else { return }
         if matches.isEmpty || matches.first?.string?.localizedCaseInsensitiveContains(query) != true {
             lastFindQuery = query
-            lastFindAt = Date()
+            findCommitted = false
             session.findQuery = query
             startFind(query)
             return

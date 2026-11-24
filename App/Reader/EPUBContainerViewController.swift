@@ -18,7 +18,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     private var acceptSpineReports = false
     private var pendingFlash: String?
     private var lastFindQuery = ""
-    private var lastFindAt = Date.distantPast
+    private var findCommitted = false
     private var didFindQuery = false
 
     init(session: ReaderSession) {
@@ -153,17 +153,21 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     func search(_ query: String) {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        let now = Date()
-        if trimmed == lastFindQuery, now.timeIntervalSince(lastFindAt) < 0.25 {
-            return
-        }
-        let again = trimmed == lastFindQuery && didFindQuery
-        lastFindQuery = trimmed
-        lastFindAt = now
-        didFindQuery = true
+        let hasMatches = didFindQuery && trimmed == lastFindQuery
+        let command = FindQuery.command(query: trimmed, previous: lastFindQuery, hasMatches: hasMatches, committed: findCommitted)
         findBar.stringValue = trimmed
         session.findQuery = trimmed
-        runFind(forward: true, fresh: !again)
+        switch command {
+        case .begin:
+            lastFindQuery = trimmed
+            findCommitted = false
+            didFindQuery = true
+            runFind(forward: true, fresh: true)
+        case .stay:
+            findCommitted = true
+        case .step:
+            runFind(forward: true, fresh: false)
+        }
     }
 
     @objc private func submitFind() {
