@@ -12,12 +12,10 @@
     "suffix": ", that the birds",
     "section": "Ch. 3",
     "rects": [[72, 188.3, 540.2, 230.9]],
-    "noteId": "n1",
     "extras": { "source": "spike" }
   },
   "note": {
-    "id": "n1",
-    "highlightId": "h1",
+    "id": "h1",
     "page": 62,
     "quote": "we do not see, or we forget",
     "prefix": "of food; ",

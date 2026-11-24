@@ -45,15 +45,9 @@ export function addHighlight(
   return { highlights: [...highlights, entry], entry };
 }
 
-function noteFromHighlight(
-  id: string,
-  highlight: HighlightRecord,
-  body: string,
-  now: string,
-): NoteRecord {
+function noteFromHighlight(highlight: HighlightRecord, body: string, now: string): NoteRecord {
   return {
-    id,
-    highlightId: highlight.id,
+    id: highlight.id,
     page: highlight.page,
     cfi: highlight.cfi,
     quote: highlight.quote,
@@ -69,14 +63,13 @@ function noteFromHighlight(
 }
 
 /**
- * Creates or updates a note as its own record and points the highlight at
- * it. An empty body removes the note and clears `noteId`.
+ * Creates or updates a note as its own record with the highlight's id.
+ * An empty body removes that note. The highlight record is left unchanged.
  */
 export function saveNote(
   highlights: readonly HighlightRecord[],
   notes: readonly NoteRecord[],
   highlightId: string,
-  noteId: string,
   body: string,
   now: string,
 ): { highlights: HighlightRecord[]; notes: NoteRecord[] } | null {
@@ -84,25 +77,17 @@ export function saveNote(
   if (!highlight) return null;
   const trimmed = body.trim();
   if (trimmed.length === 0) {
-    const dropped = highlight.noteId;
     return {
-      highlights: highlights.map((item) =>
-        item.id === highlightId ? { ...item, noteId: undefined } : item,
-      ),
-      notes: notes.filter((note) => note.id !== dropped),
+      highlights: [...highlights],
+      notes: notes.filter((note) => note.id !== highlight.id),
     };
   }
-  if (highlight.noteId) {
-    const linked = highlight.noteId;
-    const exists = notes.some((note) => note.id === linked);
-    const nextNotes = exists
-      ? notes.map((note) => (note.id === linked ? { ...note, body: trimmed, updated: now } : note))
-      : [...notes, noteFromHighlight(linked, highlight, trimmed, now)];
-    return { highlights: [...highlights], notes: nextNotes };
-  }
+  const existing = notes.some((note) => note.id === highlight.id);
   return {
-    highlights: highlights.map((item) => (item.id === highlightId ? { ...item, noteId } : item)),
-    notes: [...notes, noteFromHighlight(noteId, highlight, trimmed, now)],
+    highlights: [...highlights],
+    notes: existing
+      ? notes.map((note) => (note.id === highlight.id ? { ...note, body: trimmed, updated: now } : note))
+      : [...notes, noteFromHighlight(highlight, trimmed, now)],
   };
 }
 
@@ -111,10 +96,9 @@ export function removeHighlight(
   notes: readonly NoteRecord[],
   highlightId: string,
 ): { highlights: HighlightRecord[]; notes: NoteRecord[] } {
-  const highlight = highlights.find((item) => item.id === highlightId);
   return {
     highlights: highlights.filter((item) => item.id !== highlightId),
-    notes: notes.filter((note) => note.id !== highlight?.noteId),
+    notes: notes.filter((note) => note.id !== highlightId),
   };
 }
 

@@ -24,6 +24,6 @@ describe("makeId without global crypto", () => {
     });
     if (!ids) throw new Error("ids module did not load");
     expect(ids.makeId("h")).toMatch(/^h_[0-9a-f]{32}$/);
-    expect(ids.makeId("n")).toMatch(/^n_[0-9a-f]{32}$/);
+    expect(ids.makeId("h")).toMatch(/^h_[0-9a-f]{32}$/);
   });
 });

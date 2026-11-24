@@ -90,14 +90,12 @@ describe("local shelf", () => {
           suffix: ".",
           page: 1,
           rects: [[72, 680, 160, 700]],
-          noteId: "n1",
           extras: {},
         },
       ],
       notes: [
         {
-          id: "n1",
-          highlightId: "h1",
+          id: "h1",
           quote: "Ishmael",
           prefix: "Call me ",
           suffix: ".",
@@ -110,8 +108,9 @@ describe("local shelf", () => {
       ],
     });
     const loaded = parseShelf(saved);
-    expect(loaded.highlights[0]?.noteId).toBe("n1");
-    expect(loaded.notes[0]?.highlightId).toBe("h1");
+    expect(loaded.highlights[0]?.id).toBe("h1");
+    expect(loaded.notes[0]?.id).toBe("h1");
+    expect("noteId" in (loaded.highlights[0] ?? {})).toBe(false);
     expect(loaded.notes[0]?.body).toBe("The narrator.");
     expect("body" in (loaded.highlights[0] ?? {})).toBe(false);
   });

@@ -73,7 +73,7 @@ export function readerComment(value: JsonValue): string {
   return `<!-- reader ${compactJson(value)} -->`;
 }
 
-/** Sidecar object for a highlight. `noteId` is written under the key `note`. */
+/** Sidecar object for a highlight. The note is a separate record with the same id. */
 export function highlightSidecarObject(highlight: HighlightRecord): { [key: string]: JsonValue } {
   const object: { [key: string]: JsonValue } = { ...highlight.extras };
   object.id = highlight.id;
@@ -85,7 +85,6 @@ export function highlightSidecarObject(highlight: HighlightRecord): { [key: stri
   object.suffix = highlight.suffix;
   if (highlight.section !== undefined) object.section = highlight.section;
   if (highlight.rects.length > 0) object.rects = highlight.rects;
-  if (highlight.noteId !== undefined) object.note = highlight.noteId;
   return object;
 }
 

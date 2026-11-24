@@ -16,13 +16,11 @@ export const sampleHighlight: HighlightRecord = {
   suffix: records.highlight.suffix,
   section: records.highlight.section,
   rects: records.highlight.rects,
-  noteId: records.highlight.noteId,
   extras: records.highlight.extras,
 };
 
 export const sampleNote: NoteRecord = {
   id: records.note.id,
-  highlightId: records.note.highlightId,
   page: records.note.page,
   quote: records.note.quote,
   prefix: records.note.prefix,

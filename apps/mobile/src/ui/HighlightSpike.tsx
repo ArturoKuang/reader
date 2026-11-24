@@ -71,7 +71,7 @@ export function HighlightSpike() {
       const already = highlights.some((item) => item.id === added.entry?.id);
       setActiveId(added.entry.id);
       if (!already) setLastColor(color);
-      const linked = notes.find((note) => note.highlightId === added.entry?.id);
+      const linked = notes.find((note) => note.id === added.entry?.id);
       setDraft(linked?.body ?? "");
       setNotice(already ? "Already highlighted" : null);
     }
@@ -80,9 +80,9 @@ export function HighlightSpike() {
 
   function commitNote() {
     if (!active) return;
-    const linked = notes.some((note) => note.highlightId === active.id);
+    const linked = notes.some((note) => note.id === active.id);
     if (draft.trim().length === 0 && !linked) return;
-    const saved = saveNote(highlights, notes, active.id, makeId("n"), draft, new Date().toISOString());
+    const saved = saveNote(highlights, notes, active.id, draft, new Date().toISOString());
     if (!saved) return;
     setHighlights(saved.highlights);
     setNotes(saved.notes);
@@ -171,7 +171,7 @@ export function HighlightSpike() {
 
       <Text style={styles.heading}>Records</Text>
       {highlights.map((highlight) => {
-        const note = notes.find((item) => item.highlightId === highlight.id);
+        const note = notes.find((item) => item.id === highlight.id);
         const open = highlight.id === activeId;
         return (
           <Pressable
@@ -196,7 +196,7 @@ export function HighlightSpike() {
                 {note.body}
                 {"\n"}
                 <Text style={styles.caption}>
-                  Note {note.id} points at {note.highlightId}
+                  Note {note.id} shares the highlight id
                 </Text>
               </Text>
             ) : (
@@ -219,7 +219,7 @@ export function HighlightSpike() {
           <View style={styles.actions}>
             <Pressable onPress={commitNote} style={styles.button}>
               <Text style={styles.buttonLabel}>
-                {draft.trim().length === 0 && notes.some((note) => note.highlightId === active.id)
+                {draft.trim().length === 0 && notes.some((note) => note.id === active.id)
                   ? "Remove note"
                   : "Save note"}
               </Text>
@@ -230,7 +230,7 @@ export function HighlightSpike() {
                 setHighlights(next.highlights);
                 setNotes(next.notes);
                 setActiveId(next.highlights[0]?.id ?? "");
-                setDraft(notes.find((note) => note.highlightId === next.highlights[0]?.id)?.body ?? "");
+                setDraft(notes.find((note) => note.id === next.highlights[0]?.id)?.body ?? "");
               }}
               style={styles.buttonSecondary}
             >

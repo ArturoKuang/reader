@@ -96,7 +96,7 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
   const [error, setError] = useState<string | null>(null);
 
   const active = shelf.highlights.find((highlight) => highlight.id === activeId) ?? null;
-  const activeNote = shelf.notes.find((note) => note.highlightId === active?.id);
+  const activeNote = shelf.notes.find((note) => note.id === active?.id);
 
   function send(message: HostToViewer) {
     const payload = JSON.stringify(message);
@@ -132,7 +132,7 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
 
   function openSheet(id: string, notes = shelfRef.current.notes) {
     setActiveId(id);
-    setDraft(notes.find((note) => note.highlightId === id)?.body ?? "");
+    setDraft(notes.find((note) => note.id === id)?.body ?? "");
   }
 
   function onViewerMessage(raw: string) {
@@ -205,7 +205,7 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
 
   function saveActiveNote() {
     if (!active) return;
-    const saved = saveNote(shelf.highlights, shelf.notes, active.id, makeId("n"), draft, new Date().toISOString());
+    const saved = saveNote(shelf.highlights, shelf.notes, active.id, draft, new Date().toISOString());
     if (!saved) return;
     void commit({ ...shelf, highlights: saved.highlights, notes: saved.notes });
     setNotice(draft.trim() ? "Note saved as its own record" : "Note removed");
@@ -278,7 +278,7 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
           <Text style={styles.quote}>“{active.quote}”</Text>
           <Text style={styles.caption}>
             {active.page ? `Page ${active.page}` : active.cfi ? "EPUB CFI" : "No location hint"}
-            {active.noteId ? " · note attached" : ""}
+            {activeNote ? " · note attached" : ""}
           </Text>
           <View style={styles.swatches}>
             {tokens.highlight.palette.map((swatch) => (
