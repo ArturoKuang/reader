@@ -82,6 +82,7 @@ interface StoredBatch {
   response: PushResponse;
 }
 
+/** Kind is part of the key, so a note and its highlight may share an id. */
 function recordKey(bookId: string, kind: string, id: string): string {
   return `${bookId}\u0000${kind}\u0000${id}`;
 }
@@ -545,6 +546,7 @@ export class MockSyncServer {
     if (change.kind === "highlight") {
       const color = change.payload.color;
       if (typeof color !== "number" || !isHighlightColor(color)) return "highlight color must be 1 through 6";
+      if ("noteId" in change.payload) return "highlight payload must not include noteId";
     }
     return null;
   }

@@ -23,6 +23,6 @@ export {
 export type { SyncChipState, SyncStatus } from "./status";
 export { HttpTransport, SyncApiError, SyncNetworkError } from "./transport";
 export type { SyncTransport } from "./transport";
-export { normalizeWord, noteIdForHighlight, positionId, wordId } from "./ids";
+export { normalizeWord, positionId, wordId } from "./ids";
 export { MockSyncServer } from "./mock/server";
 export type { ChangeInput, Envelope, Locator, OpenConflict, PushRequest, RecordKind } from "./wire";

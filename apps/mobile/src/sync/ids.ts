@@ -6,22 +6,7 @@ export { normalizeWord, wordId };
 
 const HEX_32 = /^[0-9a-f]{32}$/;
 
-/**
- * Spec rev 3 says a note reuses its highlight's id, and also that note ids
- * are `n_` plus 32 hex. The phone contract stores two records: `h_` and
- * `n_` are different strings, and `highlight.noteId` is the link of record.
- * A note minted for a highlight therefore keeps the highlight's 32 hex
- * digits and switches the prefix to `n_`. Callers that already have a note
- * id (the highlight spike uses short ids) keep that id; the wire rule for
- * any id is 1–512 bytes and no control characters.
- */
-export function noteIdForHighlight(highlightId: string): string | null {
-  const match = /^h_([0-9a-f]{32})$/.exec(highlightId);
-  if (!match) return null;
-  return `n_${match[1]}`;
-}
-
-export function randomHexId(prefix: "h" | "n" | "l"): string {
+export function randomHexId(prefix: "h" | "l"): string {
   const hex = globalThis.crypto.randomUUID().replace(/-/g, "");
   return `${prefix}_${hex}`;
 }
@@ -48,7 +33,7 @@ export function invalidRecordId(id: string): string | null {
   return null;
 }
 
-export function isCanonicalPrefixedId(id: string, prefix: "h" | "n" | "l"): boolean {
+export function isCanonicalPrefixedId(id: string, prefix: "h" | "l"): boolean {
   return id.startsWith(`${prefix}_`) && HEX_32.test(id.slice(2));
 }
 

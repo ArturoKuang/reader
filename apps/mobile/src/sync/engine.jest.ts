@@ -5,7 +5,6 @@ import { downloadBookBlob, sha256Hex } from "./blobs";
 import { FakeClock } from "./clock";
 import { MemoryCredentialStore } from "./credentials";
 import { SyncEngine, epubChapterKey } from "./engine";
-import { noteIdForHighlight } from "./ids";
 import { MockSyncServer } from "./mock/server";
 import { SYNC_PORT, parsePairingUrl } from "./pairing";
 import { MemorySyncStorage } from "./storage";
@@ -20,7 +19,7 @@ function qr(host: string, port: number, token: string, serverId: string): string
   return `readersync://pair?v=1&host=${host}&port=${port}&token=${token}&server=${serverId}`;
 }
 
-function highlight(id: string, quote: string, noteId?: string): HighlightRecord {
+function highlight(id: string, quote: string): HighlightRecord {
   return {
     id,
     color: 1,
@@ -28,7 +27,6 @@ function highlight(id: string, quote: string, noteId?: string): HighlightRecord 
     prefix: "pre",
     suffix: "suf",
     rects: [],
-    noteId,
     extras: { source: "phone" },
   };
 }
@@ -277,12 +275,9 @@ describe("sync engine", () => {
   });
 
   it("deletes a highlight and its note in one batch", async () => {
-    const note = noteIdForHighlight(HID);
-    expect(note).toBe(`n_${"ab".repeat(16)}`);
-    await env.engine.putHighlight(BOOK, highlight(HID, "quoted", note ?? undefined));
+    await env.engine.putHighlight(BOOK, highlight(HID, "quoted"));
     const noteRecord: NoteRecord = {
-      id: note ?? "n_missing",
-      highlightId: HID,
+      id: HID,
       quote: "quoted",
       prefix: "pre",
       suffix: "suf",
@@ -293,11 +288,27 @@ describe("sync engine", () => {
     };
     await env.engine.putNote(BOOK, noteRecord);
     await env.engine.flush();
+    expect(env.server.record(BOOK, "highlight", HID)?.payload.noteId).toBeUndefined();
+    expect(env.server.record(BOOK, "note", HID)?.payload.body).toBe("hello");
+    const rejected = await pushRaw(env.server, env.session.credential ?? "", {
+      changeId: crypto.randomUUID(),
+      bookId: BOOK,
+      kind: "highlight",
+      id: HID,
+      baseVersion: 1,
+      deleted: false,
+      clientTime: "2026-01-01T00:00:00.000Z",
+      payload: { color: 1, quote: "quoted", prefix: "pre", suffix: "suf", noteId: HID, extras: {} },
+    });
+    expect(rejected.results[0]?.status).toBe("rejected");
+    expect(rejected.results[0]?.error?.code).toBe("bad_request");
     const before = env.server.pushes.length;
     await env.engine.deleteHighlight(BOOK, HID);
     await env.engine.flush();
     const batch = env.server.pushes[before];
     expect(batch?.changes).toHaveLength(2);
+    expect(batch?.changes.map((change) => change.id)).toEqual([HID, HID]);
+    expect(batch?.changes.map((change) => change.kind)).toEqual(["note", "highlight"]);
     expect(batch?.changes.map((change) => change.deleted)).toEqual([true, true]);
   });
 

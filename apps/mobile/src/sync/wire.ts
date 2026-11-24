@@ -61,8 +61,6 @@ export interface HighlightPayload extends PassageAnchor, ExtrasCarrier {
   /** 1 through 6. */
   color: number;
   rects?: number[][];
-  /** Link of record to the note, when the highlight has one. */
-  noteId?: string;
 }
 
 export interface NotePayload extends PassageAnchor, ExtrasCarrier {

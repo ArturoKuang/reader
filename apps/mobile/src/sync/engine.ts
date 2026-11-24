@@ -309,14 +309,14 @@ export class SyncEngine {
     await this.put(bookId, kind, id, payload, true);
   }
 
-  /** Highlight plus its note, one pending batch. `highlight.noteId` is the link of record. */
+  /**
+   * Highlight plus its note, one pending batch. The note's id is the
+   * highlight's id. Kind keeps the two records apart.
+   */
   async deleteHighlight(bookId: string, highlightId: string): Promise<void> {
     const highlight = this.findRecord(bookId, "highlight", highlightId);
-    const noteId = highlight?.payload.noteId;
-    if (typeof noteId === "string") {
-      const note = this.findRecord(bookId, "note", noteId);
-      this.stage(bookId, "note", noteId, note?.payload ?? { extras: {} }, true);
-    }
+    const note = this.findRecord(bookId, "note", highlightId);
+    if (note) this.stage(bookId, "note", highlightId, note.payload, true);
     this.stage(bookId, "highlight", highlightId, highlight?.payload ?? { extras: {} }, true);
     await this.persist();
     this.armFlushSoon();

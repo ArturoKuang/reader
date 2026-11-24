@@ -26,7 +26,6 @@ export function highlightToPayload(highlight: HighlightRecord): JsonObject {
     cfi: highlight.cfi,
     section: highlight.section,
     rects: highlight.rects,
-    noteId: highlight.noteId,
   });
   return asJsonObject(payload);
 }
