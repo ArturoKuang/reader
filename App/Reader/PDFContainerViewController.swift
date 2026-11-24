@@ -15,9 +15,9 @@ final class PDFContainerViewController: NSViewController {
     private var lockedZoom: Double?
     private let pdfView = ReaderPDFView()
     private let overlay = NoteOverlay()
-    private let findBar = NSSearchField()
-    private var findTop: NSLayoutConstraint?
-    private var pdfTopConstraint: NSLayoutConstraint?
+    private let titleStrip = PaneTitleStrip()
+    private var findBar: NSSearchField { titleStrip.findField }
+    private var stripTop: NSLayoutConstraint?
     private var matches: [PDFSelection] = []
     private var matchIndex = 0
     private var contactHost: NSHostingController<ContactSheetView>?
@@ -55,28 +55,23 @@ final class PDFContainerViewController: NSViewController {
         overlay.session = session
         overlay.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(overlay)
-        findBar.translatesAutoresizingMaskIntoConstraints = false
-        findBar.placeholderString = "Find"
         findBar.target = self
         findBar.action = #selector(findFromBar)
-        findBar.isHidden = true
-        view.addSubview(findBar)
-        let findConstraint = findBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8)
-        findTop = findConstraint
-        let pdfTop = pdfView.topAnchor.constraint(equalTo: view.topAnchor)
-        pdfTopConstraint = pdfTop
+        view.addSubview(titleStrip)
+        let stripConstraint = titleStrip.topAnchor.constraint(equalTo: view.topAnchor)
+        stripTop = stripConstraint
         NSLayoutConstraint.activate([
+            titleStrip.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            titleStrip.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            stripConstraint,
             pdfView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             pdfView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             pdfView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            pdfTop,
+            pdfView.topAnchor.constraint(equalTo: titleStrip.bottomAnchor),
             overlay.leadingAnchor.constraint(equalTo: pdfView.leadingAnchor),
             overlay.trailingAnchor.constraint(equalTo: pdfView.trailingAnchor),
             overlay.topAnchor.constraint(equalTo: pdfView.topAnchor),
             overlay.bottomAnchor.constraint(equalTo: pdfView.bottomAnchor),
-            findBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            findBar.widthAnchor.constraint(equalToConstant: 240),
-            findConstraint,
         ])
         applyDisplayMode()
         // Do not scale here. bounds are still zero, and PDFView would stick at minScaleFactor (10%).
@@ -100,6 +95,7 @@ final class PDFContainerViewController: NSViewController {
             self?.refreshAnnotations()
         }
         refreshAnnotations()
+        setPaneActive(publishesPosition)
     }
 
     deinit {
@@ -115,13 +111,14 @@ final class PDFContainerViewController: NSViewController {
     /// The PDF scroll view fills the full-height pane, which runs under the toolbar.
     /// Move the view down so the page starts at the bottom edge of the bar.
     private func placePDFBelowToolbar() {
-        guard findBar.isHidden, let window = view.window, let constraint = pdfTopConstraint else { return }
+        guard let window = view.window, let constraint = stripTop else { return }
         let topInWindow = view.convert(view.bounds, to: nil).maxY
         let overlap = topInWindow - window.contentLayoutRect.maxY
         let constant = overlap > 0.5 ? overlap : 0
         if abs(constraint.constant - constant) > 0.5 {
             constraint.constant = constant
         }
+        refreshPaneTitle()
         if let scroll = enclosingScrollClip(in: pdfView)?.enclosingScrollView {
             scroll.automaticallyAdjustsContentInsets = false
             if scroll.contentInsets.top != 0 {
@@ -333,13 +330,13 @@ final class PDFContainerViewController: NSViewController {
         return true
     }
 
-    func toggleFind() {
-        findBar.isHidden = false
-        findTop?.constant = 8
-        pdfTopConstraint?.isActive = false
-        let belowFind = pdfView.topAnchor.constraint(equalTo: findBar.bottomAnchor, constant: 4)
-        belowFind.isActive = true
-        pdfTopConstraint = belowFind
+    func setPaneActive(_ active: Bool) {
+        titleStrip.setActive(active)
+        refreshPaneTitle()
+    }
+
+    func focusFind() {
+        setPaneActive(true)
         if findBar.stringValue.isEmpty { findBar.stringValue = session.findQuery }
         view.layoutSubtreeIfNeeded()
         DispatchQueue.main.async { [weak self] in
@@ -347,6 +344,26 @@ final class PDFContainerViewController: NSViewController {
             self.view.window?.makeFirstResponder(self.findBar)
             self.findBar.currentEditor()?.selectAll(nil)
         }
+    }
+
+    func toggleFind() {
+        focusFind()
+    }
+
+    func setFindCount(_ text: String) {
+        titleStrip.setCount(text)
+    }
+
+    private func refreshPaneTitle() {
+        let title = session.bookURL.deletingPathExtension().lastPathComponent
+        titleStrip.show(title: title, page: "p. \(displayedPageNumber())")
+    }
+
+    private func displayedPageNumber() -> Int {
+        guard let page = pdfView.currentPage, let document = pdfView.document else { return session.page }
+        let index = document.index(for: page)
+        guard index != NSNotFound else { return session.page }
+        return index + 1
     }
 
     func search(_ query: String) {
@@ -427,7 +444,6 @@ final class PDFContainerViewController: NSViewController {
         }
         guard matches.indices.contains(matchIndex) else { return }
         session.searchIndex = matchIndex
-        findBar.placeholderString = "Find"
         (view.window?.windowController as? ReaderWindowController)?.showFindCount(matchIndex + 1, of: matches.count)
         let selection = matches[matchIndex]
         pdfView.setCurrentSelection(selection, animate: true)
@@ -687,6 +703,7 @@ final class PDFContainerViewController: NSViewController {
 
     @objc private func pageChanged() {
         overlay.needsLayout = true
+        refreshPaneTitle()
         guard publishesPosition else { return }
         guard let page = pdfView.currentPage, let document = pdfView.document else { return }
         let index = document.index(for: page)
