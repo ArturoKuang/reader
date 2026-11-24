@@ -1002,7 +1002,8 @@ final class NoteOverlay: NSView {
 
     @objc private func open(_ sender: NSClickGestureRecognizer) {
         guard let id = (sender.view as? NSImageView)?.identifier?.rawValue else { return }
-        if sender.modifierFlags.contains(.option) || NSEvent.modifierFlags.contains(.option) {
+        let option = NSEvent.modifierFlags.contains(.option) || NSApp.currentEvent?.modifierFlags.contains(.option) == true
+        if option {
             (window?.windowController as? ReaderWindowController)?.openInPane(id: id)
             return
         }
