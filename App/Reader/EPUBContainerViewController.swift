@@ -17,6 +17,9 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     private var spineLoaded = false
     private var acceptSpineReports = false
     private var pendingFlash: String?
+    private var lastFindQuery = ""
+    private var lastFindAt = Date.distantPast
+    private var didFindQuery = false
 
     init(session: ReaderSession) {
         self.session = session
@@ -148,17 +151,40 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         }
     }
     func search(_ query: String) {
-        findBar.stringValue = query
-        session.findQuery = query
-        find(forward: true)
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let now = Date()
+        if trimmed == lastFindQuery, now.timeIntervalSince(lastFindAt) < 0.25 {
+            return
+        }
+        let again = trimmed == lastFindQuery && didFindQuery
+        lastFindQuery = trimmed
+        lastFindAt = now
+        didFindQuery = true
+        findBar.stringValue = trimmed
+        session.findQuery = trimmed
+        runFind(forward: true, fresh: !again)
     }
 
-    @objc private func submitFind() { find(forward: true) }
+    @objc private func submitFind() {
+        search(findBar.stringValue.isEmpty ? session.findQuery : findBar.stringValue)
+    }
+
     func find(forward: Bool) {
+        runFind(forward: forward, fresh: false)
+    }
+
+    /// `fresh` selects the first match at or after the caret. Find Next passes false so the current hit is not chosen again.
+    private func runFind(forward: Bool, fresh: Bool) {
         let query = findBar.stringValue.isEmpty ? session.findQuery : findBar.stringValue
         session.findQuery = query
-        let escaped = query.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
-        webView?.evaluateJavaScript("window.find('\(escaped)', false, \(!forward), true)")
+        guard !query.isEmpty else { return }
+        let escaped = query
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+        webView?.evaluateJavaScript("window.readerFind && window.readerFind('\(escaped)', \(forward), \(fresh))")
     }
 
     func captureSelection() {
@@ -534,6 +560,59 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
           }
           return -1;
         }
+        window.readerFind = function(query, forward, fresh) {
+          if (!query) return false;
+          const needle = query.toLowerCase();
+          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+          const hits = [];
+          while (walker.nextNode()) {
+            const node = walker.currentNode;
+            const hay = (node.nodeValue || "").toLowerCase();
+            let from = 0;
+            while (from < hay.length) {
+              const at = hay.indexOf(needle, from);
+              if (at < 0) break;
+              hits.push({node: node, at: at, end: at + needle.length});
+              from = at + needle.length;
+            }
+          }
+          if (!hits.length) return false;
+          const selection = window.getSelection();
+          const atStart = window.scrollY <= 8 && (!selection || !selection.rangeCount || selection.isCollapsed);
+          let index = forward ? 0 : hits.length - 1;
+          if (!(fresh && atStart) && selection && selection.rangeCount && selection.focusNode) {
+            const cursorNode = selection.focusNode;
+            const backEdge = Math.min(selection.anchorOffset || 0, selection.focusOffset || 0);
+            const forwardEdge = Math.max(selection.anchorOffset || 0, selection.focusOffset || 0);
+            const cursorOffset = fresh ? backEdge : (forward ? forwardEdge : backEdge);
+            const step = forward ? 1 : -1;
+            let found = -1;
+            for (let i = forward ? 0 : hits.length - 1; i >= 0 && i < hits.length; i += step) {
+              const hit = hits[i];
+              let take = false;
+              if (hit.node === cursorNode) {
+                take = forward ? hit.at >= cursorOffset : hit.end <= cursorOffset;
+              } else if (cursorNode.compareDocumentPosition) {
+                const position = cursorNode.compareDocumentPosition(hit.node);
+                take = forward
+                  ? (position & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+                  : (position & Node.DOCUMENT_POSITION_PRECEDING) !== 0;
+              }
+              if (take) { found = i; break; }
+            }
+            if (found >= 0) index = found;
+          }
+          const hit = hits[index];
+          const range = document.createRange();
+          range.setStart(hit.node, hit.at);
+          range.setEnd(hit.node, Math.min(hit.end, (hit.node.nodeValue || "").length));
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+          const holder = hit.node.parentElement;
+          if (holder && holder.scrollIntoView) holder.scrollIntoView({block: "center"});
+          return true;
+        };
         window.readerPaint = function(marks) {
           document.querySelectorAll("span[class^='reader-hl-']").forEach(span => {
             if (!span.parentNode) return;

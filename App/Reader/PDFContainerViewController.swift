@@ -15,6 +15,9 @@ final class PDFContainerViewController: NSViewController {
     private var pdfTopConstraint: NSLayoutConstraint?
     private var matches: [PDFSelection] = []
     private var matchIndex = 0
+    private var pickInitialMatch = false
+    private var lastFindQuery = ""
+    private var lastFindAt = Date.distantPast
     private var contactHost: NSHostingController<ContactSheetView>?
     private var annotations: [PDFAnnotation] = []
     private var highlightIDs: [ObjectIdentifier: String] = [:]
@@ -336,10 +339,22 @@ final class PDFContainerViewController: NSViewController {
     }
 
     func search(_ query: String) {
-        findBar.stringValue = query
-        session.findQuery = query
-        matches = []
-        runFind(forward: true)
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let now = Date()
+        if trimmed == lastFindQuery, now.timeIntervalSince(lastFindAt) < 0.25 {
+            return
+        }
+        let again = trimmed == lastFindQuery && !matches.isEmpty
+        lastFindQuery = trimmed
+        lastFindAt = now
+        findBar.stringValue = trimmed
+        session.findQuery = trimmed
+        if again {
+            stepMatch(forward: true)
+        } else {
+            startFind(trimmed)
+        }
     }
 
     @objc private func foundMatch(_ notification: Notification) {
@@ -347,11 +362,15 @@ final class PDFContainerViewController: NSViewController {
         guard let selection = notification.userInfo?["PDFDocumentFoundSelection"] as? PDFSelection else { return }
         matches.append(selection)
         publishHits()
-        if matches.count == 1 { showCurrentMatch() }
     }
 
     @objc private func findFinished(_ notification: Notification) {
         guard ownsFind(notification) else { return }
+        if pickInitialMatch, let document = pdfView.document {
+            let pages = matches.map { pageNumber($0, in: document) }
+            matchIndex = FindSelection.index(starts: pages, cursor: max(session.page, 1)) ?? 0
+            pickInitialMatch = false
+        }
         publishHits()
         showCurrentMatch()
     }
@@ -388,35 +407,39 @@ final class PDFContainerViewController: NSViewController {
         pdfView.scrollSelectionToVisible(nil)
     }
 
-    @objc private func findFromBar() { runFind(forward: true) }
-    func findNext() { runFind(forward: true) }
-    func findPrevious() { runFind(forward: false) }
+    @objc private func findFromBar() {
+        search(findBar.stringValue.isEmpty ? session.findQuery : findBar.stringValue)
+    }
+    func findNext() { stepMatch(forward: true) }
+    func findPrevious() { stepMatch(forward: false) }
 
-    private func runFind(forward: Bool) {
+    private func startFind(_ query: String) {
+        guard let document = pdfView.document else { return }
+        matches = []
+        matchIndex = 0
+        pickInitialMatch = true
+        session.searchHits = []
+        if session.sidebar != .searchResults { session.sidebarBeforeSearch = session.sidebar }
+        session.sidebar = .searchResults
+        document.cancelFindString()
+        document.beginFindString(query, withOptions: .caseInsensitive)
+    }
+
+    /// Find Next moves one match. A new search must not call this before the first hit is shown.
+    private func stepMatch(forward: Bool) {
         let query = findBar.stringValue.isEmpty ? session.findQuery : findBar.stringValue
-        session.findQuery = query
-        guard !query.isEmpty, let document = pdfView.document else { return }
+        guard !query.isEmpty else { return }
         if matches.isEmpty || matches.first?.string?.localizedCaseInsensitiveContains(query) != true {
-            matches = []
-            matchIndex = 0
-            session.searchHits = []
-            if session.sidebar != .searchResults { session.sidebarBeforeSearch = session.sidebar }
-            session.sidebar = .searchResults
-            document.cancelFindString()
-            document.beginFindString(query, withOptions: .caseInsensitive)
+            lastFindQuery = query
+            lastFindAt = Date()
+            session.findQuery = query
+            startFind(query)
             return
-        } else if forward {
-            matchIndex = matches.isEmpty ? 0 : (matchIndex + 1) % matches.count
-        } else {
-            matchIndex = matches.isEmpty ? 0 : (matchIndex - 1 + matches.count) % matches.count
         }
-        guard matches.indices.contains(matchIndex) else { return }
+        matchIndex = FindSelection.step(count: matches.count, current: matchIndex, forward: forward)
         session.searchIndex = matchIndex
-        findBar.placeholderString = "Find"
         (view.window?.windowController as? ReaderWindowController)?.showFindCount(matchIndex + 1, of: matches.count)
-        let selection = matches[matchIndex]
-        pdfView.setCurrentSelection(selection, animate: true)
-        pdfView.scrollSelectionToVisible(nil)
+        showCurrentMatch()
     }
 
     func captureSelection(showBar: Bool = true) {

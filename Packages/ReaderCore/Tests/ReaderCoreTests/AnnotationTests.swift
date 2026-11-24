@@ -298,4 +298,14 @@ final class AnnotationTests: XCTestCase {
         XCTAssertNotNil(HighlightPaint.occurrence(of: byChapter, in: text, chapter: 1, spineIndex: nil))
         XCTAssertNil(HighlightPaint.occurrence(of: byChapter, in: text, chapter: 2, spineIndex: nil))
     }
+
+    func testFindSelectsTheFirstMatchInsteadOfTheNext() {
+        XCTAssertEqual(FindSelection.index(starts: [10, 40, 80], cursor: 0), 0)
+        XCTAssertEqual(FindSelection.index(starts: [10, 40], cursor: 10), 0)
+        XCTAssertEqual(FindSelection.index(starts: [1, 2], cursor: 1), 0)
+        XCTAssertEqual(FindSelection.index(starts: [10, 40], cursor: 15), 1)
+        XCTAssertEqual(FindSelection.index(starts: [10, 40], cursor: 90), 0)
+        XCTAssertEqual(FindSelection.step(count: 3, current: 0, forward: true), 1)
+        XCTAssertNil(FindSelection.index(starts: [], cursor: 0))
+    }
 }
