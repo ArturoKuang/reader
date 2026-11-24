@@ -1148,7 +1148,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     }
     @objc func toggleConceptMarkers(_ sender: Any?) {
         session.showConceptMarkers.toggle()
-        session.onAnnotationsChanged?()
+        session.publishAnnotationsChanged()
         session.onSaveVaultState?()
     }
     @objc func copyCitation(_ sender: Any?) {

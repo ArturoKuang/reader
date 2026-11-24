@@ -47,7 +47,9 @@ final class PDFContainerViewController: NSViewController {
         pdfView.backgroundColor = .windowBackgroundColor
         pdfView.minScaleFactor = 0.1
         pdfView.maxScaleFactor = 8
-        pdfView.document = session.pdfDocument
+        // Each pane owns a document. A shared PDFDocument only redraws annotations in one PDFView.
+        pdfView.document = PDFDocument(data: session.bookData) ?? session.pdfDocument
+        applyDisplayedRotations()
         view.addSubview(pdfView)
         overlay.pdfView = pdfView
         overlay.session = session
@@ -99,12 +101,14 @@ final class PDFContainerViewController: NSViewController {
         pdfView.session = session
         pdfView.prepareSelection = { [weak self] in self?.captureSelection(showBar: false) }
         pdfView.beginFind = { [weak self] in self?.toggleFind() }
-        let previousAnnotations = session.onAnnotationsChanged
-        session.onAnnotationsChanged = { [weak self] in
-            previousAnnotations?()
+        session.watchAnnotations(self) { [weak self] in
             self?.refreshAnnotations()
         }
         refreshAnnotations()
+    }
+
+    deinit {
+        session.unwatchAnnotations(self)
     }
 
     override func viewDidLayout() {
@@ -475,6 +479,7 @@ final class PDFContainerViewController: NSViewController {
     }
 
     func refreshAnnotations() {
+        applyDisplayedRotations()
         for annotation in annotations {
             annotation.page?.removeAnnotation(annotation)
         }
@@ -513,6 +518,14 @@ final class PDFContainerViewController: NSViewController {
         }
         addConceptMarkers(to: document)
         overlay.needsLayout = true
+    }
+
+    private func applyDisplayedRotations() {
+        guard let document = pdfView.document else { return }
+        for (key, rotation) in session.package.state.rotations {
+            guard let number = Int(key), let page = document.page(at: number - 1) else { continue }
+            if page.rotation != rotation { page.rotation = rotation }
+        }
     }
 
     private func addConceptMarkers(to document: PDFDocument) {

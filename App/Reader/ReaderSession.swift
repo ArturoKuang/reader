@@ -89,6 +89,7 @@ final class ReaderSession: ObservableObject {
     var onDirty: (() -> Void)?
     var onPageChange: (() -> Void)?
     var onAnnotationsChanged: (() -> Void)?
+    private var annotationObservers: [ObjectIdentifier: () -> Void] = [:]
     var onToast: ((String?) -> Void)?
     weak var undoManager: UndoManager?
     /// True when `state.json` already existed. A first open fits the page width.
@@ -103,6 +104,22 @@ final class ReaderSession: ObservableObject {
     private var viewStateTimer: Timer?
 
     var isPDF: Bool { bookURL.pathExtension.lowercased() == "pdf" }
+
+    /// Each pane registers itself. A new highlight then repaints every view of this book.
+    func watchAnnotations(_ owner: AnyObject, perform update: @escaping () -> Void) {
+        annotationObservers[ObjectIdentifier(owner)] = update
+    }
+
+    func unwatchAnnotations(_ owner: AnyObject) {
+        annotationObservers.removeValue(forKey: ObjectIdentifier(owner))
+    }
+
+    func publishAnnotationsChanged() {
+        onAnnotationsChanged?()
+        for update in annotationObservers.values {
+            update()
+        }
+    }
     var notes: [NoteEntry] { package.notes.notes }
     var words: [WordEntry] { package.words.words }
     var highlights: [HighlightEntry] { package.highlights.highlights }
@@ -315,7 +332,7 @@ final class ReaderSession: ObservableObject {
             session.deleteHighlight(id: entry.id)
         }
         undoManager?.setActionName("Remove Highlight")
-        onAnnotationsChanged?()
+        publishAnnotationsChanged()
         dirty()
     }
 
@@ -441,6 +458,7 @@ final class ReaderSession: ObservableObject {
         pdfPage.rotation = next
         package.state.rotations[String(page)] = next
         dirty()
+        publishAnnotationsChanged()
     }
 
     func applyRotations() {
@@ -840,7 +858,7 @@ final class ReaderSession: ObservableObject {
         }
         undoManager?.setActionName(name)
         annotationRevision += 1
-        onAnnotationsChanged?()
+        publishAnnotationsChanged()
         dirty()
     }
 
@@ -900,7 +918,7 @@ final class ReaderSession: ObservableObject {
         let previous = notes.first(where: { $0.id == id })?.body
         applyPendingNote(id: id, body: body)
         annotationRevision += 1
-        onAnnotationsChanged?()
+        publishAnnotationsChanged()
         dirty()
         undoManager?.registerUndo(withTarget: self) { session in
             if let previous {
@@ -908,7 +926,7 @@ final class ReaderSession: ObservableObject {
             } else {
                 session.applyPendingNote(id: id, body: "")
                 session.annotationRevision += 1
-                session.onAnnotationsChanged?()
+                session.publishAnnotationsChanged()
                 session.dirty()
             }
         }
@@ -934,7 +952,7 @@ final class ReaderSession: ObservableObject {
         if coalesced {
             for (id, body) in pending { applyPendingNote(id: id, body: body) }
             annotationRevision += 1
-            onAnnotationsChanged?()
+            publishAnnotationsChanged()
             dirty()
         } else {
             editAnnotations("Edit Note") {
@@ -1033,7 +1051,7 @@ final class ReaderSession: ObservableObject {
     func toggleMarginNotes() {
         showMarginNotes.toggle()
         package.state.showMarginNotes = showMarginNotes
-        onAnnotationsChanged?()
+        publishAnnotationsChanged()
         saveViewQuietly()
     }
 

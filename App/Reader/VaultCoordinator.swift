@@ -173,7 +173,7 @@ final class VaultCoordinator {
         loadedBlockIDs = ids
         session.wordsFromVault(loadVocabulary(title: session.bookURL.deletingPathExtension().lastPathComponent))
         session.objectWillChange.send()
-        session.onAnnotationsChanged?()
+        session.publishAnnotationsChanged()
     }
 
     func scheduleFlush(_ session: ReaderSession) {

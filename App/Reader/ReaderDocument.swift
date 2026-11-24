@@ -97,7 +97,7 @@ final class ReaderDocument: NSDocument {
     /// Autosave writes the sidecar only. The book file is never replaced.
     func reveal(_ link: ReaderLink) {
         session?.pendingReaderLink = link
-        session?.onAnnotationsChanged?()
+        session?.publishAnnotationsChanged()
     }
 
     override func save(to url: URL, ofType typeName: String, for saveOperation: NSDocument.SaveOperationType, completionHandler: @escaping (Error?) -> Void) {
