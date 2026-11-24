@@ -15,7 +15,7 @@ export interface ViewerHighlight {
 }
 
 export type HostToViewer =
-  | { type: "open-pdf"; base64: string }
+  | { type: "open-pdf"; base64: string; workerSource: string }
   | { type: "open-epub"; base64: string }
   | { type: "restore"; highlights: ViewerHighlight[] }
   | { type: "paint"; highlight: ViewerHighlight }

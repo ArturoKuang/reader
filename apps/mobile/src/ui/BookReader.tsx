@@ -16,6 +16,7 @@ import { addHighlight, removeHighlight, saveNote } from "../highlight/store";
 import { applyLocated } from "../reader/applyLocated";
 import { parseViewerMessage } from "../reader/bridge";
 import type { HostToViewer, ViewerHighlight } from "../reader/bridge";
+import { File } from "expo-file-system";
 import { readAssetBase64, viewerRoot } from "../reader/installViewer";
 import { epubBook, epubModule, pdfBook, pdfModule, sampleTitles } from "../reader/samples";
 import { emptyShelf, parseShelf, serializeShelf, shelfKey } from "../reader/shelf";
@@ -90,6 +91,7 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
   const [shelf, setShelf] = useState<BookShelf>(emptyShelf());
   const [uri, setUri] = useState<string | null>(null);
   const [base64, setBase64] = useState<string | null>(null);
+  const [workerSource, setWorkerSource] = useState<string | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
@@ -116,10 +118,13 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
         const saved = parseShelf(await AsyncStorage.getItem(shelfKey(book.fingerprint)));
         const root = await viewerRoot();
         const encoded = await readAssetBase64(format === "pdf" ? pdfModule : epubModule);
+        const worker =
+          format === "pdf" ? await new File(root, "pdfjs", "pdf.worker.min.mjs").text() : null;
         if (cancelled) return;
         shelfRef.current = saved;
         setShelf(saved);
         setBase64(encoded);
+        setWorkerSource(worker);
         setUri(fileUri(root.uri, format === "pdf" ? "pdf.html" : "epub.html"));
       } catch (cause) {
         if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
@@ -139,7 +144,13 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
     const message = parseViewerMessage(raw);
     if (!message) return;
     if (message.type === "ready") {
-      if (base64) send(format === "pdf" ? { type: "open-pdf", base64 } : { type: "open-epub", base64 });
+      if (!base64) return;
+      if (format === "pdf") {
+        if (!workerSource) return;
+        send({ type: "open-pdf", base64, workerSource });
+      } else {
+        send({ type: "open-epub", base64 });
+      }
       return;
     }
     if (message.type === "corpus") {
@@ -256,7 +267,7 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
       </View>
       <Text style={styles.caption}>Long-press a word. Color {shelf.lastColor} is applied at once.</Text>
       {error ? <Text style={styles.error}>{error}</Text> : null}
-      {uri && base64 ? (
+      {uri && base64 && (format === "epub" || workerSource) ? (
         <ReaderWeb
           style={styles.web}
           originWhitelist={["*"]}

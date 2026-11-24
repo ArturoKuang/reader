@@ -6,6 +6,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const srcRoot = join(root, "node_modules", "foliate-js");
 const outRoot = join(root, "assets", "vendor");
 
+// pdfjs-dist 4.10.38 legacy still calls Promise.try. toHex is guarded in that build.
 const promiseTry = `if (typeof Promise.try !== "function") {
   Promise.try = function (callbackfn) {
     "use strict";
@@ -21,8 +22,8 @@ const promiseTry = `if (typeof Promise.try !== "function") {
 `;
 
 const files = [
-  ["pdfjs/pdf.min.mjs", join(root, "node_modules/pdfjs-dist/build/pdf.min.mjs"), promiseTry],
-  ["pdfjs/pdf.worker.min.mjs", join(root, "node_modules/pdfjs-dist/build/pdf.worker.min.mjs"), promiseTry],
+  ["pdfjs/pdf.min.mjs", join(root, "node_modules/pdfjs-dist/legacy/build/pdf.min.mjs"), promiseTry],
+  ["pdfjs/pdf.worker.min.mjs", join(root, "node_modules/pdfjs-dist/legacy/build/pdf.worker.min.mjs"), promiseTry],
   ...[
     "view.js",
     "epubcfi.js",

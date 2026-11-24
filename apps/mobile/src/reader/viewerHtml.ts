@@ -255,8 +255,6 @@ if (typeof Promise.try !== "function") {
 </script>
 <script type="module">
 import * as pdfjs from "./pdfjs/pdf.min.mjs";
-const workerUrl = new URL("./pdfjs/pdf.worker.min.mjs", import.meta.url);
-pdfjs.GlobalWorkerOptions.workerSrc = workerUrl.href;
 ${shared}
 const pages = [];
 const highlights = new Map();
@@ -348,13 +346,9 @@ function selectionFrom(range) {
     rects,
   });
 }
-async function openPdf(base64) {
-  try {
-    const source = await (await fetch(workerUrl)).text();
-    pdfjs.GlobalWorkerOptions.workerSrc = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
-  } catch (error) {
-    pdfjs.GlobalWorkerOptions.workerSrc = workerUrl.href;
-  }
+async function openPdf(base64, workerSource) {
+  const blob = new Blob([workerSource], { type: "text/javascript" });
+  pdfjs.GlobalWorkerOptions.workerSrc = URL.createObjectURL(blob);
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
@@ -396,7 +390,7 @@ async function openPdf(base64) {
 window.__hostMessage = async (raw) => {
   const message = JSON.parse(raw);
   try {
-    if (message.type === "open-pdf") await openPdf(message.base64);
+    if (message.type === "open-pdf") await openPdf(message.base64, message.workerSource);
     else if (message.type === "restore") message.highlights.forEach(paint);
     else if (message.type === "paint") paint(message.highlight);
     else if (message.type === "remove") removeHighlight(message.id);
