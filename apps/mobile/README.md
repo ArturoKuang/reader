@@ -1,6 +1,8 @@
 # Reader for iPhone and Android
 
-Expo spike for highlighting. The Mac app and `Packages/ReaderCore` are unchanged. Shared schemas will live in `spec/` later; until those files exist, the phone keeps its own copy of the record and anchor types.
+Expo spike for highlighting PDF and EPUB. The Mac app and `Packages/ReaderCore` are unchanged. Shared schemas will live in `spec/` later; until those files exist, the phone keeps its own copy of the record and anchor types.
+
+A long-press on a word highlights it in the last-used color (color 1 the first time). The bottom sheet can change that color, save a separate note, or remove the highlight. PDF.js draws the text layer locally. foliate-js draws the EPUB locally. Neither library is loaded from a CDN.
 
 ## Contract
 
