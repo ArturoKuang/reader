@@ -134,6 +134,12 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         toolbar.allowsUserCustomization = false
         toolbar.displayMode = .iconOnly
         window?.toolbar = toolbar
+        let indexes = toolbar.items.enumerated().compactMap { index, item in
+            item.itemIdentifier == .search || item.itemIdentifier == .findCount ? index : nil
+        }.reversed()
+        for index in indexes {
+            toolbar.removeItem(at: index)
+        }
     }
 
     private func installToast() {
@@ -306,11 +312,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     // MARK: Toolbar
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .findCount, .vault, .inspectorTrackingSeparator, .toggleInspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .vault, .inspectorTrackingSeparator, .toggleInspector]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .findCount, .vault, .inspectorTrackingSeparator, .toggleInspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .vault, .inspectorTrackingSeparator, .toggleInspector]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
@@ -757,7 +763,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     }
 
     @objc func find(_ sender: Any?) {
-        searchItem?.beginSearchInteraction()
+        pdfController?.focusFind()
+        epubController?.focusFind()
     }
 
     @objc func submitSearch(_ sender: Any?) {
@@ -880,7 +887,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             pane.epub?.ownsFindSession = false
         }
         adoptActiveDocument()
-        searchItem?.searchField.stringValue = session.findQuery
+        for (index, pane) in readingPanes.enumerated() {
+            let active = index == paneHost.activeIndex
+            pane.pdf?.setPaneActive(active)
+            pane.epub?.setPaneActive(active)
+        }
         applyChrome()
         pdfController?.publishCurrentPosition()
         epubController?.publishCurrentPosition()
@@ -1047,12 +1058,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
 
     func showFindCount(_ index: Int, of total: Int) {
         let text = total > 0 ? "\(index) of \(total)" : ""
-        if #available(macOS 26, *) {
-            searchItem?.badge = text.isEmpty ? nil : NSItemBadge.text(text)
-            findCountLabel.stringValue = ""
-        } else {
-            findCountLabel.stringValue = text
-        }
+        pdfController?.setFindCount(text)
+        epubController?.setFindCount(text)
     }
 
     func searchFieldDidEndSearching(_ sender: NSSearchField) {
@@ -1060,10 +1067,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             session.setSidebar(previous)
             session.sidebarBeforeSearch = nil
         }
-        if #available(macOS 26, *) {
-            searchItem?.badge = nil
-        }
-        findCountLabel.stringValue = ""
+        pdfController?.setFindCount("")
+        epubController?.setFindCount("")
     }
     @objc func findNext(_ sender: Any?) { pdfController?.findNext(); epubController?.find(forward: true) }
     @objc func findPrevious(_ sender: Any?) { pdfController?.findPrevious(); epubController?.find(forward: false) }

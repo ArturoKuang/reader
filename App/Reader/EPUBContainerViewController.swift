@@ -12,8 +12,9 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     var publishesPosition = true
     var ownsFindSession = false
     private var webView: WKWebView?
-    private let findBar = NSSearchField()
-    private var findTop: NSLayoutConstraint?
+    private let titleStrip = PaneTitleStrip()
+    private var findBar: NSSearchField { titleStrip.findField }
+    private var stripTop: NSLayoutConstraint?
     private var fontScale: Double = 1
     private var contactHost: NSHostingController<EPUBContactSheet>?
     private var spineLoaded = false
@@ -42,28 +43,26 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         webView.translatesAutoresizingMaskIntoConstraints = false
         self.webView = webView
         view.addSubview(webView)
-        findBar.translatesAutoresizingMaskIntoConstraints = false
-        findBar.placeholderString = "Find"
         findBar.target = self
         findBar.action = #selector(submitFind)
-        findBar.isHidden = true
-        view.addSubview(findBar)
-        let findConstraint = findBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: -40)
-        findTop = findConstraint
+        view.addSubview(titleStrip)
+        let stripConstraint = titleStrip.topAnchor.constraint(equalTo: view.topAnchor)
+        stripTop = stripConstraint
         NSLayoutConstraint.activate([
+            titleStrip.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            titleStrip.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            stripConstraint,
             webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            webView.topAnchor.constraint(equalTo: findBar.bottomAnchor),
-            findBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            findBar.widthAnchor.constraint(equalToConstant: 240),
-            findConstraint,
+            webView.topAnchor.constraint(equalTo: titleStrip.bottomAnchor),
         ])
         fontScale = session.zoom
         session.watchAnnotations(self) { [weak self] in
             guard let self else { return }
             self.webView?.evaluateJavaScript("window.readerPaint && window.readerPaint(\(self.highlightScript()))")
         }
+        setPaneActive(publishesPosition)
         loadSpine()
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, event.window == self.view.window, self.view.window?.firstResponder is WKWebView else { return event }
@@ -148,9 +147,25 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     }
     func nextPage() { showSpine(index: min(session.page, max(session.pageCount - 1, 0))) }
     func previousPage() { showSpine(index: max(session.page - 2, 0)) }
-    func toggleFind() {
-        findBar.isHidden = false
-        findTop?.constant = 8
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        guard let window = view.window, let constraint = stripTop else { return }
+        let topInWindow = view.convert(view.bounds, to: nil).maxY
+        let overlap = topInWindow - window.contentLayoutRect.maxY
+        let constant = overlap > 0.5 ? overlap : 0
+        if abs(constraint.constant - constant) > 0.5 {
+            constraint.constant = constant
+        }
+        refreshPaneTitle()
+    }
+
+    func setPaneActive(_ active: Bool) {
+        titleStrip.setActive(active)
+        refreshPaneTitle()
+    }
+
+    func focusFind() {
+        setPaneActive(true)
         if findBar.stringValue.isEmpty { findBar.stringValue = session.findQuery }
         view.layoutSubtreeIfNeeded()
         DispatchQueue.main.async { [weak self] in
@@ -158,6 +173,19 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             self.view.window?.makeFirstResponder(self.findBar)
             self.findBar.currentEditor()?.selectAll(nil)
         }
+    }
+
+    func toggleFind() {
+        focusFind()
+    }
+
+    func setFindCount(_ text: String) {
+        titleStrip.setCount(text)
+    }
+
+    private func refreshPaneTitle() {
+        let title = session.bookURL.deletingPathExtension().lastPathComponent
+        titleStrip.show(title: title, page: "p. \(displayedSpineIndex + 1)")
     }
     func search(_ query: String) {
         findBar.stringValue = query
@@ -342,6 +370,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         let placement = placements[index]
         let title = placement.title.isEmpty ? epub.spine[index].title : placement.title
         displayedSpineIndex = index
+        refreshPaneTitle()
         guard publishesPosition else { return }
         session.updatePage(index + 1, count: count, section: title)
     }
