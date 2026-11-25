@@ -751,13 +751,6 @@ struct SettingsView: View {
         .onReceive(NotificationCenter.default.publisher(for: .kokoroStatusDidChange)) { _ in
             Task { kokoroStatus = await KokoroEngineService.shared.currentStatus() }
         }
-        // The player saves speed and voice too; keep this copy from overwriting them.
-        .onReceive(NotificationCenter.default.publisher(for: .ttsSettingsDidChange)) { notification in
-            if (notification.userInfo?["fromSettingsView"] as? Bool) == true { return }
-            let saved = SettingsStore.load()
-            settings.ttsRateMultiplier = saved.ttsRateMultiplier
-            settings.ttsVoiceIdentifier = saved.ttsVoiceIdentifier
-        }
         .tabItem { Text("General") }
         Form {
             Section("Default") {
@@ -831,6 +824,13 @@ struct SettingsView: View {
                     userInfo: ["fromSettingsView": true]
                 )
             }
+        }
+        // Attached to the TabView so player speed/voice updates apply even while viewing another tab.
+        .onReceive(NotificationCenter.default.publisher(for: .ttsSettingsDidChange)) { notification in
+            if (notification.userInfo?["fromSettingsView"] as? Bool) == true { return }
+            let saved = SettingsStore.load()
+            settings.ttsRateMultiplier = saved.ttsRateMultiplier
+            settings.ttsVoiceIdentifier = saved.ttsVoiceIdentifier
         }
         .onChange(of: keyField) { old, _ in
             guard let old else { return }

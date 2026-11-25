@@ -79,7 +79,7 @@ actor KokoroEngineService {
                 let dataFile = url.appendingPathComponent("coremldata.bin")
                 if FileManager.default.fileExists(atPath: dataFile.path) {
                     validBundles += 1
-                    if validBundles >= 10 { return true }
+                    if validBundles >= 12 { return true }
                 }
                 enumerator.skipDescendants()
             }

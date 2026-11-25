@@ -566,7 +566,11 @@ final class TTSEngine {
             do {
                 let clip: KokoroSynthesizedClip
                 if let joinedTask {
-                    clip = try await joinedTask.value
+                    clip = try await withTaskCancellationHandler {
+                        try await joinedTask.value
+                    } onCancel: {
+                        joinedTask.cancel()
+                    }
                 } else {
                     clip = try await svc.synthesize(
                         sliceText: sliceText,
@@ -879,7 +883,6 @@ final class TTSEngine {
         playbackToken &+= 1
         hasScheduledBuffer = false
         isBufferPaused = false
-        finishedWhilePaused = false
         needsSynthesisOnResume = true
         stopSyncTimer()
         guard state.isPresented, state.status == .playing else { return }
