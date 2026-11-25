@@ -726,6 +726,7 @@ struct SettingsView: View {
     @State private var anthropicKey = KeychainStore.load(account: "anthropic") ?? ""
     @State private var keyStatus = ""
     @State private var detectingCLIs = false
+    @State private var voiceGroups: [TTSVoiceCatalog.Group] = []
     @State private var openInspector = UserDefaults.standard.object(forKey: "reader.openInspector") as? Bool ?? true
     @FocusState private var keyField: String?
 
@@ -739,8 +740,31 @@ struct SettingsView: View {
                         UserDefaults.standard.set(value, forKey: "reader.openInspector")
                     }
             }
+            Section("Read Aloud") {
+                Picker("Speed", selection: $settings.ttsRateMultiplier) {
+                    ForEach(TTSSpeedPreset.allCases, id: \.rawValue) { Text($0.label).tag($0.rawValue) }
+                }
+                Picker("Voice", selection: $settings.ttsVoiceIdentifier) {
+                    Text("System Default").tag(String?.none)
+                    ForEach(voiceGroups, id: \.title) { group in
+                        Section(group.title) {
+                            ForEach(group.voices, id: \.identifier) { Text($0.label).tag(String?.some($0.identifier)) }
+                        }
+                    }
+                    if let saved = settings.ttsVoiceIdentifier, !voiceGroups.contains(where: { $0.voices.contains { $0.identifier == saved } }) {
+                        Text("Unavailable voice").tag(String?.some(saved))
+                    }
+                }
+            }
         }
         .formStyle(.grouped)
+        .onAppear { voiceGroups = TTSVoiceCatalog.groups(including: settings.ttsVoiceIdentifier) }
+        // The player saves speed and voice too; keep this copy from overwriting them.
+        .onReceive(NotificationCenter.default.publisher(for: .ttsSettingsDidChange)) { _ in
+            let saved = SettingsStore.load()
+            settings.ttsRateMultiplier = saved.ttsRateMultiplier
+            settings.ttsVoiceIdentifier = saved.ttsVoiceIdentifier
+        }
         .tabItem { Text("General") }
         Form {
             Section("Default") {

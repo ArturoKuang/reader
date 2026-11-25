@@ -31,6 +31,8 @@ final class ReaderSession: ObservableObject {
     /// AppKit/WebKit refresh the current passage, then run the action. PDF is synchronous.
     var onCaptureSelection: ((@escaping () -> Void) -> Void)?
     var onSaveVaultState: (() -> Void)?
+    /// Starts Read Aloud at `selection`.
+    var onReadFromSelection: (() -> Void)?
     var onInsertConcept: ((Concept) -> Void)?
     @Published var vaultNotesFolder = "notes"
     @Published var vaultVocabularyFile = ""

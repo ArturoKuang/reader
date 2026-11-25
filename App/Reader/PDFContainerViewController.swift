@@ -389,6 +389,10 @@ final class PDFContainerViewController: NSViewController {
         pdfView.scrollSelectionToVisible(nil)
     }
 
+    var hasActiveSelection: Bool {
+        pdfView.currentSelection?.string?.contains { !$0.isWhitespace } ?? false
+    }
+
     func captureSelection(showBar: Bool = true) {
         guard let selection = pdfView.currentSelection, let text = selection.string?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return }
         let page = selection.pages.first

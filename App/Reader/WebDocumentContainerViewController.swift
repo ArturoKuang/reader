@@ -86,6 +86,8 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
             guard let self, event.window == self.view.window, self.view.window?.firstResponder is WKWebView else { return event }
             let shift = event.modifierFlags.contains(.shift)
             if event.keyCode == 49 {
+                // The window's monitor turns Space into play/pause while the player is open.
+                if (self.view.window?.windowController as? ReaderWindowController)?.isTTSPresented == true { return event }
                 self.scrollPage(forward: !shift)
                 return nil
             }
@@ -193,6 +195,13 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
         session.findQuery = query
         let escaped = query.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
         webView?.evaluateJavaScript("window.find('\(escaped)', false, \(!forward), true)")
+    }
+
+    func hasActiveSelection(completion: @escaping (Bool) -> Void) {
+        guard let webView else { return completion(false) }
+        webView.evaluateJavaScript("String(document.getSelection()).trim().length > 0") { result, _ in
+            completion(result as? Bool ?? false)
+        }
     }
 
     /// Reads the DOM selection and only then runs `completion`, on the main queue.

@@ -32,6 +32,12 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     private var previousSidebar: SidebarMode = .thumbnails
     private let toastView = PassThroughView()
     private let toastLabel = NSTextField(labelWithString: "")
+    private var toastBottom: NSLayoutConstraint?
+    private let tts = TTSEngine()
+    private lazy var ttsPlayer = TTSPlayerHost(pane: center.view)
+    /// The selection playback last started from, so a new one jumps instead of closing.
+    private var ttsStartSelection: String?
+    private var appearanceObservation: NSKeyValueObservation?
 
     init(session: ReaderSession) {
         self.session = session
@@ -72,6 +78,9 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         session.onRevealInObsidian = { [weak self] id in
             self?.revealObsidian(id: id)
         }
+        session.onReadFromSelection = { [weak self] in
+            self?.startReading(from: self?.session.selection)
+        }
         session.onCaptureSelection = { [weak self] done in
             guard let self else { done(); return }
             if let web = self.webController {
@@ -82,6 +91,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             }
         }
         installMonitor()
+        configureReadAloud()
         session.onPageChange = { [weak self] in
             self?.document.map { ($0 as? ReaderDocument)?.refreshSubtitle() }
             self?.pdfController?.consumePendingJump()
@@ -147,13 +157,15 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         toastLabel.translatesAutoresizingMaskIntoConstraints = false
         toastView.addSubview(toastLabel)
         content.addSubview(toastView)
+        let bottom = toastView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -32)
+        toastBottom = bottom
         NSLayoutConstraint.activate([
             toastLabel.leadingAnchor.constraint(equalTo: toastView.leadingAnchor, constant: 14),
             toastLabel.trailingAnchor.constraint(equalTo: toastView.trailingAnchor, constant: -14),
             toastLabel.topAnchor.constraint(equalTo: toastView.topAnchor, constant: 8),
             toastLabel.bottomAnchor.constraint(equalTo: toastView.bottomAnchor, constant: -8),
             toastView.centerXAnchor.constraint(equalTo: content.centerXAnchor),
-            toastView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -32),
+            bottom,
         ])
     }
 
@@ -171,6 +183,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     private func installMonitor() {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, event.window === self.window else { return event }
+            // Read before dismissing: an Escape that closes the bar leaves the player open.
+            let selectionBarWasShowing = self.selectionBar.isShowing
             if event.keyCode == 53 {
                 self.dismissSelectionBar()
                 if self.session.sidebar == .searchResults {
@@ -184,12 +198,23 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
                 self.stopSlideshow()
                 return nil
             }
+            let plain = event.modifierFlags.isDisjoint(with: [.command, .option, .control])
+            // Space belongs to the player only while it is open; otherwise it scrolls.
+            if event.keyCode == 49, plain, self.isTTSPresented, !self.isTextInputFocused {
+                if !event.isARepeat { self.tts.togglePlayPause() }
+                return nil
+            }
             let position = self.pdfController?.currentPosition() ?? self.webController?.currentPosition() ?? ReadingPosition(page: self.session.page, zoom: self.session.zoom)
             let handled = self.session.handleMarkEvent(event, documentFocused: true, position: position)
             if handled.consumed {
                 if let jump = handled.jump {
                     self.reveal(jump)
                 }
+                return nil
+            }
+            // Last in line, after the search results, slideshow, and mark chords above.
+            if event.keyCode == 53, plain, self.tts.isActive, !selectionBarWasShowing, !self.isTextInputFocused {
+                self.tts.stop()
                 return nil
             }
             return event
@@ -233,6 +258,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     }
 
     func windowWillClose(_ notification: Notification) {
+        tts.stop()
         storeWindowFrame()
         pdfController?.capturePositionForSave()
         session.saveViewNow()
@@ -254,6 +280,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         webController?.setContactSheet(contact)
         sidebarHost.rootView = SidebarView(session: session)
         panelHost.rootView = RightPanelView(session: session)
+        ttsPlayer.bringToFront()
+        updateTTSTheme()
     }
 
     func reveal(_ position: ReadingPosition) {
@@ -269,14 +297,116 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         slideshowTimer?.invalidate()
     }
 
+    // MARK: Read Aloud
+
+    var isTTSPresented: Bool { tts.state.isPresented }
+
+    private var isTextInputFocused: Bool {
+        (window?.firstResponder as? NSTextView)?.isEditable == true
+    }
+
+    private func configureReadAloud() {
+        tts.bridge = center as? TTSDocumentBridge
+        tts.onToast = { [weak self] text in self?.session.showToast(text) }
+        tts.onStateChange = { [weak self] state in self?.renderReadAloud(state) }
+        let player = ttsPlayer.view
+        player.fallbackTitle = session.bookURL.deletingPathExtension().lastPathComponent
+        player.onClose = { [weak self] in self?.tts.stop() }
+        player.onPlayPause = { [weak self] in self?.tts.togglePlayPause() }
+        player.onSkip = { [weak self] seconds in self?.tts.skip(bySeconds: seconds) }
+        player.onSeek = { [weak self] fraction in self?.tts.seek(toFraction: fraction) }
+        player.onSelectSpeed = { [weak self] rate in self?.tts.setRateMultiplier(rate) }
+        player.onSelectVoice = { [weak self] voice in self?.tts.setVoiceIdentifier(voice) }
+        player.onSetFollow = { [weak self] follow in self?.tts.setAutoScroll(follow) }
+        appearanceObservation = NSApp.observe(\.effectiveAppearance) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.updateTTSTheme() }
+        }
+    }
+
+    private func renderReadAloud(_ state: TTSEngineState) {
+        // A closing pill keeps its last contents while it fades out.
+        if state.isPresented { ttsPlayer.view.render(state) }
+        guard state.isPresented != ttsPlayer.isVisible else { return }
+        if state.isPresented { updateTTSTheme() }
+        ttsPlayer.setVisible(state.isPresented)
+        toastBottom?.animator().constant = state.isPresented ? -TTSEngine.bottomInset : -32
+        updateReadAloudToolbarItem()
+    }
+
+    private func updateTTSTheme() {
+        let theme = session.isPDF ? nil : session.package.state.epubTheme
+        let resolved: TTSPlayerTheme
+        switch theme {
+        case "night": resolved = .dark
+        case "paper": resolved = .paper
+        case "quiet": resolved = .light
+        default:
+            let systemDark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            resolved = tts.bridge?.preferredTTSAppearanceIsDark ?? systemDark ? .dark : .light
+        }
+        ttsPlayer.view.apply(theme: resolved)
+    }
+
+    private func readAloudImage() -> NSImage? {
+        let symbol = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Read Aloud")
+        guard isTTSPresented else { return symbol }
+        return symbol?.withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [.controlAccentColor]))
+    }
+
+    private func updateReadAloudToolbarItem() {
+        window?.toolbar?.items.first { $0.itemIdentifier == .listen }?.image = readAloudImage()
+    }
+
+    /// The selection that exists right now; `session.selection` can outlive it.
+    private func withActiveSelection(_ body: @escaping (SelectionContext?) -> Void) {
+        let capture = { [weak self] (active: Bool) in
+            guard let self else { return }
+            guard active else { return body(nil) }
+            self.session.withSelection { [weak self] in body(self?.session.selection) }
+        }
+        if let web = webController {
+            web.hasActiveSelection(completion: capture)
+        } else {
+            capture(pdfController?.hasActiveSelection ?? false)
+        }
+    }
+
+    private func startReading(from selection: SelectionContext?) {
+        dismissSelectionBar()
+        ttsStartSelection = selection?.text
+        guard let selection else { return tts.open(from: .viewport) }
+        // Locator indices are 0-based; Markdown has no page that maps onto its sections.
+        let page = session.isMarkdown ? nil : (session.isPDF ? selection.page : session.page)
+        tts.open(from: .selection(text: selection.text, prefix: selection.prefix, suffix: selection.suffix, pageOrSection: page.map { $0 - 1 }))
+    }
+
+    @objc func toggleReadAloud(_ sender: Any?) {
+        withActiveSelection { [weak self] selection in
+            guard let self else { return }
+            if self.tts.isActive, selection == nil || selection?.text == self.ttsStartSelection {
+                self.tts.stop()
+            } else {
+                self.startReading(from: selection)
+            }
+        }
+    }
+
+    @objc func readAloudFromSelection(_ sender: Any?) {
+        withActiveSelection { [weak self] selection in
+            guard let self else { return }
+            guard let selection else { return self.session.showToast("Select some text to read from") }
+            self.startReading(from: selection)
+        }
+    }
+
     // MARK: Toolbar
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .findCount, .vault, .inspectorTrackingSeparator, .toggleInspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .listen, .flexibleSpace, .search, .findCount, .vault, .inspectorTrackingSeparator, .toggleInspector]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .findCount, .vault, .inspectorTrackingSeparator, .toggleInspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .listen, .flexibleSpace, .search, .findCount, .vault, .inspectorTrackingSeparator, .toggleInspector]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
@@ -302,6 +432,14 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             item.image = NSImage(systemSymbolName: "textformat.size", accessibilityDescription: "Appearance")
             item.label = "Appearance"
             item.menu = appearanceMenu()
+            return item
+        case .listen:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.image = readAloudImage()
+            item.action = #selector(toggleReadAloud(_:))
+            item.target = self
+            item.label = "Read Aloud"
+            item.toolTip = "Read Aloud (⌥⌘R)"
             return item
         case .addNote:
             let note = NSToolbarItem(itemIdentifier: itemIdentifier)
@@ -622,6 +760,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         session.package.state.epubTheme = sender.title.lowercased()
         session.saveViewQuietly()
         webController?.applyDisplayMode()
+        updateTTSTheme()
     }
 
     @objc func chooseFont(_ sender: NSMenuItem) {
@@ -861,6 +1000,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         case #selector(togglePanel(_:)): menuItem.state = session.panelVisible ? .on : .off
         case #selector(toggleConceptMarkers(_:)): menuItem.state = session.showConceptMarkers ? .on : .off
         case #selector(showMarginNotes(_:)): menuItem.state = session.showMarginNotes ? .on : .off
+        case #selector(toggleReadAloud(_:)): menuItem.state = isTTSPresented ? .on : .off
         case #selector(delete(_:)): return !session.annotationSelection.isEmpty
         case #selector(revealInObsidian(_:)), #selector(openVaultFolder(_:)), #selector(pauseVault(_:)):
             if menuItem.action == #selector(pauseVault(_:)) {
@@ -1035,4 +1175,5 @@ private extension NSToolbarItem.Identifier {
     static let appearance = NSToolbarItem.Identifier("appearance")
     static let inspector = NSToolbarItem.Identifier("inspector")
     static let vault = NSToolbarItem.Identifier("vault")
+    static let listen = NSToolbarItem.Identifier("listen")
 }

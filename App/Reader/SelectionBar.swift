@@ -10,6 +10,9 @@ final class SelectionBarController: NSObject {
     private var monitor: Any?
     private var dismissing = false
 
+    /// Still true while the dismissal fades out.
+    var isShowing: Bool { bar?.superview != nil }
+
     func dismiss() {
         guard let bar, !dismissing else { return }
         dismissing = true
@@ -35,9 +38,9 @@ final class SelectionBarController: NSObject {
         dismissing = false
         let current = currentColor(in: session)
         let visible = host.convert(host.visibleRect, to: nil)
-        var chrome = SelectionChrome(compact: false, currentColor: current, target: self)
-        if chrome.fittingWidth > visible.width - 16 {
-            chrome = SelectionChrome(compact: true, currentColor: current, target: self)
+        var chrome = SelectionChrome(size: .regular, currentColor: current, target: self)
+        for size in [SelectionBarSize.compact, .ultraCompact] where chrome.fittingWidth > visible.width - 16 {
+            chrome = SelectionChrome(size: size, currentColor: current, target: self)
         }
         let placed = place(chromeSize: chrome.preferredSize, selection: selection, host: host)
         chrome.pointingDown = placed.pointingDown
@@ -145,6 +148,10 @@ final class SelectionBarController: NSObject {
         session?.show(tab: .askAI)
         dismiss()
     }
+    @objc func listenClicked(_ sender: Any?) {
+        session?.onReadFromSelection?()
+        dismiss()
+    }
     @objc func copyClicked(_ sender: Any?) {
         guard let text = session?.selection?.text else { dismiss(); return }
         NSPasteboard.general.clearContents()
@@ -153,21 +160,35 @@ final class SelectionBarController: NSObject {
     }
 }
 
+/// Progressively tighter layouts so the bar fits the narrowest reading pane.
+private enum SelectionBarSize {
+    case regular, compact, ultraCompact
+
+    var showsTitles: Bool { self == .regular }
+    var swatch: CGFloat { self == .ultraCompact ? 20 : 24 }
+    var dot: CGFloat { self == .ultraCompact ? 14 : 16 }
+    var divider: CGFloat { self == .ultraCompact ? 6 : 9 }
+    var iconButton: CGFloat { self == .ultraCompact ? 28 : 34 }
+    var padding: CGFloat { self == .ultraCompact ? 6 : 8 }
+}
+
 private final class SelectionChrome: NSView {
     var pointingDown = true
     var arrowX: CGFloat = 0
     private let effect = NSVisualEffectView()
     private let border = CAShapeLayer()
     private let controls: NSView
+    private let padding: CGFloat
     let preferredSize: NSSize
     var fittingWidth: CGFloat { preferredSize.width }
     private let arrowHeight: CGFloat = 7
 
-    init(compact: Bool, currentColor: Int?, target: SelectionBarController) {
-        let row = SelectionChrome.makeRow(compact: compact, currentColor: currentColor, target: target)
+    init(size: SelectionBarSize, currentColor: Int?, target: SelectionBarController) {
+        let row = SelectionChrome.makeRow(size: size, currentColor: currentColor, target: target)
         controls = row
+        padding = size.padding
         let content = row.fittingSize
-        preferredSize = NSSize(width: content.width + 16, height: content.height + 8 + arrowHeight)
+        preferredSize = NSSize(width: content.width + 2 * size.padding, height: content.height + 8 + arrowHeight)
         super.init(frame: NSRect(origin: .zero, size: preferredSize))
         wantsLayer = true
         layer?.masksToBounds = false
@@ -199,7 +220,7 @@ private final class SelectionChrome: NSView {
             body = NSRect(x: 0, y: 0, width: bounds.width, height: bounds.height - arrowHeight)
         }
         effect.frame = bounds
-        controls.frame = body.insetBy(dx: 8, dy: 4)
+        controls.frame = body.insetBy(dx: padding, dy: 4)
         let path = bubblePath(body: body)
         let mask = CAShapeLayer()
         mask.path = path
@@ -234,10 +255,10 @@ private final class SelectionChrome: NSView {
         return path
     }
 
-    private static func makeRow(compact: Bool, currentColor: Int?, target: SelectionBarController) -> NSView {
+    private static func makeRow(size: SelectionBarSize, currentColor: Int?, target: SelectionBarController) -> NSView {
         var views: [NSView] = []
         for color in 1...6 {
-            let swatch = SwatchControl(frame: NSRect(x: 0, y: 0, width: 24, height: 24))
+            let swatch = SwatchControl(side: size.swatch, dot: size.dot)
             swatch.tag = color
             swatch.checked = currentColor == color
             if let rgb = HighlightPalette.rgb(color) {
@@ -250,7 +271,7 @@ private final class SelectionChrome: NSView {
             views.append(swatch)
         }
         if currentColor != nil {
-            let remove = SwatchControl(frame: NSRect(x: 0, y: 0, width: 24, height: 24))
+            let remove = SwatchControl(side: size.swatch, dot: size.dot)
             remove.tag = 0
             remove.removeStyle = true
             remove.toolTip = "Remove Highlight"
@@ -258,16 +279,21 @@ private final class SelectionChrome: NSView {
             remove.action = #selector(SelectionBarController.colorClicked(_:))
             views.append(remove)
         }
-        views.append(DividerLine(frame: NSRect(x: 0, y: 0, width: 9, height: 24)))
+        views.append(DividerLine(frame: NSRect(x: 0, y: 0, width: size.divider, height: 24)))
         let actions: [(String, String, String, Selector)] = [
             ("note.text", "Note", "⇧⌘N", #selector(SelectionBarController.noteClicked(_:))),
             ("character.book.closed", "Look Up", "⌃⌘D", #selector(SelectionBarController.lookUpClicked(_:))),
             ("sparkles", "Ask AI", "⌘K", #selector(SelectionBarController.askClicked(_:))),
+            ("speaker.wave.2", "Listen", "⌥⌘R", #selector(SelectionBarController.listenClicked(_:))),
             ("doc.on.doc", "Copy", "⌘C", #selector(SelectionBarController.copyClicked(_:))),
         ]
         for action in actions {
-            let button = BarButton(symbol: action.0, title: action.1, showsTitle: !compact)
-            button.toolTip = compact ? "\(action.1) (\(action.2))" : action.2
+            let button = BarButton(symbol: action.0, title: action.1, showsTitle: size.showsTitles, iconWidth: size.iconButton)
+            if action.1 == "Listen" {
+                button.toolTip = "Read from here (\(action.2))"
+            } else {
+                button.toolTip = size.showsTitles ? action.2 : "\(action.1) (\(action.2))"
+            }
             button.target = target
             button.action = action.3
             views.append(button)
@@ -297,10 +323,10 @@ private final class Row: NSView {
 }
 
 private final class DividerLine: NSView {
-    override var fittingSize: NSSize { NSSize(width: 9, height: 24) }
+    override var fittingSize: NSSize { frame.size }
     override func draw(_ dirtyRect: NSRect) {
         NSColor.separatorColor.setFill()
-        NSRect(x: 4, y: 4, width: 1, height: bounds.height - 8).fill()
+        NSRect(x: floor(bounds.midX), y: 4, width: 1, height: bounds.height - 8).fill()
     }
 }
 
@@ -309,8 +335,17 @@ private final class SwatchControl: NSControl {
     var checked = false
     var removeStyle = false
     private var hovered = false
+    private let dot: CGFloat
 
-    override var fittingSize: NSSize { NSSize(width: 24, height: 24) }
+    init(side: CGFloat, dot: CGFloat) {
+        self.dot = dot
+        super.init(frame: NSRect(x: 0, y: 0, width: side, height: side))
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    override var fittingSize: NSSize { frame.size }
     override func isAccessibilityElement() -> Bool { true }
     override func accessibilityRole() -> NSAccessibility.Role? { .button }
     override func accessibilityLabel() -> String? { toolTip }
@@ -345,7 +380,7 @@ private final class SwatchControl: NSControl {
 
     override func draw(_ dirtyRect: NSRect) {
         let scale: CGFloat = hovered ? 1.15 : 1
-        let side = 16 * scale
+        let side = dot * scale
         let rect = NSRect(x: (bounds.width - side) / 2, y: (bounds.height - side) / 2, width: side, height: side)
         let circle = NSBezierPath(ovalIn: rect.insetBy(dx: 0.5, dy: 0.5))
         if removeStyle {
@@ -391,12 +426,12 @@ private final class BarButton: NSControl {
     private let showsTitle: Bool
     private var hovered = false
 
-    init(symbol: String, title: String, showsTitle: Bool) {
+    init(symbol: String, title: String, showsTitle: Bool, iconWidth: CGFloat) {
         self.symbol = symbol
         self.titleText = title
         self.showsTitle = showsTitle
         super.init(frame: .zero)
-        let size = Self.measuredSize(title: title, showsTitle: showsTitle)
+        let size = showsTitle ? Self.titledSize(title) : NSSize(width: iconWidth, height: 26)
         frame = NSRect(origin: .zero, size: size)
     }
 
@@ -412,9 +447,8 @@ private final class BarButton: NSControl {
     override var focusRingMaskBounds: NSRect { bounds }
     override func drawFocusRingMask() { bounds.fill() }
 
-    private static func measuredSize(title: String, showsTitle: Bool) -> NSSize {
+    private static func titledSize(_ title: String) -> NSSize {
         let font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        if !showsTitle { return NSSize(width: 34, height: 26) }
         let text = (title as NSString).size(withAttributes: [.font: font])
         return NSSize(width: 10 + 14 + 4 + ceil(text.width) + 10, height: 26)
     }
