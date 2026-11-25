@@ -8,8 +8,15 @@ import SwiftUI
 /// markers on top and lets hits fall through everywhere except those controls.
 final class PDFContainerViewController: NSViewController {
     let session: ReaderSession
-    private let pdfView = ReaderPDFView()
+    let pdfView = ReaderPDFView()
     private let overlay = NoteOverlay()
+    let ttsOverlay = PDFTTSOverlay()
+    var onManualScrollDuringTTS: (() -> Void)?
+    /// The player is open, so scrolls the user makes detach follow-text.
+    var ttsSessionActive = false
+    var ttsProgrammaticUntil = Date.distantPast
+    var ttsSentenceCache: (pageIndex: Int, range: NSRange, rects: [NSRect])?
+    private var observesLiveScroll = false
     private let findBar = NSSearchField()
     private var findTop: NSLayoutConstraint?
     private var pdfTopConstraint: NSLayoutConstraint?
@@ -44,6 +51,10 @@ final class PDFContainerViewController: NSViewController {
         pdfView.maxScaleFactor = 8
         pdfView.document = session.pdfDocument
         view.addSubview(pdfView)
+        // Below the note overlay so glyphs and cards stay on top of the spoken sentence.
+        ttsOverlay.pdfView = pdfView
+        ttsOverlay.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(ttsOverlay)
         overlay.pdfView = pdfView
         overlay.session = session
         overlay.translatesAutoresizingMaskIntoConstraints = false
@@ -63,6 +74,10 @@ final class PDFContainerViewController: NSViewController {
             pdfView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             pdfView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             pdfTop,
+            ttsOverlay.leadingAnchor.constraint(equalTo: pdfView.leadingAnchor),
+            ttsOverlay.trailingAnchor.constraint(equalTo: pdfView.trailingAnchor),
+            ttsOverlay.topAnchor.constraint(equalTo: pdfView.topAnchor),
+            ttsOverlay.bottomAnchor.constraint(equalTo: pdfView.bottomAnchor),
             overlay.leadingAnchor.constraint(equalTo: pdfView.leadingAnchor),
             overlay.trailingAnchor.constraint(equalTo: pdfView.trailingAnchor),
             overlay.topAnchor.constraint(equalTo: pdfView.topAnchor),
@@ -95,8 +110,11 @@ final class PDFContainerViewController: NSViewController {
 
     override func viewDidLayout() {
         super.viewDidLayout()
+        // A resize re-flows the clip view; that is not the user scrolling.
+        if ttsSessionActive { beginTTSProgrammaticScroll(0.3) }
         placePDFBelowToolbar()
         applyFittingScale()
+        ttsOverlay.needsDisplay = true
     }
 
     /// The PDF scroll view fills the full-height pane, which runs under the toolbar.
@@ -130,6 +148,10 @@ final class PDFContainerViewController: NSViewController {
         guard let clip = enclosingScrollClip(in: pdfView) else { return }
         clip.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(scrolled), name: NSView.boundsDidChangeNotification, object: clip)
+        if !observesLiveScroll, let scroll = clip.enclosingScrollView {
+            observesLiveScroll = true
+            NotificationCenter.default.addObserver(self, selector: #selector(userBeganScrolling), name: NSScrollView.willStartLiveScrollNotification, object: scroll)
+        }
     }
 
     /// Fit modes track the view size, the way Preview's Zoom to Fit does.
@@ -216,6 +238,7 @@ final class PDFContainerViewController: NSViewController {
         contactHost = nil
         pdfView.isHidden = visible
         overlay.isHidden = visible
+        ttsOverlay.isHidden = visible
         guard visible, let document = session.pdfDocument else { return }
         let host = NSHostingController(rootView: ContactSheetView(document: document, session: session) { [weak self] page in
             self?.session.setSidebar(.thumbnails)
@@ -628,14 +651,24 @@ final class PDFContainerViewController: NSViewController {
         session.updatePage(number, count: document.pageCount, section: section)
         session.rememberScroll(currentPosition())
         overlay.needsLayout = true
+        ttsOverlay.needsDisplay = true
     }
 
     @objc private func scrolled() {
         session.rememberScroll(currentPosition())
         (view.window?.windowController as? ReaderWindowController)?.dismissSelectionBar()
+        ttsOverlay.needsDisplay = true
+        reportUserScrollIfNeeded()
+    }
+
+    /// Trackpad and wheel gestures are always the user's, even inside the bridge's own scroll window.
+    @objc private func userBeganScrolling() {
+        reportUserScrollIfNeeded(always: true)
     }
 
     @objc private func scaleChanged() {
+        ttsOverlay.needsDisplay = true
+        if ttsSessionActive { beginTTSProgrammaticScroll(0.4) }
         guard !suppressScaleSave else { return }
         guard pdfView.bounds.width > 160, pdfView.bounds.height > 160 else { return }
         overlay.needsLayout = true
@@ -661,7 +694,7 @@ final class PDFContainerViewController: NSViewController {
         return nil
     }
 
-    private func enclosingScrollClip(in view: NSView) -> NSClipView? {
+    func enclosingScrollClip(in view: NSView) -> NSClipView? {
         if let scroll = view as? NSScrollView { return scroll.contentView }
         for subview in view.subviews {
             if let found = enclosingScrollClip(in: subview) { return found }
@@ -753,9 +786,19 @@ final class ReaderPDFView: PDFView {
         let point = convert(event.locationInWindow, from: nil)
         if highlightIDAt?(point) != nil { return nil }
         prepareSelection?()
-        guard let session, let text = session.selection?.text, !text.isEmpty else { return super.menu(for: event) }
-        for title in ["Highlight", "Note", "Look Up", "Ask AI", "Copy"] {
-            let item = NSMenuItem(title: title, action: #selector(selectionMenu(_:)), keyEquivalent: "")
+        guard let session, let text = session.selection?.text, !text.isEmpty else {
+            // No selection: read from the word under the pointer.
+            let base = super.menu(for: event) ?? NSMenu()
+            if !base.items.isEmpty { base.addItem(.separator()) }
+            let item = readAloudItem(action: #selector(readAloudFromPoint(_:)))
+            item.representedObject = NSValue(point: point)
+            base.addItem(item)
+            return base
+        }
+        for title in ["Highlight", "Note", "Look Up", "Ask AI", "Read Aloud from Here", "Copy"] {
+            let item = title == "Read Aloud from Here"
+                ? readAloudItem(action: #selector(selectionMenu(_:)))
+                : NSMenuItem(title: title, action: #selector(selectionMenu(_:)), keyEquivalent: "")
             item.target = self
             menu.addItem(item)
         }
@@ -772,10 +815,32 @@ final class ReaderPDFView: PDFView {
         return menu
     }
 
+    private func readAloudItem(action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: "Read Aloud from Here", action: action, keyEquivalent: "r")
+        item.keyEquivalentModifierMask = [.command, .option]
+        item.target = self
+        return item
+    }
+
+    @objc private func readAloudFromPoint(_ sender: NSMenuItem) {
+        guard let session else { return }
+        let point = (sender.representedObject as? NSValue)?.pointValue ?? .zero
+        if let page = page(for: point, nearest: true),
+           let word = page.selectionForWord(at: convert(point, to: page)),
+           word.string?.contains(where: { !$0.isWhitespace }) == true {
+            setCurrentSelection(word, animate: false)
+            prepareSelection?()
+        } else {
+            session.selection = nil
+        }
+        session.onReadFromSelection?()
+    }
+
     @objc private func selectionMenu(_ sender: NSMenuItem) {
         guard let session else { return }
         let title = sender.title
-        if title == "Highlight" { session.highlight(color: session.package.state.lastHighlightColor) }
+        if title == "Read Aloud from Here" { session.onReadFromSelection?() }
+        else if title == "Highlight" { session.highlight(color: session.package.state.lastHighlightColor) }
         else if title == "Note" { session.addNote() }
         else if title.hasPrefix("Look Up") { session.lookUp() }
         else if title == "Ask AI" { session.show(tab: .askAI) }

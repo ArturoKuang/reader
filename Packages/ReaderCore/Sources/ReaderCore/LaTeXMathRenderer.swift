@@ -17,7 +17,10 @@ public enum LaTeXMathRenderer {
         }
         let all = join(nodes)
         let spoken = all.speech.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-        let math = "<math xmlns=\"http://www.w3.org/1998/Math/MathML\" display=\"\(display ? "block" : "inline")\">\(all.xml)</math>"
+        // `data-tts-spoken` lets Read Aloud say the formula instead of its MathML text nodes.
+        let attribute = spoken.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;")
+        let math = "<math xmlns=\"http://www.w3.org/1998/Math/MathML\" display=\"\(display ? "block" : "inline")\" data-tts-spoken=\"\(attribute)\">\(all.xml)</math>"
         return RenderedMath(mathML: math, spokenText: spoken)
     }
 

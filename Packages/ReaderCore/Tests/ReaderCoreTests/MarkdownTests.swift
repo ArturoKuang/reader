@@ -106,7 +106,7 @@ final class MarkdownTests: XCTestCase {
 
     func testMathML() {
         let out = LaTeXMathRenderer.render("\\int_0^\\infty e^{-x^2}\\,dx = \\frac{\\sqrt{\\pi}}{2}", display: true)
-        assertContains(out.mathML, "<math xmlns=\"http://www.w3.org/1998/Math/MathML\" display=\"block\">", "<munderover>", "<mfrac>", "<msqrt>", "<mi>π</mi>")
+        assertContains(out.mathML, "<math xmlns=\"http://www.w3.org/1998/Math/MathML\" display=\"block\" data-tts-spoken=\"", "<munderover>", "<mfrac>", "<msqrt>", "<mi>π</mi>")
         assertContains(out.spokenText, "integral", "infinity", "square root of pi over 2")
         for name in ["pmatrix", "bmatrix", "cases"] {
             assertContains(LaTeXMathRenderer.render("\\begin{\(name)} a & b \\\\ c & d \\end{\(name)}", display: true).mathML, "<mtable><mtr><mtd><mi>a</mi></mtd>")

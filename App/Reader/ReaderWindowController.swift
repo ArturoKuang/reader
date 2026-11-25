@@ -302,11 +302,17 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     var isTTSPresented: Bool { tts.state.isPresented }
 
     private var isTextInputFocused: Bool {
-        (window?.firstResponder as? NSTextView)?.isEditable == true
+        // Search fields, note editors, and any other field share an editable text view.
+        (window?.firstResponder as? NSText)?.isEditable == true
     }
 
     private func configureReadAloud() {
-        tts.bridge = center as? TTSDocumentBridge
+        tts.bridge = (pdfController as TTSDocumentBridge?) ?? (webController as TTSDocumentBridge?)
+        webController?.onTTSContentInvalidated = { [weak self] in
+            guard let self, self.tts.isActive else { return }
+            self.tts.stop()
+            self.session.showToast("Read Aloud stopped — the document changed")
+        }
         tts.onToast = { [weak self] text in self?.session.showToast(text) }
         tts.onStateChange = { [weak self] state in self?.renderReadAloud(state) }
         let player = ttsPlayer.view
