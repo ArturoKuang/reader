@@ -745,26 +745,15 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .onAppear {
-            voiceGroups = TTSVoiceCatalog.groups(including: settings.ttsVoiceIdentifier)
+            voiceGroups = TTSVoiceCatalog.groups()
             Task { kokoroStatus = await KokoroEngineService.shared.currentStatus() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .kokoroStatusDidChange)) { _ in
             Task { kokoroStatus = await KokoroEngineService.shared.currentStatus() }
         }
         // The player saves speed and voice too; keep this copy from overwriting them.
-        .onChange(of: settings.ttsRateMultiplier) { _, newValue in
-            let saved = SettingsStore.load()
-            guard abs(saved.ttsRateMultiplier - newValue) > 0.0001 else { return }
-            SettingsStore.save(settings)
-            NotificationCenter.default.post(name: .ttsSettingsDidChange, object: nil)
-        }
-        .onChange(of: settings.ttsVoiceIdentifier) { _, newValue in
-            let saved = SettingsStore.load()
-            guard saved.ttsVoiceIdentifier != newValue else { return }
-            SettingsStore.save(settings)
-            NotificationCenter.default.post(name: .ttsSettingsDidChange, object: nil)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .ttsSettingsDidChange)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .ttsSettingsDidChange)) { notification in
+            if (notification.userInfo?["fromSettingsView"] as? Bool) == true { return }
             let saved = SettingsStore.load()
             settings.ttsRateMultiplier = saved.ttsRateMultiplier
             settings.ttsVoiceIdentifier = saved.ttsVoiceIdentifier
@@ -832,8 +821,16 @@ struct SettingsView: View {
         ShortcutList()
             .tabItem { Text("Shortcuts") }
         }
-        .onChange(of: settings) { _, newValue in
+        .onChange(of: settings) { oldValue, newValue in
             SettingsStore.save(newValue)
+            if abs(oldValue.ttsRateMultiplier - newValue.ttsRateMultiplier) > 0.0001
+                || oldValue.ttsVoiceIdentifier != newValue.ttsVoiceIdentifier {
+                NotificationCenter.default.post(
+                    name: .ttsSettingsDidChange,
+                    object: nil,
+                    userInfo: ["fromSettingsView": true]
+                )
+            }
         }
         .onChange(of: keyField) { old, _ in
             guard let old else { return }

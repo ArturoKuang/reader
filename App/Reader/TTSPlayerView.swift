@@ -79,7 +79,6 @@ final class TTSPlayerView: NSView {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        TTSVoiceCatalog.prewarm()
         wantsLayer = true
         layer?.masksToBounds = false
         layer?.shadowColor = NSColor.black.cgColor
@@ -241,7 +240,7 @@ final class TTSPlayerView: NSView {
         menu.addItem(.separator())
         let selectedVoiceID = KokoroVoiceCatalog.resolve(state.voiceIdentifier).id
         let voices = NSMenu(title: "Kokoro Voice")
-        for (index, group) in TTSVoiceCatalog.groups(including: selectedVoiceID).enumerated() {
+        for (index, group) in TTSVoiceCatalog.groups().enumerated() {
             if index > 0 { voices.addItem(.separator()) }
             voices.addItem(.sectionHeader(title: group.title))
             for voice in group.voices {

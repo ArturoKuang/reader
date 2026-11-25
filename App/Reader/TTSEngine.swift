@@ -3,7 +3,7 @@ import Foundation
 import ReaderCore
 
 extension Notification.Name {
-    /// The player changed the saved speed or voice.
+    /// The player or Settings changed the saved speed or voice.
     static let ttsSettingsDidChange = Notification.Name("reader.ttsSettingsDidChange")
 }
 
@@ -34,7 +34,7 @@ struct TTSEngineState: Equatable {
 
 /// Drives on-device Kokoro-82M synthesis (`KokoroEngineService`) and `AVAudioEngine`
 /// playback through a document's chapter plans with gapless lookahead prefetching
-/// and sample-accurate word highlighting.
+/// and latency-compensated, sample-accurate word highlighting.
 @MainActor
 final class TTSEngine {
     static let bottomInset: CGFloat = 136
@@ -55,7 +55,7 @@ final class TTSEngine {
     /// True while the player is open or still preparing to open.
     var isActive: Bool { state.isPresented || isLoading }
 
-    private struct PrefetchKey: Hashable {
+    private struct PrefetchKey: Hashable, Sendable {
         let chapter: Int
         let segment: Int
         let offset: Int
@@ -78,8 +78,11 @@ final class TTSEngine {
     private var settingsObserver: NSObjectProtocol?
 
     private var playbackToken: UInt64 = 0
+    private var prefetchGeneration: UInt64 = 0
     private var activeSynthesisTask: Task<Void, Never>?
-    private var prefetchTask: Task<Void, Never>?
+    private var prefetchDriverTask: Task<Void, Never>?
+    private var activePrefetchKey: PrefetchKey?
+    private var activePrefetchTask: Task<KokoroSynthesizedClip, Error>?
     private var prefetchCache: [PrefetchKey: KokoroSynthesizedClip] = [:]
     private var prefetchOrder: [PrefetchKey] = []
 
@@ -89,6 +92,7 @@ final class TTSEngine {
     private var wordRange: NSRange?
     private var hasScheduledBuffer = false
     private var isBufferPaused = false
+    private var finishedWhilePaused = false
     private var needsSynthesisOnResume = false
     private var syncTimer: Timer?
 
@@ -133,15 +137,13 @@ final class TTSEngine {
                 self.applyExternalSettingsChange()
             }
         }
-
-        let initialVoice = loadSettings().ttsVoiceIdentifier
-        Task { await service.prewarmIfCached(preferredVoiceID: initialVoice) }
     }
 
     deinit {
         syncTimer?.invalidate()
         activeSynthesisTask?.cancel()
-        prefetchTask?.cancel()
+        prefetchDriverTask?.cancel()
+        activePrefetchTask?.cancel()
         if let configChangeObserver { NotificationCenter.default.removeObserver(configChangeObserver) }
         if let statusObserver { NotificationCenter.default.removeObserver(statusObserver) }
         if let settingsObserver { NotificationCenter.default.removeObserver(settingsObserver) }
@@ -162,6 +164,11 @@ final class TTSEngine {
             onToast?("Read Aloud isn't available for this document yet")
             return
         }
+        // Start warming the cached Core ML model in parallel while chapters are extracted.
+        let preferredVoice = loadSettings().ttsVoiceIdentifier
+        let svc = service
+        Task { await svc.prewarmIfCached(preferredVoiceID: preferredVoice) }
+
         generation &+= 1
         let request = generation
         isLoading = true
@@ -208,7 +215,7 @@ final class TTSEngine {
                 speakFrom(chapterIndex: top?.chapterIndex ?? 0, segmentIndex: top?.segmentIndex ?? 0, utf16Offset: top?.utf16Offset ?? 0)
                 return
             }
-            cancelSpeech()
+            cancelSpeech(cancelPrefetch: true)
             stopSyncTimer()
             needsSynthesisOnResume = true
             let request = generation
@@ -221,7 +228,7 @@ final class TTSEngine {
 
     /// Closes the player and silences speech.
     func stop() {
-        cancelSpeech()
+        cancelSpeech(cancelPrefetch: true)
         stopSyncTimer()
         clearPrefetchCache()
         if audioEngine.isRunning { audioEngine.stop() }
@@ -233,6 +240,7 @@ final class TTSEngine {
         chapters = []
         wordRange = nil
         reachedEnd = false
+        finishedWhilePaused = false
         needsSynthesisOnResume = false
         state = TTSEngineState(rate: state.rate, voiceIdentifier: state.voiceIdentifier)
         publish()
@@ -241,7 +249,7 @@ final class TTSEngine {
     // MARK: - Transport
 
     func speakFrom(chapterIndex: Int, segmentIndex: Int, utf16Offset: Int) {
-        move(chapter: chapterIndex, segment: segmentIndex, offset: utf16Offset, play: true)
+        move(chapter: chapterIndex, segment: segmentIndex, offset: utf16Offset, play: true, preservePrefetch: false)
     }
 
     func togglePlayPause() {
@@ -258,7 +266,7 @@ final class TTSEngine {
             playerNode.pause()
             isBufferPaused = true
         } else {
-            cancelSpeech()
+            cancelSpeech(cancelPrefetch: true)
             needsSynthesisOnResume = true
         }
         publish()
@@ -268,6 +276,11 @@ final class TTSEngine {
         guard state.isPresented, state.status == .paused else { return }
         if reachedEnd {
             speakFrom(chapterIndex: chapterIndex, segmentIndex: 0, utf16Offset: 0)
+            return
+        }
+        if finishedWhilePaused {
+            finishedWhilePaused = false
+            advanceAfterCurrentSegment()
             return
         }
         if hasScheduledBuffer, isBufferPaused, !needsSynthesisOnResume, currentClip != nil {
@@ -281,7 +294,6 @@ final class TTSEngine {
                 schedulePrefetch(afterChapter: chapterIndex, segment: segmentIndex)
                 return
             } catch {
-                // Fall through to clean re-synthesis if the audio engine couldn't resume.
                 needsSynthesisOnResume = true
             }
         }
@@ -308,7 +320,13 @@ final class TTSEngine {
     }
 
     private func move(to target: TTSSeekTarget) {
-        move(chapter: target.chapterIndex, segment: target.segmentIndex, offset: target.charOffset, play: state.status == .playing)
+        move(
+            chapter: target.chapterIndex,
+            segment: target.segmentIndex,
+            offset: target.charOffset,
+            play: state.status == .playing,
+            preservePrefetch: false
+        )
     }
 
     // MARK: - Settings
@@ -337,7 +355,7 @@ final class TTSEngine {
         let rate = TTSRateMapper.clampedMultiplier(saved.ttsRateMultiplier)
         let voice = KokoroVoiceCatalog.resolve(saved.ttsVoiceIdentifier).id
         var changed = false
-        if rate != state.rate {
+        if abs(rate - state.rate) > 0.0001 {
             refreshFromPlaybackClock(forceHighlight: false)
             state.rate = rate
             changed = true
@@ -363,7 +381,13 @@ final class TTSEngine {
             publish()
             return
         }
-        move(chapter: chapterIndex, segment: segmentIndex, offset: utf16Offset, play: state.status == .playing)
+        move(
+            chapter: chapterIndex,
+            segment: segmentIndex,
+            offset: utf16Offset,
+            play: state.status == .playing,
+            preservePrefetch: false
+        )
     }
 
     // MARK: - Follow text
@@ -398,24 +422,34 @@ final class TTSEngine {
         )
     }
 
-    private func cancelSpeech() {
+    private func cancelPrefetchTasks() {
+        prefetchGeneration &+= 1
+        prefetchDriverTask?.cancel()
+        prefetchDriverTask = nil
+        activePrefetchTask?.cancel()
+        activePrefetchTask = nil
+        activePrefetchKey = nil
+    }
+
+    private func cancelSpeech(cancelPrefetch: Bool) {
         generation &+= 1
         playbackToken &+= 1
         activeSynthesisTask?.cancel()
         activeSynthesisTask = nil
-        prefetchTask?.cancel()
-        prefetchTask = nil
+        if cancelPrefetch {
+            cancelPrefetchTasks()
+        }
         playerNode.stop()
         currentClip = nil
         activeTimingIndex = nil
         hasScheduledBuffer = false
         isBufferPaused = false
+        finishedWhilePaused = false
         state.statusDetail = nil
     }
 
     private func clearPrefetchCache() {
-        prefetchTask?.cancel()
-        prefetchTask = nil
+        cancelPrefetchTasks()
         prefetchCache.removeAll()
         prefetchOrder.removeAll()
     }
@@ -457,9 +491,9 @@ final class TTSEngine {
         return nil
     }
 
-    private func move(chapter: Int, segment: Int, offset: Int, play: Bool) {
+    private func move(chapter: Int, segment: Int, offset: Int, play: Bool, preservePrefetch: Bool) {
         guard state.isPresented else { return }
-        cancelSpeech()
+        cancelSpeech(cancelPrefetch: !preservePrefetch)
         guard let position = speakablePosition(chapter: chapter, segment: segment, offset: offset) else {
             finishAtEnd()
             return
@@ -493,38 +527,58 @@ final class TTSEngine {
         let sliceText = (segmentModel.text as NSString).substring(from: sliceOffset)
         let key = prefetchKey(chapter: chapter, segment: segment, offset: sliceOffset)
 
+        // 1. Instant hit from completed lookahead cache.
         if let cached = prefetchCache.removeValue(forKey: key) {
             prefetchOrder.removeAll { $0 == key }
             playClip(cached, generation: gen)
             return
         }
 
+        // 2. Join already-running prefetch for this exact key instead of discarding partial work.
+        let joinedTask: Task<KokoroSynthesizedClip, Error>?
+        if activePrefetchKey == key, let inFlight = activePrefetchTask {
+            joinedTask = inFlight
+            activePrefetchKey = nil
+            activePrefetchTask = nil
+        } else {
+            // Unrelated prefetch shouldn't delay the active segment.
+            cancelPrefetchTasks()
+            joinedTask = nil
+        }
+
         let voiceID = activeVoiceID
         let rate = state.rate
+        let svc = service
 
         activeSynthesisTask = Task { [weak self] in
-            guard let self else { return }
-            let initialStatus = await self.service.currentStatus()
+            let initialStatus = await svc.currentStatus()
             if case .ready = initialStatus {
-                // Fast path: already warm, no loading banner flicker.
+                // Already warm — avoid banner flicker.
             } else {
-                await MainActor.run {
-                    guard self.generation == gen, self.state.isPresented, self.state.status == .playing else { return }
+                await MainActor.run { [weak self] in
+                    guard let self, self.generation == gen,
+                          self.state.isPresented, self.state.status == .playing else { return }
                     self.state.statusDetail = Self.loadingBanner(for: initialStatus)
                     self.publish()
                 }
             }
 
             do {
-                let clip = try await self.service.synthesize(
-                    sliceText: sliceText,
-                    sliceUTF16Offset: sliceOffset,
-                    voiceID: voiceID,
-                    rate: rate
-                )
+                let clip: KokoroSynthesizedClip
+                if let joinedTask {
+                    clip = try await joinedTask.value
+                } else {
+                    clip = try await svc.synthesize(
+                        sliceText: sliceText,
+                        sliceUTF16Offset: sliceOffset,
+                        voiceID: voiceID,
+                        rate: rate
+                    )
+                }
                 guard !Task.isCancelled else { return }
-                await MainActor.run {
-                    guard self.generation == gen, self.state.isPresented, self.state.status == .playing else { return }
+                await MainActor.run { [weak self] in
+                    guard let self, self.generation == gen,
+                          self.state.isPresented, self.state.status == .playing else { return }
                     self.activeSynthesisTask = nil
                     self.playClip(clip, generation: gen)
                 }
@@ -532,22 +586,23 @@ final class TTSEngine {
                 return
             } catch let error as KokoroServiceError {
                 guard !Task.isCancelled else { return }
-                await MainActor.run {
-                    guard self.generation == gen, self.state.isPresented, self.state.status == .playing else { return }
+                await MainActor.run { [weak self] in
+                    guard let self, self.generation == gen,
+                          self.state.isPresented, self.state.status == .playing else { return }
                     self.activeSynthesisTask = nil
                     switch error {
                     case .unpronounceableText:
-                        // Skip punctuation/symbol-only slices smoothly.
                         let length = self.chapters[self.chapterIndex].segments[self.segmentIndex].utf16Length
-                        self.move(chapter: self.chapterIndex, segment: self.segmentIndex, offset: length, play: true)
+                        self.move(chapter: self.chapterIndex, segment: self.segmentIndex, offset: length, play: true, preservePrefetch: true)
                     case .modelUnavailable(let detail):
                         self.handleSynthesisFailure(detail)
                     }
                 }
             } catch {
                 guard !Task.isCancelled else { return }
-                await MainActor.run {
-                    guard self.generation == gen, self.state.isPresented, self.state.status == .playing else { return }
+                await MainActor.run { [weak self] in
+                    guard let self, self.generation == gen,
+                          self.state.isPresented, self.state.status == .playing else { return }
                     self.activeSynthesisTask = nil
                     self.handleSynthesisFailure(error.localizedDescription)
                 }
@@ -577,11 +632,11 @@ final class TTSEngine {
     private func syncStatusDetailIfPreparing() {
         guard state.isPresented, state.status == .playing, activeSynthesisTask != nil, !hasScheduledBuffer else { return }
         let gen = generation
+        let svc = service
         Task { [weak self] in
-            guard let self else { return }
-            let current = await self.service.currentStatus()
-            await MainActor.run {
-                guard self.generation == gen, self.state.isPresented,
+            let current = await svc.currentStatus()
+            await MainActor.run { [weak self] in
+                guard let self, self.generation == gen, self.state.isPresented,
                       self.state.status == .playing, self.activeSynthesisTask != nil,
                       !self.hasScheduledBuffer else { return }
                 if case .preparing(let message) = current {
@@ -658,6 +713,7 @@ final class TTSEngine {
             activeTimingIndex = nil
             hasScheduledBuffer = true
             isBufferPaused = false
+            finishedWhilePaused = false
             needsSynthesisOnResume = false
 
             if let firstWord = clip.timings.first {
@@ -673,9 +729,14 @@ final class TTSEngine {
                         guard let self,
                               gen == self.generation,
                               token == self.playbackToken,
-                              self.state.isPresented,
-                              self.state.status == .playing else { return }
-                        self.advanceAfterCurrentSegment()
+                              self.state.isPresented else { return }
+                        if self.state.status == .playing {
+                            self.advanceAfterCurrentSegment()
+                        } else if self.state.status == .paused {
+                            self.hasScheduledBuffer = false
+                            self.isBufferPaused = false
+                            self.finishedWhilePaused = true
+                        }
                     }
                 }
             }
@@ -695,12 +756,10 @@ final class TTSEngine {
             return
         }
         let length = chapters[chapterIndex].segments[segmentIndex].utf16Length
-        move(chapter: chapterIndex, segment: segmentIndex, offset: length, play: true)
+        move(chapter: chapterIndex, segment: segmentIndex, offset: length, play: true, preservePrefetch: true)
     }
 
     private func schedulePrefetch(afterChapter chapter: Int, segment: Int) {
-        prefetchTask?.cancel()
-        prefetchTask = nil
         guard state.isPresented, state.status == .playing else { return }
 
         var targets: [(chapter: Int, segment: Int, offset: Int, text: String, key: PrefetchKey)] = []
@@ -712,37 +771,100 @@ final class TTSEngine {
             let endOffset = chapters[cursorChapter].segments[cursorSegment].utf16Length
             guard let next = speakablePosition(chapter: cursorChapter, segment: cursorSegment, offset: endOffset) else { break }
             let key = prefetchKey(chapter: next.chapter, segment: next.segment, offset: next.offset)
-            if prefetchCache[key] == nil {
-                let text = (chapters[next.chapter].segments[next.segment].text as NSString).substring(from: next.offset)
-                targets.append((next.chapter, next.segment, next.offset, text, key))
-            }
+            let text = (chapters[next.chapter].segments[next.segment].text as NSString).substring(from: next.offset)
+            targets.append((next.chapter, next.segment, next.offset, text, key))
             cursorChapter = next.chapter
             cursorSegment = next.segment
         }
 
-        guard !targets.isEmpty else { return }
-        let gen = generation
+        let desiredKeys = Set(targets.map(\.key))
+        // Keep any in-flight prefetch if it matches one of our desired lookahead segments.
+        let preservedKey: PrefetchKey?
+        let preservedTask: Task<KokoroSynthesizedClip, Error>?
+        if let activeKey = activePrefetchKey, desiredKeys.contains(activeKey), let activeTask = activePrefetchTask {
+            preservedKey = activeKey
+            preservedTask = activeTask
+            prefetchDriverTask?.cancel()
+            prefetchDriverTask = nil
+        } else {
+            preservedKey = nil
+            preservedTask = nil
+            cancelPrefetchTasks()
+        }
+
+        let pendingTargets = targets.filter { prefetchCache[$0.key] == nil }
+        guard !pendingTargets.isEmpty else { return }
+
+        prefetchGeneration &+= 1
+        let prefetchGen = prefetchGeneration
         let voiceID = activeVoiceID
         let rate = state.rate
+        let svc = service
 
-        prefetchTask = Task { [weak self] in
-            guard let self else { return }
-            for target in targets {
+        prefetchDriverTask = Task { [weak self] in
+            // Finish any preserved in-flight prefetch first so its work is stored and never wasted.
+            if let preservedKey, let preservedTask {
+                if let clip = try? await preservedTask.value, !Task.isCancelled {
+                    await MainActor.run { [weak self] in
+                        guard let self, self.prefetchGeneration == prefetchGen, self.state.isPresented else { return }
+                        if self.activePrefetchKey == preservedKey {
+                            self.activePrefetchKey = nil
+                            self.activePrefetchTask = nil
+                        }
+                        self.storePrefetch(clip, for: preservedKey)
+                    }
+                }
+            }
+
+            for target in pendingTargets {
                 guard !Task.isCancelled else { return }
-                do {
-                    let clip = try await self.service.synthesize(
+                if target.key == preservedKey { continue }
+
+                let alreadyCached = await MainActor.run { [weak self] () -> Bool in
+                    guard let self, self.prefetchGeneration == prefetchGen, self.state.isPresented else { return true }
+                    return self.prefetchCache[target.key] != nil
+                }
+                if alreadyCached { continue }
+
+                let synthTask = Task<KokoroSynthesizedClip, Error> {
+                    try await svc.synthesize(
                         sliceText: target.text,
                         sliceUTF16Offset: target.offset,
                         voiceID: voiceID,
                         rate: rate
                     )
+                }
+
+                let registered = await MainActor.run { [weak self] () -> Bool in
+                    guard let self, self.prefetchGeneration == prefetchGen, self.state.isPresented else { return false }
+                    self.activePrefetchKey = target.key
+                    self.activePrefetchTask = synthTask
+                    return true
+                }
+                guard registered else {
+                    synthTask.cancel()
+                    return
+                }
+
+                do {
+                    let clip = try await synthTask.value
                     guard !Task.isCancelled else { return }
-                    await MainActor.run {
-                        guard self.generation == gen, self.state.isPresented else { return }
+                    await MainActor.run { [weak self] in
+                        guard let self, self.prefetchGeneration == prefetchGen, self.state.isPresented else { return }
+                        if self.activePrefetchKey == target.key {
+                            self.activePrefetchKey = nil
+                            self.activePrefetchTask = nil
+                        }
                         self.storePrefetch(clip, for: target.key)
                     }
                 } catch {
-                    // Best-effort prefetch; errors will be handled if/when the segment becomes active.
+                    await MainActor.run { [weak self] in
+                        guard let self else { return }
+                        if self.activePrefetchKey == target.key {
+                            self.activePrefetchKey = nil
+                            self.activePrefetchTask = nil
+                        }
+                    }
                     if Task.isCancelled { return }
                 }
             }
@@ -751,13 +873,17 @@ final class TTSEngine {
 
     private func handleAudioConfigurationChange() {
         configuredSampleRate = nil
+        // If we are still downloading or synthesizing the first clip, let synthesis finish
+        // and connect cleanly to the new output route when playClip runs.
+        guard hasScheduledBuffer || currentClip != nil else { return }
         playbackToken &+= 1
         hasScheduledBuffer = false
         isBufferPaused = false
+        finishedWhilePaused = false
         needsSynthesisOnResume = true
         stopSyncTimer()
         guard state.isPresented, state.status == .playing else { return }
-        move(chapter: chapterIndex, segment: segmentIndex, offset: utf16Offset, play: true)
+        move(chapter: chapterIndex, segment: segmentIndex, offset: utf16Offset, play: true, preservePrefetch: true)
     }
 
     // MARK: - Word Highlight & Elapsed Time Sync
@@ -769,7 +895,11 @@ final class TTSEngine {
               let playerTime = playerNode.playerTime(forNodeTime: nodeTime),
               playerTime.isSampleTimeValid,
               playerTime.sampleRate > 0 else { return nil }
-        return max(0, Double(playerTime.sampleTime) / playerTime.sampleRate)
+        let rawSec = Double(playerTime.sampleTime) / playerTime.sampleRate
+        let outputLatency = max(0, audioEngine.outputNode.presentationLatency)
+        let pitchLatency = timePitch.bypass ? 0 : max(0, timePitch.latency)
+        let rateScale = timePitch.bypass ? 1.0 : Double(timePitch.rate)
+        return max(0, rawSec - (outputLatency + pitchLatency) * rateScale)
     }
 
     private func startSyncTimer() {
@@ -796,7 +926,7 @@ final class TTSEngine {
               let playbackSec = currentBufferPlaybackTime() else { return }
 
         var shouldPublish = false
-        if let idx = KokoroWordAligner.activeWordIndex(at: playbackSec, in: clip.timings),
+        if let idx = KokoroWordAligner.activeWordIndex(at: playbackSec, in: clip.timings, leadSeconds: 0),
            forceHighlight || idx != activeTimingIndex {
             activeTimingIndex = idx
             let timing = clip.timings[idx]
@@ -827,7 +957,7 @@ final class TTSEngine {
 
     /// Stops at the end of the last chapter and leaves the player open.
     private func finishAtEnd() {
-        cancelSpeech()
+        cancelSpeech(cancelPrefetch: true)
         stopSyncTimer()
         guard let last = chapters.lastIndex(where: { !$0.segments.isEmpty }) else { return }
         chapterIndex = last
@@ -867,14 +997,7 @@ enum TTSVoiceCatalog {
         var voices: [(identifier: String, label: String)]
     }
 
-    static func prewarm() {
-        Task {
-            let voice = SettingsStore.load().ttsVoiceIdentifier
-            await KokoroEngineService.shared.prewarmIfCached(preferredVoiceID: voice)
-        }
-    }
-
-    static func groups(including selected: String? = nil) -> [Group] {
+    static func groups() -> [Group] {
         KokoroVoiceCatalog.groups().map { group in
             Group(
                 title: group.title,

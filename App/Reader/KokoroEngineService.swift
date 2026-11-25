@@ -1,6 +1,6 @@
-import ReaderKokoro
 import Foundation
 import ReaderCore
+import ReaderKokoro
 
 extension Notification.Name {
     /// Fired on the main queue whenever Kokoro's model readiness changes.
@@ -65,7 +65,7 @@ actor KokoroEngineService {
         return url
     }
 
-    /// True when the ANE-v3 compiled bundles already exist in Reader's model cache.
+    /// True when the ANE-v3 compiled Core ML bundles (with `coremldata.bin`) exist on disk.
     nonisolated static func isModelCachedOnDisk() -> Bool {
         let v3Root = modelsDirectory.appendingPathComponent("kokoro-82m-coreml/ANE-v3", isDirectory: true)
         guard let enumerator = FileManager.default.enumerator(
@@ -73,12 +73,15 @@ actor KokoroEngineService {
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
         ) else { return false }
-        var compiledBundles = 0
+        var validBundles = 0
         for case let url as URL in enumerator {
             if url.pathExtension == "mlmodelc" {
-                compiledBundles += 1
+                let dataFile = url.appendingPathComponent("coremldata.bin")
+                if FileManager.default.fileExists(atPath: dataFile.path) {
+                    validBundles += 1
+                    if validBundles >= 10 { return true }
+                }
                 enumerator.skipDescendants()
-                if compiledBundles >= 10 { return true }
             }
         }
         return false
@@ -108,12 +111,15 @@ actor KokoroEngineService {
     /// Downloads (if missing) and initializes the Kokoro-82M ANE-v3 pipeline.
     @discardableResult
     func ensureReady(voiceID: String) async throws -> KokoroAneManager {
+        try Task.checkCancellation()
         let resolvedVoice = KokoroVoiceCatalog.resolve(voiceID).id
         if let manager {
             return manager
         }
         if let existing = initTask {
-            return try await existing.value
+            let ready = try await existing.value
+            try Task.checkCancellation()
+            return ready
         }
 
         let cached = Self.isModelCachedOnDisk()
@@ -132,15 +138,17 @@ actor KokoroEngineService {
         }
         initTask = task
 
-        do {
-            let readyManager = try await task.value
+        let result = await task.result
+        initTask = nil
+
+        switch result {
+        case .success(let readyManager):
             manager = readyManager
-            initTask = nil
             updateStatus(.ready)
+            try Task.checkCancellation()
             return readyManager
-        } catch {
-            initTask = nil
-            if Task.isCancelled || error is CancellationError {
+        case .failure(let error):
+            if error is CancellationError {
                 updateStatus(Self.isModelCachedOnDisk() ? .cached : .notDownloaded)
                 throw CancellationError()
             }

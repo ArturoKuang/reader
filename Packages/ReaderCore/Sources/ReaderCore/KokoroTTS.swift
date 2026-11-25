@@ -159,6 +159,12 @@ public struct KokoroWordTiming: Equatable, Sendable {
 public enum KokoroWordAligner {
     public static let defaultSpaceTokenID: Int32 = 16
     public static let defaultBosEosTokenID: Int32 = 0
+    /// Punctuation token IDs from Kokoro v1.0 `vocab.json` (`; : , . ! ? — … " ( ) “ ”`).
+    /// FluidAudio emits leading punctuation (like `“` or `(`) as standalone space-separated
+    /// tokens, so spans containing only punctuation IDs must be ignored during word alignment.
+    public static let defaultPunctuationTokenIDs: Set<Int32> = [
+        1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15,
+    ]
 
     public struct Span: Equatable, Sendable {
         public var start: TimeInterval
@@ -171,13 +177,15 @@ public enum KokoroWordAligner {
     }
 
     /// Extracts spoken word spans (in raw audio seconds) from Kokoro's token IDs and
-    /// acoustic-frame durations. Handles multi-chunk outputs with multiple BOS/EOS pairs.
+    /// acoustic-frame durations. Handles multi-chunk outputs with multiple BOS/EOS pairs
+    /// and skips standalone punctuation spans such as opening quotes or brackets.
     public static func spokenWordSpans(
         inputIds: [Int32],
         predictedDurations: [Int32],
         rawAudioDuration: TimeInterval,
         spaceTokenID: Int32 = defaultSpaceTokenID,
-        bosEosTokenID: Int32 = defaultBosEosTokenID
+        bosEosTokenID: Int32 = defaultBosEosTokenID,
+        punctuationTokenIDs: Set<Int32> = defaultPunctuationTokenIDs
     ) -> [Span] {
         guard rawAudioDuration > 0,
               !inputIds.isEmpty,
@@ -189,22 +197,27 @@ public enum KokoroWordAligner {
         var frameSpans: [(start: Int, end: Int)] = []
         var cursor = 0
         var openStart: Int?
+        var openEnd: Int?
 
         for idx in inputIds.indices {
             let id = inputIds[idx]
             let frames = max(Int(predictedDurations[idx]), 0)
             if id == bosEosTokenID || id == spaceTokenID {
-                if let start = openStart {
-                    frameSpans.append((start, cursor))
-                    openStart = nil
+                if let start = openStart, let end = openEnd {
+                    frameSpans.append((start, end))
                 }
-            } else if openStart == nil {
-                openStart = cursor
+                openStart = nil
+                openEnd = nil
+            } else if !punctuationTokenIDs.contains(id) {
+                if openStart == nil {
+                    openStart = cursor
+                }
+                openEnd = cursor + frames
             }
             cursor += frames
         }
-        if let start = openStart {
-            frameSpans.append((start, cursor))
+        if let start = openStart, let end = openEnd {
+            frameSpans.append((start, end))
         }
 
         let secondsPerFrame = rawAudioDuration / Double(totalFrames)
@@ -225,7 +238,8 @@ public enum KokoroWordAligner {
         predictedDurations: [Int32],
         normalizedText: String? = nil,
         spaceTokenID: Int32 = defaultSpaceTokenID,
-        bosEosTokenID: Int32 = defaultBosEosTokenID
+        bosEosTokenID: Int32 = defaultBosEosTokenID,
+        punctuationTokenIDs: Set<Int32> = defaultPunctuationTokenIDs
     ) -> [KokoroWordTiming] {
         let localRanges = TTSTextPlanner.wordRanges(in: sliceText)
         guard !localRanges.isEmpty else { return [] }
@@ -245,7 +259,8 @@ public enum KokoroWordAligner {
             predictedDurations: predictedDurations,
             rawAudioDuration: duration,
             spaceTokenID: spaceTokenID,
-            bosEosTokenID: bosEosTokenID
+            bosEosTokenID: bosEosTokenID,
+            punctuationTokenIDs: punctuationTokenIDs
         )
 
         let rawSpans: [Span]
