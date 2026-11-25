@@ -260,4 +260,45 @@ final class MarkdownTests: XCTestCase {
         XCTAssertNil(reopened.notice)
         XCTAssertTrue(reopened.package.highlights.highlights.first?.cfi?.hasPrefix("mdloc(s=1,a=a,") == true)
     }
+
+    func testLongChapterWithFileLinksCodeTablesAndUnicodeRendersCleanDocumentHTML() {
+        let source = """
+        # Chapter 8: A Window on Infinity — Fast, Lossless Edition
+
+        *A plain-language rewording ([original](file:///Users/test/book/08.md)).*
+
+        ---
+
+        ## Infinity Hotel
+
+        ```text
+        Natural numbers →  1   2   3
+                           ↕   ↕   ↕
+        Odd numbers     →  1   3   5
+        ```
+
+        | Which room | Which card |
+        | :---: | :--- |
+        | 1 | `0.`**`6`**`77976...` |
+        | ⋮ | ⋮ |
+
+        ## Footnotes
+
+        1. Room `[(N + M)² + N − M]/2`.
+        """
+        let model = MarkdownDocumentModel.parse(source: source, fileName: "08-window-on-infinity.md")
+        XCTAssertEqual(model.sections.count, 3)
+        XCTAssertEqual(model.headings.map(\.title), [
+            "Chapter 8: A Window on Infinity — Fast, Lossless Edition",
+            "Infinity Hotel",
+            "Footnotes",
+        ])
+        let options = MarkdownRenderOptions(documentDirectory: "/tmp", vaultRoot: "/tmp")
+        let html = MarkdownHTMLRenderer.renderDocumentHTML(model, options: options, injectedScript: "window.__ok = true;", fs: MemoryFileSystem())
+        XCTAssertTrue(html.contains("<article id=\"reader-md-article\">"))
+        XCTAssertTrue(html.contains("</article>"))
+        XCTAssertTrue(html.contains("<code>0.</code><strong><code>6</code></strong><code>77976...</code>"))
+        XCTAssertFalse(html.contains("href=\"file://"))
+        XCTAssertTrue(html.contains("original"))
+    }
 }

@@ -2,6 +2,7 @@ import AppKit
 import PDFKit
 import ReaderCore
 import SwiftUI
+import QuartzCore
 import WebKit
 
 /// EPUB and Markdown share this WKWebView. The core package parses both on any platform;
@@ -20,6 +21,14 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
     private var keyMonitor: Any?
     private var acceptSpineReports = false
     private var pendingFlash: String?
+    private var hasLoadedDocument = false
+    private var initialLoadScheduled = false
+    private var loadGeneration = 0
+    private var recoveryAttempts = 0
+    private var renderHealthWorkItem: DispatchWorkItem?
+    private var loadTimeoutWorkItem: DispatchWorkItem?
+    private var occlusionObserver: NSObjectProtocol?
+    private var webViewConstraints: [NSLayoutConstraint] = []
     var onManualScrollDuringTTS: (() -> Void)?
     /// The open document changed under the player, so its plan no longer matches the page.
     var onTTSContentInvalidated: (() -> Void)?
@@ -38,33 +47,35 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
     required init?(coder: NSCoder) { nil }
 
     deinit {
+        renderHealthWorkItem?.cancel()
+        loadTimeoutWorkItem?.cancel()
+        if let occlusionObserver { NotificationCenter.default.removeObserver(occlusionObserver) }
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
     }
 
-    /// Releases the file watcher, key monitor, and script handler when the window closes.
+    /// Releases the file watcher, observers, key monitor, and web view when the window closes.
     func tearDown() {
         watcher?.stop()
         watcher = nil
+        if let occlusionObserver { NotificationCenter.default.removeObserver(occlusionObserver) }
+        occlusionObserver = nil
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         keyMonitor = nil
-        webView?.configuration.userContentController.removeScriptMessageHandler(forName: "reader")
+        detachWebView()
     }
 
     private var documentDirectory: String { session.bookURL.deletingLastPathComponent().path }
 
+    private var isViewVisibleOnScreen: Bool {
+        guard let window = view.window, window.isVisible,
+              window.occlusionState.contains(.visible),
+              let webView, !webView.isHidden,
+              webView.bounds.width >= 80, webView.bounds.height >= 80 else { return false }
+        return true
+    }
+
     override func loadView() {
-        view = NSView()
-        let configuration = WKWebViewConfiguration()
-        configuration.userContentController.add(self, name: "reader")
-        let roots = [documentDirectory] + (session.vaultRoot.map { [$0] } ?? [])
-        configuration.setURLSchemeHandler(LocalAssetSchemeHandler { roots }, forURLScheme: LocalAssetSchemeHandler.scheme)
-        let webView = ReaderWebView(frame: .zero, configuration: configuration)
-        webView.navigationDelegate = self
-        webView.onReadAloudFromHere = { [weak self] point in self?.readAloudFromContextMenu(at: point) }
-        webView.session = session
-        webView.translatesAutoresizingMaskIntoConstraints = false
-        self.webView = webView
-        view.addSubview(webView)
+        view = NSView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
         findBar.translatesAutoresizingMaskIntoConstraints = false
         findBar.placeholderString = "Find"
         findBar.target = self
@@ -74,20 +85,16 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
         let findConstraint = findBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: -40)
         findTop = findConstraint
         NSLayoutConstraint.activate([
-            webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            webView.topAnchor.constraint(equalTo: findBar.bottomAnchor),
             findBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
             findBar.widthAnchor.constraint(equalToConstant: 240),
             findConstraint,
         ])
         fontScale = session.zoom
+        installWebView()
         session.onAnnotationsChanged = { [weak self] in
             guard let self else { return }
             self.webView?.evaluateJavaScript("window.readerPaint && window.readerPaint(\(self.highlightScript())); window.readerMarginNotes && window.readerMarginNotes(\(self.marginNoteScript()));")
         }
-        loadDocument()
         if session.isMarkdown {
             watcher = MarkdownFileWatcher(url: session.bookURL, initial: session.bookData) { [weak self] data in
                 self?.reloadMarkdown(data)
@@ -106,6 +113,89 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
             if event.keyCode == 123 { self.scrollPage(forward: false); return nil }
             return event
         }
+    }
+
+    /// Defers the first WebKit load until the window is attached and laid out so WebContent
+    /// does not spawn while the view is zero-sized and occluded (which can leave macOS
+    /// WebKit stuck with a hidden remote layer tree).
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        observeWindowOcclusion()
+        applyLiveStyle()
+        if !hasLoadedDocument {
+            guard !initialLoadScheduled else { return }
+            initialLoadScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.initialLoadScheduled = false
+                guard !self.hasLoadedDocument, self.webView != nil, self.view.window != nil else { return }
+                self.hasLoadedDocument = true
+                self.loadDocument()
+            }
+        } else if spineLoaded {
+            scheduleRenderHealthCheck(delay: 0.35)
+        }
+    }
+
+    private func observeWindowOcclusion() {
+        if let occlusionObserver { NotificationCenter.default.removeObserver(occlusionObserver) }
+        occlusionObserver = nil
+        guard let window = view.window else { return }
+        occlusionObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didChangeOcclusionStateNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, self.hasLoadedDocument, self.spineLoaded, self.isViewVisibleOnScreen else { return }
+            self.scheduleRenderHealthCheck(delay: 0.45)
+        }
+    }
+
+    private func detachWebView() {
+        renderHealthWorkItem?.cancel()
+        renderHealthWorkItem = nil
+        loadTimeoutWorkItem?.cancel()
+        loadTimeoutWorkItem = nil
+        spineLoaded = false
+        NSLayoutConstraint.deactivate(webViewConstraints)
+        webViewConstraints = []
+        if let webView {
+            webView.stopLoading()
+            webView.navigationDelegate = nil
+            webView.configuration.userContentController.removeScriptMessageHandler(forName: "reader")
+            webView.removeFromSuperview()
+        }
+        webView = nil
+    }
+
+    private func installWebView() {
+        detachWebView()
+        let configuration = WKWebViewConfiguration()
+        configuration.userContentController.add(self, name: "reader")
+        let roots = [documentDirectory] + (session.vaultRoot.map { [$0] } ?? [])
+        configuration.setURLSchemeHandler(LocalAssetSchemeHandler { roots }, forURLScheme: LocalAssetSchemeHandler.scheme)
+        let initialFrame = view.bounds.width > 0 && view.bounds.height > 0 ? view.bounds : NSRect(x: 0, y: 0, width: 800, height: 600)
+        let webView = ReaderWebView(frame: initialFrame, configuration: configuration)
+        webView.navigationDelegate = self
+        webView.onReadAloudFromHere = { [weak self] point in self?.readAloudFromContextMenu(at: point) }
+        webView.session = session
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        webView.underPageBackgroundColor = pageBackgroundColor()
+        webView.isHidden = contactHost != nil
+        self.webView = webView
+        if let bottomSubview = view.subviews.first {
+            view.addSubview(webView, positioned: .below, relativeTo: bottomSubview)
+        } else {
+            view.addSubview(webView)
+        }
+        let constraints = [
+            webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            webView.topAnchor.constraint(equalTo: findBar.bottomAnchor),
+        ]
+        webViewConstraints = constraints
+        NSLayoutConstraint.activate(constraints)
     }
 
     private func scrollPage(forward: Bool) {
@@ -128,7 +218,10 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
 
     /// Reloads only when the layout needs different content in the page.
     func applyDisplayMode() {
-        if loadedLayout != pageLayout { loadDocument() }
+        if hasLoadedDocument, loadedLayout != pageLayout {
+            recoveryAttempts = 0
+            loadDocument()
+        }
         applyLiveStyle()
     }
 
@@ -136,7 +229,10 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
         contactHost?.view.removeFromSuperview()
         contactHost = nil
         webView?.isHidden = visible
-        guard visible else { return }
+        guard visible else {
+            if hasLoadedDocument, spineLoaded { scheduleRenderHealthCheck(delay: 0.35) }
+            return
+        }
         let host = NSHostingController(rootView: WebContactSheet(session: session) { [weak self] index in
             self?.session.setSidebar(.thumbnails)
             self?.showSection(index: index)
@@ -298,15 +394,138 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard webView === self.webView else { return }
+        loadTimeoutWorkItem?.cancel()
+        loadTimeoutWorkItem = nil
         spineLoaded = true
         // Picks up anything chosen while the page was loading, before scrolling measures it.
         applyLiveStyle()
         resumeTTSAfterLoad()
         if session.pendingReaderLink == nil, session.pendingAnchor == nil { scrollToCurrentSection() }
         consumePendingJump()
+        scheduleRenderHealthCheck(delay: 0.55)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
             self?.acceptSpineReports = true
             self?.session.finishViewRestore()
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        guard webView === self.webView else { return }
+        handleNavigationFailure(error)
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        guard webView === self.webView else { return }
+        handleNavigationFailure(error)
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        guard webView === self.webView else { return }
+        spineLoaded = false
+        recoverBlankWebView(reason: "process-terminated")
+    }
+
+    private func handleNavigationFailure(_ error: Error) {
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled { return }
+        spineLoaded = false
+        recoverBlankWebView(reason: "navigation-error:\(nsError.code)")
+    }
+
+    private func scheduleRenderHealthCheck(delay: TimeInterval) {
+        renderHealthWorkItem?.cancel()
+        let generation = loadGeneration
+        let item = DispatchWorkItem { [weak self] in
+            self?.performRenderHealthCheck(generation: generation)
+        }
+        renderHealthWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
+    private func isWebLayerTreeHealthy(_ webView: WKWebView) -> Bool {
+        guard let root = webView.layer, !root.isHidden, root.opacity > 0.01 else { return false }
+        var stack: [(layer: CALayer, depth: Int, ancestorHidden: Bool)] = (root.sublayers ?? []).map { ($0, 1, false) }
+        var sawDrawingRoot = false
+        while let item = stack.popLast() {
+            let hidden = item.ancestorHidden || item.layer.isHidden || item.layer.opacity <= 0.01
+            if let name = item.layer.name, name.hasPrefix("drawing area root") {
+                sawDrawingRoot = true
+                if !hidden { return true }
+            }
+            if let subs = item.layer.sublayers, !subs.isEmpty {
+                for sub in subs { stack.append((sub, item.depth + 1, hidden)) }
+            } else if !sawDrawingRoot, item.depth >= 2, !hidden,
+                      item.layer.bounds.width > 0, item.layer.bounds.height > 0 {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func performRenderHealthCheck(generation: Int) {
+        guard generation == loadGeneration, spineLoaded, let webView, isViewVisibleOnScreen else { return }
+        if !isWebLayerTreeHealthy(webView) {
+            recoverBlankWebView(reason: "layer-tree-hidden")
+            return
+        }
+        let expectsContent = session.isMarkdown ? !(session.markdown?.sections.isEmpty ?? true) : !(session.epub?.spine.isEmpty ?? true)
+        var settled = false
+        let watchdog = DispatchWorkItem { [weak self] in
+            guard let self, !settled, generation == self.loadGeneration, self.isViewVisibleOnScreen else { return }
+            settled = true
+            self.recoverBlankWebView(reason: "frame-watchdog-timeout")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: watchdog)
+        let probe = """
+        return await new Promise(resolve => {
+          const height = document.documentElement ? document.documentElement.scrollHeight : 0;
+          let done = false;
+          const finish = ticked => {
+            if (done) return;
+            done = true;
+            resolve({ ticked, height });
+          };
+          requestAnimationFrame(() => finish(true));
+          setTimeout(() => finish(false), 900);
+        });
+        """
+        webView.callAsyncJavaScript(probe, arguments: [:], in: nil, in: .page) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self, !settled else { return }
+                settled = true
+                watchdog.cancel()
+                guard generation == self.loadGeneration, self.isViewVisibleOnScreen else { return }
+                guard case .success(let value) = result, let info = value as? [String: Any] else {
+                    self.recoverBlankWebView(reason: "frame-probe-failed")
+                    return
+                }
+                let ticked = info["ticked"] as? Bool ?? false
+                let height = (info["height"] as? NSNumber)?.doubleValue ?? 0
+                if !ticked {
+                    self.recoverBlankWebView(reason: "frame-frozen")
+                } else if expectsContent, height < 20 {
+                    self.recoverBlankWebView(reason: "empty-layout")
+                } else if !self.isWebLayerTreeHealthy(webView) {
+                    self.recoverBlankWebView(reason: "layer-tree-hidden-post-raf")
+                } else {
+                    self.recoveryAttempts = 0
+                }
+            }
+        }
+    }
+
+    /// Rebuilds the WKWebView so WebKit spawns a fresh WebContent process if the previous one
+    /// crashed, stalled, or got wedged with a hidden remote layer tree.
+    private func recoverBlankWebView(reason: String) {
+        guard recoveryAttempts < 2, view.window != nil else { return }
+        recoveryAttempts += 1
+        NSLog("Reader: recovering WKWebView (%@, attempt %d)", reason, recoveryAttempts)
+        installWebView()
+        let generation = loadGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self, generation == self.loadGeneration, self.webView != nil, self.view.window != nil else { return }
+            self.loadDocument()
         }
     }
 
@@ -442,6 +661,7 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
     func showSection(index: Int) {
         guard index >= 0, index < session.pageCount else { return }
         applySection(index)
+        guard hasLoadedDocument else { return }
         if let markdown = session.markdown {
             guard markdown.sections.indices.contains(index) else { return }
             scrollToAnchor(markdown.sections[index].anchorID)
@@ -601,7 +821,19 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
     }
 
     private func loadDocument() {
+        loadGeneration += 1
+        let generation = loadGeneration
+        spineLoaded = false
+        renderHealthWorkItem?.cancel()
+        renderHealthWorkItem = nil
+        loadTimeoutWorkItem?.cancel()
         loadedLayout = pageLayout
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, generation == self.loadGeneration, !self.spineLoaded, self.isViewVisibleOnScreen else { return }
+            self.recoverBlankWebView(reason: "load-timeout")
+        }
+        loadTimeoutWorkItem = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: timeout)
         if session.isMarkdown { loadMarkdown() } else { loadSpine() }
     }
 
@@ -657,7 +889,8 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
         (view.window?.windowController?.document as? ReaderDocument)?.bookDidChange(data)
         // The spoken plan indexes the old text, so it cannot survive the swap.
         if ttsBottomInset > 0 { onTTSContentInvalidated?() }
-        guard spineLoaded, let model = session.markdown else { return loadMarkdown() }
+        guard hasLoadedDocument else { return }
+        guard spineLoaded, let model = session.markdown else { return loadDocument() }
         let article = MarkdownHTMLRenderer.renderArticleHTML(model, options: markdownOptions(), fs: LocalFileSystem())
         call("window.readerReplaceArticle(article, JSON.parse(highlights), JSON.parse(notes), JSON.parse(concepts))", [
             "article": article, "highlights": highlightScript(), "notes": marginNoteScript(), "concepts": conceptScript(),
