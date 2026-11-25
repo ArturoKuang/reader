@@ -1,4 +1,5 @@
 import AVFoundation
+import Foundation
 import ReaderCore
 
 extension Notification.Name {
@@ -19,6 +20,8 @@ struct TTSEngineState: Equatable {
     var isPresented = false
     var status = TTSPlaybackState.idle
     var chapterTitle = ""
+    /// Transient loading status shown while Kokoro downloads or warms up.
+    var statusDetail: String?
     /// Position in the current chapter, in 1.0x seconds, so it does not jump with speed.
     var elapsed: TimeInterval = 0
     var duration: TimeInterval = 0
@@ -29,26 +32,11 @@ struct TTSEngineState: Equatable {
     var progress: Double { duration > 0 ? min(max(elapsed / duration, 0), 1) : 0 }
 }
 
-/// `AVSpeechUtterance` carrying what its callbacks need to be placed or dropped.
-private final class TaggedSpeechUtterance: AVSpeechUtterance {
-    private(set) var generation: UInt64 = 0
-    /// Where the spoken slice starts inside the segment text.
-    private(set) var offset = 0
-
-    convenience init(string: String, generation: UInt64, offset: Int) {
-        self.init(string: string)
-        self.generation = generation
-        self.offset = offset
-    }
-}
-
-/// Drives `AVSpeechSynthesizer` through a document's chapter plans.
-///
-/// Every change to what is queued bumps `generation`, and callbacks from an
-/// utterance of an older generation are dropped. Only one utterance is queued at
-/// a time; the next segment is enqueued when it finishes.
+/// Drives on-device Kokoro-82M synthesis (`KokoroEngineService`) and `AVAudioEngine`
+/// playback through a document's chapter plans with gapless lookahead prefetching
+/// and sample-accurate word highlighting.
 @MainActor
-final class TTSEngine: NSObject, AVSpeechSynthesizerDelegate {
+final class TTSEngine {
     static let bottomInset: CGFloat = 136
 
     weak var bridge: TTSDocumentBridge?
@@ -67,35 +55,98 @@ final class TTSEngine: NSObject, AVSpeechSynthesizerDelegate {
     /// True while the player is open or still preparing to open.
     var isActive: Bool { state.isPresented || isLoading }
 
+    private struct PrefetchKey: Hashable {
+        let chapter: Int
+        let segment: Int
+        let offset: Int
+        let voiceID: String
+        let rateHundredths: Int
+    }
+
     private let loadSettings: () -> AISettings
     private let saveSettings: (AISettings) -> Void
     private let volume: Float
-    private var synthesizer = AVSpeechSynthesizer()
+    private let service: KokoroEngineService
+
+    private let audioEngine = AVAudioEngine()
+    private let playerNode = AVAudioPlayerNode()
+    private let timePitch = AVAudioUnitTimePitch()
+    private var audioGraphAttached = false
+    private var configuredSampleRate: Int?
+    private var configChangeObserver: NSObjectProtocol?
+    private var statusObserver: NSObjectProtocol?
+    private var settingsObserver: NSObjectProtocol?
+
+    private var playbackToken: UInt64 = 0
+    private var activeSynthesisTask: Task<Void, Never>?
+    private var prefetchTask: Task<Void, Never>?
+    private var prefetchCache: [PrefetchKey: KokoroSynthesizedClip] = [:]
+    private var prefetchOrder: [PrefetchKey] = []
+
+    private var currentClip: KokoroSynthesizedClip?
+    private var currentSliceStartOffset = 0
+    private var activeTimingIndex: Int?
     private var wordRange: NSRange?
-    /// The queued utterance cannot be continued; resuming must enqueue a new one.
-    private var needsReenqueue = false
-    private var utteranceStarted = false
-    private var ticker: Timer?
-    private var tickAnchor = (base: 0.0, date: Date())
-    private var warnedMissingVoice = false
+    private var hasScheduledBuffer = false
+    private var isBufferPaused = false
+    private var needsSynthesisOnResume = false
+    private var syncTimer: Timer?
 
     init(
         loadSettings: @escaping () -> AISettings = SettingsStore.load,
         saveSettings: @escaping (AISettings) -> Void = SettingsStore.save,
-        volume: Float = 1
+        volume: Float = 1,
+        service: KokoroEngineService = .shared
     ) {
         self.loadSettings = loadSettings
         self.saveSettings = saveSettings
         self.volume = volume
-        super.init()
-        synthesizer.delegate = self
-        TTSVoiceCatalog.prewarm()
+        self.service = service
+
+        configChangeObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: audioEngine,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.handleAudioConfigurationChange()
+            }
+        }
+
+        statusObserver = NotificationCenter.default.addObserver(
+            forName: .kokoroStatusDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.syncStatusDetailIfPreparing()
+            }
+        }
+
+        settingsObserver = NotificationCenter.default.addObserver(
+            forName: .ttsSettingsDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            MainActor.assumeIsolated {
+                guard let self, (notification.object as AnyObject?) !== self else { return }
+                self.applyExternalSettingsChange()
+            }
+        }
+
+        let initialVoice = loadSettings().ttsVoiceIdentifier
+        Task { await service.prewarmIfCached(preferredVoiceID: initialVoice) }
     }
 
     deinit {
-        ticker?.invalidate()
-        synthesizer.delegate = nil
-        synthesizer.stopSpeaking(at: .immediate)
+        syncTimer?.invalidate()
+        activeSynthesisTask?.cancel()
+        prefetchTask?.cancel()
+        if let configChangeObserver { NotificationCenter.default.removeObserver(configChangeObserver) }
+        if let statusObserver { NotificationCenter.default.removeObserver(statusObserver) }
+        if let settingsObserver { NotificationCenter.default.removeObserver(settingsObserver) }
+        playerNode.stop()
+        audioEngine.stop()
     }
 
     // MARK: - Session
@@ -104,7 +155,6 @@ final class TTSEngine: NSObject, AVSpeechSynthesizerDelegate {
     func open(from anchor: TTSStartAnchor) {
         if state.isPresented {
             state.autoScrollEnabled = true
-            // The reader may have scrolled since the plan was built.
             start(from: anchor, refreshViewport: true)
             return
         }
@@ -130,11 +180,12 @@ final class TTSEngine: NSObject, AVSpeechSynthesizerDelegate {
         }
         let settings = loadSettings()
         chapters = plans
-        warnedMissingVoice = false
+        clearPrefetchCache()
+        let resolvedVoice = KokoroVoiceCatalog.resolve(settings.ttsVoiceIdentifier).id
         state = TTSEngineState(
             isPresented: true,
             rate: TTSRateMapper.clampedMultiplier(settings.ttsRateMultiplier),
-            voiceIdentifier: settings.ttsVoiceIdentifier
+            voiceIdentifier: resolvedVoice
         )
         bridge?.onManualScrollDuringTTS = { [weak self] in self?.userDidManuallyScroll() }
         bridge?.setTTSBottomInset(Self.bottomInset)
@@ -157,12 +208,9 @@ final class TTSEngine: NSObject, AVSpeechSynthesizerDelegate {
                 speakFrom(chapterIndex: top?.chapterIndex ?? 0, segmentIndex: top?.segmentIndex ?? 0, utf16Offset: top?.utf16Offset ?? 0)
                 return
             }
-            // Silence the old position while the page answers. Any later transport
-            // action bumps `generation` again and wins over this request.
             cancelSpeech()
-            stopTicker()
-            utteranceStarted = false
-            needsReenqueue = true
+            stopSyncTimer()
+            needsSynthesisOnResume = true
             let request = generation
             bridge.resolveCurrentTTSViewportStart(in: chapters) { [weak self] top in
                 guard let self, self.generation == request, self.state.isPresented else { return }
@@ -174,7 +222,9 @@ final class TTSEngine: NSObject, AVSpeechSynthesizerDelegate {
     /// Closes the player and silences speech.
     func stop() {
         cancelSpeech()
-        stopTicker()
+        stopSyncTimer()
+        clearPrefetchCache()
+        if audioEngine.isRunning { audioEngine.stop() }
         isLoading = false
         guard state.isPresented else { return }
         bridge?.clearTTSHighlight()
@@ -183,7 +233,7 @@ final class TTSEngine: NSObject, AVSpeechSynthesizerDelegate {
         chapters = []
         wordRange = nil
         reachedEnd = false
-        needsReenqueue = false
+        needsSynthesisOnResume = false
         state = TTSEngineState(rate: state.rate, voiceIdentifier: state.voiceIdentifier)
         publish()
     }
@@ -200,13 +250,16 @@ final class TTSEngine: NSObject, AVSpeechSynthesizerDelegate {
 
     func pause() {
         guard state.isPresented, state.status == .playing else { return }
-        refreshElapsed()
+        refreshFromPlaybackClock(forceHighlight: false)
         state.status = .paused
-        stopTicker()
-        // Before an utterance starts, a pause can report success and still speak; drop it instead.
-        if !utteranceStarted || !synthesizer.pauseSpeaking(at: .immediate) {
+        state.statusDetail = nil
+        stopSyncTimer()
+        if hasScheduledBuffer {
+            playerNode.pause()
+            isBufferPaused = true
+        } else {
             cancelSpeech()
-            needsReenqueue = true
+            needsSynthesisOnResume = true
         }
         publish()
     }
@@ -214,25 +267,25 @@ final class TTSEngine: NSObject, AVSpeechSynthesizerDelegate {
     func resume() {
         guard state.isPresented, state.status == .paused else { return }
         if reachedEnd {
-            // Replay the chapter that just finished.
             speakFrom(chapterIndex: chapterIndex, segmentIndex: 0, utf16Offset: 0)
             return
         }
-        guard !needsReenqueue, synthesizer.isPaused, synthesizer.continueSpeaking() else {
-            speakFrom(chapterIndex: chapterIndex, segmentIndex: segmentIndex, utf16Offset: utf16Offset)
-            return
+        if hasScheduledBuffer, isBufferPaused, !needsSynthesisOnResume, currentClip != nil {
+            do {
+                if !audioEngine.isRunning { try audioEngine.start() }
+                playerNode.play()
+                isBufferPaused = false
+                state.status = .playing
+                startSyncTimer()
+                publish()
+                schedulePrefetch(afterChapter: chapterIndex, segment: segmentIndex)
+                return
+            } catch {
+                // Fall through to clean re-synthesis if the audio engine couldn't resume.
+                needsSynthesisOnResume = true
+            }
         }
-        state.status = .playing
-        tickAnchor = (state.elapsed, Date())
-        startTicker()
-        publish()
-        // Some systems accept `continueSpeaking` and then stay silent.
-        let expected = generation
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self, self.generation == expected, self.state.status == .playing else { return }
-            guard self.synthesizer.isPaused || !self.synthesizer.isSpeaking else { return }
-            self.speakFrom(chapterIndex: self.chapterIndex, segmentIndex: self.segmentIndex, utf16Offset: self.utf16Offset)
-        }
+        speakFrom(chapterIndex: chapterIndex, segmentIndex: segmentIndex, utf16Offset: utf16Offset)
     }
 
     /// Skips wall-clock seconds at the current speed.
@@ -263,17 +316,38 @@ final class TTSEngine: NSObject, AVSpeechSynthesizerDelegate {
     func setRateMultiplier(_ multiplier: Double) {
         let rate = TTSRateMapper.clampedMultiplier(multiplier)
         guard rate != state.rate else { return }
-        refreshElapsed()
+        refreshFromPlaybackClock(forceHighlight: false)
         state.rate = rate
+        clearPrefetchCache()
         persist { $0.ttsRateMultiplier = rate }
         restartAtCurrentWord()
     }
 
     func setVoiceIdentifier(_ identifier: String?) {
-        guard identifier != state.voiceIdentifier else { return }
-        state.voiceIdentifier = identifier
-        warnedMissingVoice = false
-        persist { $0.ttsVoiceIdentifier = identifier }
+        let resolved = KokoroVoiceCatalog.resolve(identifier).id
+        guard resolved != state.voiceIdentifier else { return }
+        state.voiceIdentifier = resolved
+        clearPrefetchCache()
+        persist { $0.ttsVoiceIdentifier = resolved }
+        restartAtCurrentWord()
+    }
+
+    private func applyExternalSettingsChange() {
+        let saved = loadSettings()
+        let rate = TTSRateMapper.clampedMultiplier(saved.ttsRateMultiplier)
+        let voice = KokoroVoiceCatalog.resolve(saved.ttsVoiceIdentifier).id
+        var changed = false
+        if rate != state.rate {
+            refreshFromPlaybackClock(forceHighlight: false)
+            state.rate = rate
+            changed = true
+        }
+        if voice != state.voiceIdentifier {
+            state.voiceIdentifier = voice
+            changed = true
+        }
+        guard changed else { return }
+        clearPrefetchCache()
         restartAtCurrentWord()
     }
 
@@ -308,19 +382,52 @@ final class TTSEngine: NSObject, AVSpeechSynthesizerDelegate {
         publish()
     }
 
-    // MARK: - Queue
+    // MARK: - Queue & Synthesis
+
+    private var activeVoiceID: String {
+        KokoroVoiceCatalog.resolve(state.voiceIdentifier).id
+    }
+
+    private func prefetchKey(chapter: Int, segment: Int, offset: Int) -> PrefetchKey {
+        PrefetchKey(
+            chapter: chapter,
+            segment: segment,
+            offset: offset,
+            voiceID: activeVoiceID,
+            rateHundredths: Int((state.rate * 100).rounded())
+        )
+    }
 
     private func cancelSpeech() {
         generation &+= 1
-        if synthesizer.isPaused {
-            // A synthesizer stopped while paused can swallow the next utterance.
-            synthesizer.delegate = nil
-            synthesizer.stopSpeaking(at: .immediate)
-            synthesizer = AVSpeechSynthesizer()
-            synthesizer.delegate = self
-        } else {
-            // A just-queued utterance can precede `isSpeaking`, so always stop.
-            synthesizer.stopSpeaking(at: .immediate)
+        playbackToken &+= 1
+        activeSynthesisTask?.cancel()
+        activeSynthesisTask = nil
+        prefetchTask?.cancel()
+        prefetchTask = nil
+        playerNode.stop()
+        currentClip = nil
+        activeTimingIndex = nil
+        hasScheduledBuffer = false
+        isBufferPaused = false
+        state.statusDetail = nil
+    }
+
+    private func clearPrefetchCache() {
+        prefetchTask?.cancel()
+        prefetchTask = nil
+        prefetchCache.removeAll()
+        prefetchOrder.removeAll()
+    }
+
+    private func storePrefetch(_ clip: KokoroSynthesizedClip, for key: PrefetchKey) {
+        if prefetchCache[key] == nil {
+            prefetchOrder.append(key)
+        }
+        prefetchCache[key] = clip
+        while prefetchOrder.count > 4 {
+            let evicted = prefetchOrder.removeFirst()
+            prefetchCache.removeValue(forKey: evicted)
         }
     }
 
@@ -334,9 +441,11 @@ final class TTSEngine: NSObject, AVSpeechSynthesizerDelegate {
             while segment < segments.count {
                 let text = segments[segment].text as NSString
                 if offset < text.length {
-                    // Never cut a surrogate pair or grapheme cluster.
                     let start = text.rangeOfComposedCharacterSequence(at: offset).location
-                    if !text.substring(from: start).allSatisfy(\.isWhitespace) { return (chapter, segment, start) }
+                    let remaining = text.substring(from: start)
+                    if remaining.contains(where: { $0.isLetter || $0.isNumber }) {
+                        return (chapter, segment, start)
+                    }
                 }
                 segment += 1
                 offset = 0
@@ -358,60 +467,375 @@ final class TTSEngine: NSObject, AVSpeechSynthesizerDelegate {
         chapterIndex = position.chapter
         segmentIndex = position.segment
         utf16Offset = position.offset
+        currentSliceStartOffset = position.offset
         reachedEnd = false
         let current = chapters[chapterIndex].segments[segmentIndex]
-        wordRange = utf16Offset == 0 ? nil : current.wordRanges.first { $0.location <= utf16Offset && utf16Offset < $0.end }?.nsRange
+        wordRange = current.wordRanges.first { $0.location <= utf16Offset && utf16Offset < $0.end }?.nsRange
+            ?? (utf16Offset == 0 ? current.wordRanges.first?.nsRange : nil)
         state.status = play ? .playing : .paused
-        needsReenqueue = !play
+        needsSynthesisOnResume = !play
         resetElapsed()
         highlight()
         if play {
-            enqueue(current)
-            startTicker()
+            beginSynthesizingCurrentSegment()
         } else {
-            stopTicker()
+            stopSyncTimer()
         }
         publish()
     }
 
-    private func enqueue(_ segment: TTSDocumentSegment) {
-        let utterance = TaggedSpeechUtterance(
-            string: (segment.text as NSString).substring(from: utf16Offset), generation: generation, offset: utf16Offset
-        )
-        utterance.rate = TTSRateMapper.avRate(
-            for: state.rate,
-            minRate: AVSpeechUtteranceMinimumSpeechRate,
-            defaultRate: AVSpeechUtteranceDefaultSpeechRate,
-            maxRate: AVSpeechUtteranceMaximumSpeechRate
-        )
-        utterance.volume = volume
-        utterance.voice = resolvedVoice()
-        utteranceStarted = false
-        synthesizer.speak(utterance)
+    private func beginSynthesizingCurrentSegment() {
+        let gen = generation
+        let chapter = chapterIndex
+        let segment = segmentIndex
+        let sliceOffset = utf16Offset
+        let segmentModel = chapters[chapter].segments[segment]
+        let sliceText = (segmentModel.text as NSString).substring(from: sliceOffset)
+        let key = prefetchKey(chapter: chapter, segment: segment, offset: sliceOffset)
+
+        if let cached = prefetchCache.removeValue(forKey: key) {
+            prefetchOrder.removeAll { $0 == key }
+            playClip(cached, generation: gen)
+            return
+        }
+
+        let voiceID = activeVoiceID
+        let rate = state.rate
+
+        activeSynthesisTask = Task { [weak self] in
+            guard let self else { return }
+            let initialStatus = await self.service.currentStatus()
+            if case .ready = initialStatus {
+                // Fast path: already warm, no loading banner flicker.
+            } else {
+                await MainActor.run {
+                    guard self.generation == gen, self.state.isPresented, self.state.status == .playing else { return }
+                    self.state.statusDetail = Self.loadingBanner(for: initialStatus)
+                    self.publish()
+                }
+            }
+
+            do {
+                let clip = try await self.service.synthesize(
+                    sliceText: sliceText,
+                    sliceUTF16Offset: sliceOffset,
+                    voiceID: voiceID,
+                    rate: rate
+                )
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard self.generation == gen, self.state.isPresented, self.state.status == .playing else { return }
+                    self.activeSynthesisTask = nil
+                    self.playClip(clip, generation: gen)
+                }
+            } catch is CancellationError {
+                return
+            } catch let error as KokoroServiceError {
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard self.generation == gen, self.state.isPresented, self.state.status == .playing else { return }
+                    self.activeSynthesisTask = nil
+                    switch error {
+                    case .unpronounceableText:
+                        // Skip punctuation/symbol-only slices smoothly.
+                        let length = self.chapters[self.chapterIndex].segments[self.segmentIndex].utf16Length
+                        self.move(chapter: self.chapterIndex, segment: self.segmentIndex, offset: length, play: true)
+                    case .modelUnavailable(let detail):
+                        self.handleSynthesisFailure(detail)
+                    }
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard self.generation == gen, self.state.isPresented, self.state.status == .playing else { return }
+                    self.activeSynthesisTask = nil
+                    self.handleSynthesisFailure(error.localizedDescription)
+                }
+            }
+        }
     }
 
-    /// nil leaves the system default voice. A missing saved voice is kept in settings.
-    private func resolvedVoice() -> AVSpeechSynthesisVoice? {
-        guard let identifier = state.voiceIdentifier else { return nil }
-        if let voice = AVSpeechSynthesisVoice(identifier: identifier) { return voice }
-        if !warnedMissingVoice {
-            warnedMissingVoice = true
-            onToast?("Selected voice unavailable — using system default")
+    private func handleSynthesisFailure(_ detail: String) {
+        state.status = .paused
+        state.statusDetail = nil
+        needsSynthesisOnResume = true
+        stopSyncTimer()
+        onToast?("Kokoro TTS unavailable: \(detail)")
+        publish()
+    }
+
+    private static func loadingBanner(for status: KokoroModelStatus) -> String {
+        switch status {
+        case .preparing(let text): return text
+        case .notDownloaded: return "Downloading Kokoro voice model…"
+        case .cached: return "Loading Kokoro voice…"
+        case .ready: return ""
+        case .failed: return "Retrying Kokoro voice…"
         }
-        return AVSpeechSynthesisVoice(language: nil)
+    }
+
+    private func syncStatusDetailIfPreparing() {
+        guard state.isPresented, state.status == .playing, activeSynthesisTask != nil, !hasScheduledBuffer else { return }
+        let gen = generation
+        Task { [weak self] in
+            guard let self else { return }
+            let current = await self.service.currentStatus()
+            await MainActor.run {
+                guard self.generation == gen, self.state.isPresented,
+                      self.state.status == .playing, self.activeSynthesisTask != nil,
+                      !self.hasScheduledBuffer else { return }
+                if case .preparing(let message) = current {
+                    self.state.statusDetail = message
+                    self.publish()
+                }
+            }
+        }
+    }
+
+    // MARK: - AVAudioEngine Playback
+
+    private func ensureAudioGraph(sampleRate: Int) throws -> AVAudioFormat {
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: Double(sampleRate), channels: 1) else {
+            throw KokoroServiceError.modelUnavailable("Invalid audio sample rate \(sampleRate)")
+        }
+        if !audioGraphAttached {
+            audioEngine.attach(playerNode)
+            audioEngine.attach(timePitch)
+            audioGraphAttached = true
+        }
+        if configuredSampleRate != sampleRate {
+            if audioEngine.isRunning { audioEngine.stop() }
+            audioEngine.disconnectNodeOutput(playerNode)
+            audioEngine.disconnectNodeOutput(timePitch)
+            audioEngine.connect(playerNode, to: timePitch, format: format)
+            audioEngine.connect(timePitch, to: audioEngine.mainMixerNode, format: format)
+            configuredSampleRate = sampleRate
+            audioEngine.prepare()
+        }
+        if !audioEngine.isRunning {
+            try audioEngine.start()
+        }
+        return format
+    }
+
+    private func playClip(_ clip: KokoroSynthesizedClip, generation gen: UInt64) {
+        guard gen == generation, state.isPresented, state.status == .playing else { return }
+        state.statusDetail = nil
+
+        guard !clip.samples.isEmpty, clip.sampleRate > 0 else {
+            advanceAfterCurrentSegment()
+            return
+        }
+
+        do {
+            let format = try ensureAudioGraph(sampleRate: clip.sampleRate)
+            guard let buffer = AVAudioPCMBuffer(
+                pcmFormat: format,
+                frameCapacity: AVAudioFrameCount(clip.samples.count)
+            ) else {
+                handleSynthesisFailure("Could not allocate audio buffer")
+                return
+            }
+            buffer.frameLength = AVAudioFrameCount(clip.samples.count)
+            if let channel = buffer.floatChannelData?[0] {
+                clip.samples.withUnsafeBufferPointer { source in
+                    if let base = source.baseAddress {
+                        channel.update(from: base, count: source.count)
+                    }
+                }
+            }
+
+            timePitch.pitch = 0
+            timePitch.rate = clip.speedPlan.timePitchRate
+            timePitch.bypass = !clip.speedPlan.needsTimePitch
+            playerNode.volume = volume
+
+            playbackToken &+= 1
+            let token = playbackToken
+            playerNode.stop()
+
+            currentClip = clip
+            activeTimingIndex = nil
+            hasScheduledBuffer = true
+            isBufferPaused = false
+            needsSynthesisOnResume = false
+
+            if let firstWord = clip.timings.first {
+                activeTimingIndex = 0
+                utf16Offset = firstWord.utf16Range.location
+                wordRange = firstWord.utf16Range.nsRange
+                highlight()
+            }
+
+            playerNode.scheduleBuffer(buffer, at: nil, options: [], completionCallbackType: .dataPlayedBack) { [weak self] _ in
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let self,
+                              gen == self.generation,
+                              token == self.playbackToken,
+                              self.state.isPresented,
+                              self.state.status == .playing else { return }
+                        self.advanceAfterCurrentSegment()
+                    }
+                }
+            }
+            playerNode.play()
+            startSyncTimer()
+            publish()
+            schedulePrefetch(afterChapter: chapterIndex, segment: segmentIndex)
+        } catch {
+            handleSynthesisFailure(error.localizedDescription)
+        }
+    }
+
+    private func advanceAfterCurrentSegment() {
+        guard chapters.indices.contains(chapterIndex),
+              chapters[chapterIndex].segments.indices.contains(segmentIndex) else {
+            finishAtEnd()
+            return
+        }
+        let length = chapters[chapterIndex].segments[segmentIndex].utf16Length
+        move(chapter: chapterIndex, segment: segmentIndex, offset: length, play: true)
+    }
+
+    private func schedulePrefetch(afterChapter chapter: Int, segment: Int) {
+        prefetchTask?.cancel()
+        prefetchTask = nil
+        guard state.isPresented, state.status == .playing else { return }
+
+        var targets: [(chapter: Int, segment: Int, offset: Int, text: String, key: PrefetchKey)] = []
+        var cursorChapter = chapter
+        var cursorSegment = segment
+        for _ in 0..<2 {
+            guard chapters.indices.contains(cursorChapter),
+                  chapters[cursorChapter].segments.indices.contains(cursorSegment) else { break }
+            let endOffset = chapters[cursorChapter].segments[cursorSegment].utf16Length
+            guard let next = speakablePosition(chapter: cursorChapter, segment: cursorSegment, offset: endOffset) else { break }
+            let key = prefetchKey(chapter: next.chapter, segment: next.segment, offset: next.offset)
+            if prefetchCache[key] == nil {
+                let text = (chapters[next.chapter].segments[next.segment].text as NSString).substring(from: next.offset)
+                targets.append((next.chapter, next.segment, next.offset, text, key))
+            }
+            cursorChapter = next.chapter
+            cursorSegment = next.segment
+        }
+
+        guard !targets.isEmpty else { return }
+        let gen = generation
+        let voiceID = activeVoiceID
+        let rate = state.rate
+
+        prefetchTask = Task { [weak self] in
+            guard let self else { return }
+            for target in targets {
+                guard !Task.isCancelled else { return }
+                do {
+                    let clip = try await self.service.synthesize(
+                        sliceText: target.text,
+                        sliceUTF16Offset: target.offset,
+                        voiceID: voiceID,
+                        rate: rate
+                    )
+                    guard !Task.isCancelled else { return }
+                    await MainActor.run {
+                        guard self.generation == gen, self.state.isPresented else { return }
+                        self.storePrefetch(clip, for: target.key)
+                    }
+                } catch {
+                    // Best-effort prefetch; errors will be handled if/when the segment becomes active.
+                    if Task.isCancelled { return }
+                }
+            }
+        }
+    }
+
+    private func handleAudioConfigurationChange() {
+        configuredSampleRate = nil
+        playbackToken &+= 1
+        hasScheduledBuffer = false
+        isBufferPaused = false
+        needsSynthesisOnResume = true
+        stopSyncTimer()
+        guard state.isPresented, state.status == .playing else { return }
+        move(chapter: chapterIndex, segment: segmentIndex, offset: utf16Offset, play: true)
+    }
+
+    // MARK: - Word Highlight & Elapsed Time Sync
+
+    private func currentBufferPlaybackTime() -> TimeInterval? {
+        guard hasScheduledBuffer,
+              let nodeTime = playerNode.lastRenderTime,
+              nodeTime.isSampleTimeValid,
+              let playerTime = playerNode.playerTime(forNodeTime: nodeTime),
+              playerTime.isSampleTimeValid,
+              playerTime.sampleRate > 0 else { return nil }
+        return max(0, Double(playerTime.sampleTime) / playerTime.sampleRate)
+    }
+
+    private func startSyncTimer() {
+        guard syncTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.refreshFromPlaybackClock(forceHighlight: false)
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        syncTimer = timer
+    }
+
+    private func stopSyncTimer() {
+        syncTimer?.invalidate()
+        syncTimer = nil
+    }
+
+    private func refreshFromPlaybackClock(forceHighlight: Bool) {
+        guard state.status == .playing,
+              let clip = currentClip,
+              chapters.indices.contains(chapterIndex),
+              chapters[chapterIndex].segments.indices.contains(segmentIndex),
+              let playbackSec = currentBufferPlaybackTime() else { return }
+
+        var shouldPublish = false
+        if let idx = KokoroWordAligner.activeWordIndex(at: playbackSec, in: clip.timings),
+           forceHighlight || idx != activeTimingIndex {
+            activeTimingIndex = idx
+            let timing = clip.timings[idx]
+            utf16Offset = timing.utf16Range.location
+            wordRange = timing.utf16Range.nsRange
+            highlight()
+            shouldPublish = true
+        }
+
+        let chapter = chapters[chapterIndex]
+        let segment = chapter.segments[segmentIndex]
+        let startBase = chapter.baseTime(segmentIndex: segmentIndex, utf16Offset: currentSliceStartOffset)
+        let endBase = chapter.baseTime(segmentIndex: segmentIndex, utf16Offset: segment.utf16Length)
+        let duration = max(clip.rawAudioDuration, 0.001)
+        let fraction = min(max(playbackSec / duration, 0), 1)
+        let projected = startBase + fraction * max(endBase - startBase, 0)
+        if abs(projected - state.elapsed) >= 0.05 || shouldPublish {
+            state.elapsed = max(state.elapsed, projected)
+            shouldPublish = true
+        }
+        if shouldPublish { publish() }
+    }
+
+    private func resetElapsed() {
+        guard chapters.indices.contains(chapterIndex) else { return }
+        state.elapsed = chapters[chapterIndex].baseTime(segmentIndex: segmentIndex, utf16Offset: utf16Offset)
     }
 
     /// Stops at the end of the last chapter and leaves the player open.
     private func finishAtEnd() {
         cancelSpeech()
-        stopTicker()
+        stopSyncTimer()
         guard let last = chapters.lastIndex(where: { !$0.segments.isEmpty }) else { return }
         chapterIndex = last
         segmentIndex = chapters[last].segments.count - 1
         utf16Offset = chapters[last].segments[segmentIndex].utf16Length
         wordRange = nil
         reachedEnd = true
-        needsReenqueue = true
+        needsSynthesisOnResume = true
         state.status = .paused
         resetElapsed()
         bridge?.clearTTSHighlight()
@@ -434,169 +858,28 @@ final class TTSEngine: NSObject, AVSpeechSynthesizerDelegate {
         }
         onStateChange?(state)
     }
-
-    // MARK: - Elapsed time
-
-    private func resetElapsed() {
-        let base = chapters[chapterIndex].baseTime(segmentIndex: segmentIndex, utf16Offset: utf16Offset)
-        state.elapsed = base
-        tickAnchor = (base, Date())
-    }
-
-    /// Advances between word callbacks, but never past the next word.
-    private func refreshElapsed() {
-        guard state.status == .playing, chapters.indices.contains(chapterIndex),
-              chapters[chapterIndex].segments.indices.contains(segmentIndex) else { return }
-        let chapter = chapters[chapterIndex]
-        let segment = chapter.segments[segmentIndex]
-        let next = segment.wordRanges.first { $0.location > utf16Offset }?.location ?? segment.utf16Length
-        let limit = chapter.baseTime(segmentIndex: segmentIndex, utf16Offset: next)
-        let projected = tickAnchor.base + Date().timeIntervalSince(tickAnchor.date) * state.rate
-        state.elapsed = max(state.elapsed, min(projected, limit))
-    }
-
-    private func startTicker() {
-        guard ticker == nil else { return }
-        let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                let before = self.state.elapsed
-                self.refreshElapsed()
-                if self.state.elapsed != before { self.publish() }
-            }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        ticker = timer
-    }
-
-    private func stopTicker() {
-        ticker?.invalidate()
-        ticker = nil
-    }
-
-    // MARK: - AVSpeechSynthesizerDelegate
-
-    /// Hops to the main queue in arrival order and drops superseded utterances.
-    private nonisolated func deliver(_ utterance: AVSpeechUtterance, _ body: @escaping @MainActor (TTSEngine, _ offset: Int) -> Void) {
-        guard let tagged = utterance as? TaggedSpeechUtterance else { return }
-        let (generation, offset) = (tagged.generation, tagged.offset)
-        DispatchQueue.main.async { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self, generation == self.generation, self.state.isPresented else { return }
-                body(self, offset)
-            }
-        }
-    }
-
-    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, willSpeakRangeOfSpeechString characterRange: NSRange, utterance: AVSpeechUtterance) {
-        deliver(utterance) { engine, offset in engine.willSpeak(characterRange, offset: offset) }
-    }
-
-    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
-        deliver(utterance) { engine, _ in engine.utteranceStarted = true }
-    }
-
-    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        deliver(utterance) { engine, _ in
-            guard engine.state.status == .playing else { return }
-            let length = engine.chapters[engine.chapterIndex].segments[engine.segmentIndex].utf16Length
-            engine.move(chapter: engine.chapterIndex, segment: engine.segmentIndex, offset: length, play: true)
-        }
-    }
-
-    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
-        // Our own cancellations bump the generation first, so this one came from outside.
-        deliver(utterance) { engine, _ in
-            engine.state.status = .paused
-            engine.needsReenqueue = true
-            engine.stopTicker()
-            engine.publish()
-        }
-    }
-
-    private func willSpeak(_ range: NSRange, offset: Int) {
-        let length = chapters[chapterIndex].segments[segmentIndex].utf16Length
-        let location = offset + range.location
-        guard state.status == .playing, range.location != NSNotFound, location < length else { return }
-        utteranceStarted = true
-        utf16Offset = location
-        wordRange = NSRange(location: location, length: min(range.length, length - location))
-        resetElapsed()
-        highlight()
-        publish()
-    }
 }
 
-/// Installed voices offered in the player menu and in Settings.
-///
-/// `speechVoices()` is a slow round trip to the speech daemon, so the list is
-/// fetched once off the main thread and kept until the installed voices change.
+/// Kokoro-82M voice groups offered in the player menu and in Settings.
 enum TTSVoiceCatalog {
     struct Group {
         var title: String
         var voices: [(identifier: String, label: String)]
     }
 
-    private struct Voice {
-        var identifier: String
-        var language: String
-        var name: String
-        var label: String
-        var quality: AVSpeechSynthesisVoiceQuality
-        /// Offered without having been selected.
-        var isListed: Bool
-    }
-
-    /// Held across the fetch, so a caller that arrives early waits for it instead of repeating it.
-    private static let lock = NSLock()
-    private static var cache: [Voice]?
-
-    private static let changeObserver = NotificationCenter.default.addObserver(
-        forName: AVSpeechSynthesizer.availableVoicesDidChangeNotification, object: nil, queue: nil
-    ) { _ in
-        DispatchQueue.global(qos: .userInitiated).async {
-            lock.withLock { cache = fetch() }
-        }
-    }
-
-    /// Fills the cache in the background. Cheap to call again.
     static func prewarm() {
-        _ = changeObserver
-        DispatchQueue.global(qos: .userInitiated).async { _ = voices() }
-    }
-
-    private static func voices() -> [Voice] {
-        lock.withLock {
-            if let cache { return cache }
-            let fetched = fetch()
-            cache = fetched
-            return fetched
+        Task {
+            let voice = SettingsStore.load().ttsVoiceIdentifier
+            await KokoroEngineService.shared.prewarmIfCached(preferredVoiceID: voice)
         }
     }
 
-    /// Every installed voice, sorted by language and name.
-    private static func fetch() -> [Voice] {
-        let languages: Set<String> = ["en", String(AVSpeechSynthesisVoice.currentLanguageCode().prefix(2))]
-        return AVSpeechSynthesisVoice.speechVoices().map { voice in
-            Voice(
-                identifier: voice.identifier, language: voice.language, name: voice.name,
-                label: "\(voice.name) — \(Locale.current.localizedString(forIdentifier: voice.language) ?? voice.language)",
-                quality: voice.quality,
-                isListed: languages.contains(String(voice.language.prefix(2)))
-                    && !voice.voiceTraits.contains(.isNoveltyVoice)
-                    && !voice.identifier.contains(".eloquence.")
-            )
-        }.sorted { ($0.language, $0.name) < ($1.language, $1.name) }
-    }
-
-    /// English and system-language voices, best quality first. `selected` is
-    /// listed even when it falls outside that filter.
     static func groups(including selected: String? = nil) -> [Group] {
-        let offered = voices().filter { $0.isListed || $0.identifier == selected }
-        let qualities: [(AVSpeechSynthesisVoiceQuality, String)] = [(.premium, "Premium"), (.enhanced, "Enhanced"), (.default, "Standard")]
-        return qualities.compactMap { quality, title in
-            let members = offered.filter { $0.quality == quality }.map { ($0.identifier, $0.label) }
-            return members.isEmpty ? nil : Group(title: title, voices: members)
+        KokoroVoiceCatalog.groups().map { group in
+            Group(
+                title: group.title,
+                voices: group.voices.map { ($0.id, $0.label) }
+            )
         }
     }
 }

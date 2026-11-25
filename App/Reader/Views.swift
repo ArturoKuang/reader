@@ -726,7 +726,8 @@ struct SettingsView: View {
     @State private var anthropicKey = KeychainStore.load(account: "anthropic") ?? ""
     @State private var keyStatus = ""
     @State private var detectingCLIs = false
-    @State private var voiceGroups: [TTSVoiceCatalog.Group] = []
+    @State private var voiceGroups: [TTSVoiceCatalog.Group] = TTSVoiceCatalog.groups()
+    @State private var kokoroStatus: KokoroModelStatus = KokoroEngineService.isModelCachedOnDisk() ? .cached : .notDownloaded
     @State private var openInspector = UserDefaults.standard.object(forKey: "reader.openInspector") as? Bool ?? true
     @FocusState private var keyField: String?
 
@@ -740,26 +741,29 @@ struct SettingsView: View {
                         UserDefaults.standard.set(value, forKey: "reader.openInspector")
                     }
             }
-            Section("Read Aloud") {
-                Picker("Speed", selection: $settings.ttsRateMultiplier) {
-                    ForEach(TTSSpeedPreset.allCases, id: \.rawValue) { Text($0.label).tag($0.rawValue) }
-                }
-                Picker("Voice", selection: $settings.ttsVoiceIdentifier) {
-                    Text("System Default").tag(String?.none)
-                    ForEach(voiceGroups, id: \.title) { group in
-                        Section(group.title) {
-                            ForEach(group.voices, id: \.identifier) { Text($0.label).tag(String?.some($0.identifier)) }
-                        }
-                    }
-                    if let saved = settings.ttsVoiceIdentifier, !voiceGroups.contains(where: { $0.voices.contains { $0.identifier == saved } }) {
-                        Text("Unavailable voice").tag(String?.some(saved))
-                    }
-                }
-            }
+            readAloudSection
         }
         .formStyle(.grouped)
-        .onAppear { voiceGroups = TTSVoiceCatalog.groups(including: settings.ttsVoiceIdentifier) }
+        .onAppear {
+            voiceGroups = TTSVoiceCatalog.groups(including: settings.ttsVoiceIdentifier)
+            Task { kokoroStatus = await KokoroEngineService.shared.currentStatus() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .kokoroStatusDidChange)) { _ in
+            Task { kokoroStatus = await KokoroEngineService.shared.currentStatus() }
+        }
         // The player saves speed and voice too; keep this copy from overwriting them.
+        .onChange(of: settings.ttsRateMultiplier) { _, newValue in
+            let saved = SettingsStore.load()
+            guard abs(saved.ttsRateMultiplier - newValue) > 0.0001 else { return }
+            SettingsStore.save(settings)
+            NotificationCenter.default.post(name: .ttsSettingsDidChange, object: nil)
+        }
+        .onChange(of: settings.ttsVoiceIdentifier) { _, newValue in
+            let saved = SettingsStore.load()
+            guard saved.ttsVoiceIdentifier != newValue else { return }
+            SettingsStore.save(settings)
+            NotificationCenter.default.post(name: .ttsSettingsDidChange, object: nil)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .ttsSettingsDidChange)) { _ in
             let saved = SettingsStore.load()
             settings.ttsRateMultiplier = saved.ttsRateMultiplier
@@ -874,6 +878,56 @@ struct SettingsView: View {
                 keyStatus = (error as? AIError)?.userMessage ?? (error as? ReaderFailure)?.message ?? error.localizedDescription
             }
         }
+    }
+
+
+    private var selectedKokoroVoiceID: Binding<String> {
+        Binding(
+            get: { KokoroVoiceCatalog.resolve(settings.ttsVoiceIdentifier).id },
+            set: { settings.ttsVoiceIdentifier = $0 }
+        )
+    }
+
+    private var readAloudSection: some View {
+        Section("Read Aloud (Kokoro-82M)") {
+            Picker("Speed", selection: $settings.ttsRateMultiplier) {
+                ForEach(TTSSpeedPreset.allCases, id: \.rawValue) { Text($0.label).tag($0.rawValue) }
+            }
+            Picker("Voice", selection: selectedKokoroVoiceID) {
+                ForEach(voiceGroups, id: \.title) { group in
+                    Section(group.title) {
+                        ForEach(group.voices, id: \.identifier) { Text($0.label).tag($0.identifier) }
+                    }
+                }
+            }
+            HStack {
+                Text("Voice Model")
+                Spacer()
+                Text(kokoroStatus.summaryText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                kokoroActionButton
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var kokoroActionButton: some View {
+        switch kokoroStatus {
+        case .notDownloaded:
+            Button("Download") { triggerKokoroDownload() }
+                .controlSize(.small)
+        case .failed:
+            Button("Retry") { triggerKokoroDownload() }
+                .controlSize(.small)
+        default:
+            EmptyView()
+        }
+    }
+
+    private func triggerKokoroDownload() {
+        let voiceID = KokoroVoiceCatalog.resolve(settings.ttsVoiceIdentifier).id
+        Task { _ = try? await KokoroEngineService.shared.ensureReady(voiceID: voiceID) }
     }
 
     private func storeKey(account: String, value: String) {

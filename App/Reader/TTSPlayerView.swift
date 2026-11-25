@@ -144,7 +144,8 @@ final class TTSPlayerView: NSView {
 
     func render(_ state: TTSEngineState) {
         self.state = state
-        let title = state.chapterTitle.isEmpty ? fallbackTitle : state.chapterTitle
+        let baseTitle = state.chapterTitle.isEmpty ? fallbackTitle : state.chapterTitle
+        let title = (state.statusDetail?.isEmpty == false) ? state.statusDetail! : baseTitle
         titleLabel.stringValue = title
         titleLabel.toolTip = title
         scrubber.duration = state.duration
@@ -238,13 +239,13 @@ final class TTSPlayerView: NSView {
             menu.addItem(item)
         }
         menu.addItem(.separator())
-        let voices = NSMenu(title: "Voice")
-        voices.addItem(voiceItem("System Default", identifier: nil))
-        for group in TTSVoiceCatalog.groups(including: state.voiceIdentifier) {
-            voices.addItem(.separator())
+        let selectedVoiceID = KokoroVoiceCatalog.resolve(state.voiceIdentifier).id
+        let voices = NSMenu(title: "Kokoro Voice")
+        for (index, group) in TTSVoiceCatalog.groups(including: selectedVoiceID).enumerated() {
+            if index > 0 { voices.addItem(.separator()) }
             voices.addItem(.sectionHeader(title: group.title))
             for voice in group.voices {
-                voices.addItem(voiceItem(voice.label, identifier: voice.identifier))
+                voices.addItem(voiceItem(voice.label, identifier: voice.identifier, selectedID: selectedVoiceID))
             }
         }
         let voice = NSMenuItem(title: "Voice", action: nil, keyEquivalent: "")
@@ -253,11 +254,11 @@ final class TTSPlayerView: NSView {
         return menu
     }
 
-    private func voiceItem(_ title: String, identifier: String?) -> NSMenuItem {
+    private func voiceItem(_ title: String, identifier: String, selectedID: String) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: #selector(voiceChosen(_:)), keyEquivalent: "")
         item.target = self
         item.representedObject = identifier
-        item.state = identifier == state.voiceIdentifier ? .on : .off
+        item.state = identifier == selectedID ? .on : .off
         return item
     }
 
