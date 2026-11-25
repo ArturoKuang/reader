@@ -4,17 +4,19 @@ import ReaderCore
 import SwiftUI
 import WebKit
 
-/// EPUB is rendered in WKWebView rather than Readium. The core package already parses
-/// the ZIP, spine, and a CFI subset on any platform; WebKit only displays it. Reflow
-/// zoom changes the font size. Two-page mode uses CSS columns, which is an approximation.
-final class EPUBContainerViewController: NSViewController, WKScriptMessageHandler, WKNavigationDelegate {
+/// EPUB and Markdown share this WKWebView. The core package parses both on any platform;
+/// WebKit only displays them. Reflow zoom changes the font size. Two-page mode uses CSS
+/// columns, which is an approximation.
+final class WebDocumentContainerViewController: NSViewController, WKScriptMessageHandler, WKNavigationDelegate {
     let session: ReaderSession
     private var webView: WKWebView?
     private let findBar = NSSearchField()
     private var findTop: NSLayoutConstraint?
     private var fontScale: Double = 1
-    private var contactHost: NSHostingController<EPUBContactSheet>?
+    private var contactHost: NSHostingController<WebContactSheet>?
     private var spineLoaded = false
+    private var watcher: MarkdownFileWatcher?
+    private var keyMonitor: Any?
     private var acceptSpineReports = false
     private var pendingFlash: String?
 
@@ -26,10 +28,27 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
+    deinit {
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+    }
+
+    /// Releases the file watcher, key monitor, and script handler when the window closes.
+    func tearDown() {
+        watcher?.stop()
+        watcher = nil
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = nil
+        webView?.configuration.userContentController.removeScriptMessageHandler(forName: "reader")
+    }
+
+    private var documentDirectory: String { session.bookURL.deletingLastPathComponent().path }
+
     override func loadView() {
         view = NSView()
         let configuration = WKWebViewConfiguration()
         configuration.userContentController.add(self, name: "reader")
+        let roots = [documentDirectory] + (session.vaultRoot.map { [$0] } ?? [])
+        configuration.setURLSchemeHandler(LocalAssetSchemeHandler { roots }, forURLScheme: LocalAssetSchemeHandler.scheme)
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = self
         webView.translatesAutoresizingMaskIntoConstraints = false
@@ -55,10 +74,15 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         fontScale = session.zoom
         session.onAnnotationsChanged = { [weak self] in
             guard let self else { return }
-            self.webView?.evaluateJavaScript("window.readerPaint && window.readerPaint(\(self.highlightScript()))")
+            self.webView?.evaluateJavaScript("window.readerPaint && window.readerPaint(\(self.highlightScript())); window.readerMarginNotes && window.readerMarginNotes(\(self.marginNoteScript()));")
         }
-        loadSpine()
-        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        loadDocument()
+        if session.isMarkdown {
+            watcher = MarkdownFileWatcher(url: session.bookURL, initial: session.bookData) { [weak self] data in
+                self?.reloadMarkdown(data)
+            }
+        }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, event.window == self.view.window, self.view.window?.firstResponder is WKWebView else { return event }
             let shift = event.modifierFlags.contains(.shift)
             if event.keyCode == 49 {
@@ -76,15 +100,17 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         let check = forward ? "window.scrollY + window.innerHeight >= document.body.scrollHeight - 8" : "window.scrollY <= 8"
         webView?.evaluateJavaScript("window.scrollBy(0, window.innerHeight * 0.9 * \(direction)); \(check)") { [weak self] result, _ in
             guard let self, (result as? Bool) == true else { return }
+            if self.session.isMarkdown { return }
             if forward { self.nextPage() } else if self.session.page > 1 { self.previousPage() }
         }
     }
 
     func applyDisplayMode() {
-        if webView?.url != nil, session.continuous {
+        view.window?.appearance = windowAppearance()
+        if webView?.url != nil, session.continuous || session.isMarkdown {
             applyLiveStyle()
         } else {
-            loadSpine()
+            loadDocument()
         }
     }
 
@@ -93,10 +119,9 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         contactHost = nil
         webView?.isHidden = visible
         guard visible else { return }
-        let host = NSHostingController(rootView: EPUBContactSheet(session: session) { [weak self] index in
-            self?.session.page = index + 1
+        let host = NSHostingController(rootView: WebContactSheet(session: session) { [weak self] index in
             self?.session.setSidebar(.thumbnails)
-            self?.loadSpine()
+            self?.showSection(index: index)
             (self?.view.window?.windowController as? ReaderWindowController)?.applyChrome()
         })
         host.view.translatesAutoresizingMaskIntoConstraints = false
@@ -120,7 +145,16 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     }
 
     func applyLiveStyle() {
-        guard webView?.url != nil else { loadSpine(); return }
+        guard webView?.url != nil else { loadDocument(); return }
+        view.window?.appearance = windowAppearance()
+        if session.isMarkdown {
+            let options = markdownOptions()
+            call("window.readerStyle(theme, variables, columns, highlightCSS)", [
+                "theme": options.theme, "variables": markdownVariables(options),
+                "columns": session.twoPages, "highlightCSS": highlightCSS(),
+            ])
+            return
+        }
         let appearance = epubAppearance()
         let family = appearance.font.isEmpty ? "inherit" : appearance.font
         let script = """
@@ -134,8 +168,8 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         """
         webView?.evaluateJavaScript(script)
     }
-    func nextPage() { showSpine(index: min(session.page, max(session.pageCount - 1, 0))) }
-    func previousPage() { showSpine(index: max(session.page - 2, 0)) }
+    func nextPage() { showSection(index: min(session.page, max(session.pageCount - 1, 0))) }
+    func previousPage() { showSection(index: max(session.page - 2, 0)) }
     func toggleFind() {
         findBar.isHidden = false
         findTop?.constant = 8
@@ -161,10 +195,6 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         webView?.evaluateJavaScript("window.find('\(escaped)', false, \(!forward), true)")
     }
 
-    func captureSelection() {
-        captureSelection(completion: {})
-    }
-
     /// Reads the DOM selection and only then runs `completion`, on the main queue.
     func captureSelection(completion: @escaping () -> Void) {
         guard let webView else {
@@ -174,9 +204,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         webView.evaluateJavaScript("window.readerSelection && window.readerSelection()") { [weak self] result, _ in
             DispatchQueue.main.async {
                 if let self, let object = result as? [String: Any], let text = object["text"] as? String, !text.isEmpty {
-                    if let index = self.integer(object["index"]), let epub = self.session.epub, epub.spine.indices.contains(index) {
-                        self.applySpine(index, count: epub.spine.count)
-                    }
+                    if let index = self.integer(object["index"]) { self.applySection(index) }
                     self.session.selection = SelectionContext(
                         text: text,
                         cfi: object["cfi"] as? String,
@@ -193,45 +221,115 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     }
 
     func reveal(_ position: ReadingPosition) {
-        if let cfi = position.cfi, let parsed = EPUBCFI(value: cfi), let index = parsed.spineIndex {
-            showSpine(index: index)
+        if session.isMarkdown {
+            if let anchor = position.cfi.flatMap({ MarkdownAnchor(value: $0) }) {
+                applySection(anchor.sectionIndex)
+                scrollToAnchor(anchor.anchorID)
+            } else if let page = position.page {
+                showSection(index: page - 1)
+            }
+        } else if let cfi = position.cfi, let parsed = EPUBCFI(value: cfi), let index = parsed.spineIndex {
+            showSection(index: index)
         } else if let page = position.page {
-            showSpine(index: page - 1)
+            showSection(index: page - 1)
         }
         if let quote = position.quote, !quote.isEmpty { flash(quote) }
     }
 
     func consumePendingJump() {
-        guard spineLoaded, let link = session.pendingReaderLink else { return }
+        guard spineLoaded else { return }
+        if let anchor = session.pendingAnchor {
+            session.pendingAnchor = nil
+            scrollToAnchor(anchor)
+        }
+        guard let link = session.pendingReaderLink else { return }
         session.pendingReaderLink = nil
         let quote = session.highlights.first { $0.id == link.id }?.quote ?? session.notes.first { $0.id == link.id }?.quote ?? ""
-        if !quote.isEmpty { pendingFlash = quote }
-        if let location = link.location, let cfi = EPUBCFI(value: location), let index = cfi.spineIndex {
-            showSpine(index: index)
+        if let location = link.location, let anchor = MarkdownAnchor(value: location) {
+            reveal(ReadingPosition(cfi: anchor.rawValue))
+        } else if let location = link.location, let cfi = EPUBCFI(value: location), let index = cfi.spineIndex {
+            showSection(index: index)
         } else {
-            scrollToCurrentSpine()
+            scrollToCurrentSection()
         }
-        if let pendingFlash { flash(pendingFlash) }
+        if !quote.isEmpty { flash(quote) }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         spineLoaded = true
-        if session.pendingReaderLink != nil {
-            consumePendingJump()
-        } else {
-            scrollToCurrentSpine()
-        }
+        view.window?.appearance = windowAppearance()
+        if session.pendingReaderLink == nil, session.pendingAnchor == nil { scrollToCurrentSection() }
+        consumePendingJump()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
             self?.acceptSpineReports = true
             self?.session.finishViewRestore()
         }
     }
 
+    /// The web view only ever shows the loaded document; every link leaves through here.
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard let url = navigationAction.request.url else { return decisionHandler(.cancel) }
+        // loadHTMLString arrives as `.other`; same-document fragments scroll in place.
+        let sameDocument = url.fragment != nil && url.path == webView.url?.path && url.scheme == webView.url?.scheme
+        if sameDocument || (navigationAction.navigationType == .other && navigationAction.targetFrame?.isMainFrame != false) {
+            return decisionHandler(.allow)
+        }
+        decisionHandler(.cancel)
+        guard navigationAction.navigationType == .linkActivated else { return }
+        switch url.scheme?.lowercased() {
+        case "http", "https", "mailto", "obsidian", "reader":
+            NSWorkspace.shared.open(url)
+        case "reader-wikilink":
+            let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            openWikiLink(target: items.first { $0.name == "target" }?.value ?? "", heading: items.first { $0.name == "heading" }?.value)
+        case LocalAssetSchemeHandler.scheme:
+            // A relative Markdown link, such as [next](chapter-2.md#setup).
+            guard BookKind.from(path: url.path) != nil else { return session.showToast("Can't open \(url.lastPathComponent)") }
+            openWikiLink(target: relativeTarget(url.path), heading: url.fragment)
+        case "file":
+            // An EPUB link to another chapter.
+            if let index = session.epub?.spine.firstIndex(where: { url.path.hasSuffix("/" + $0.href) }) { showSection(index: index) }
+        default:
+            break
+        }
+    }
+
+    private func relativeTarget(_ path: String) -> String {
+        path.hasPrefix(documentDirectory + "/") ? String(path.dropFirst(documentDirectory.count + 1)) : path
+    }
+
+    private func openWikiLink(target: String, heading: String?) {
+        let resolution = MarkdownWikiLinkResolver.resolve(target: target, heading: heading, currentFilePath: session.bookURL.path, vaultRoot: session.vaultRoot, fs: LocalFileSystem())
+        switch resolution {
+        case .localHeading(let anchor):
+            scrollToAnchor(anchor)
+        case .file(let path, let anchor):
+            NSDocumentController.shared.openDocument(withContentsOf: URL(fileURLWithPath: path), display: true) { [weak self] document, _, error in
+                guard let document = document as? ReaderDocument else {
+                    self?.session.showToast(error?.localizedDescription ?? "Couldn't open \(target)")
+                    return
+                }
+                guard let anchor else { return }
+                document.session?.pendingAnchor = anchor
+                (document.windowControllers.first as? ReaderWindowController)?.consumePendingJump()
+            }
+        case .notFound(let target):
+            session.showToast("Couldn't find \(target)")
+        }
+    }
+
+    private func scrollToAnchor(_ anchor: String) {
+        call("window.readerScrollToAnchor(anchor)", ["anchor": anchor])
+    }
+
+    private func call(_ body: String, _ arguments: [String: Any]) {
+        webView?.callAsyncJavaScript(body, arguments: arguments, in: nil, in: .page, completionHandler: nil)
+    }
+
     func currentPosition() -> ReadingPosition {
-        let index = min(max(session.page - 1, 0), max((session.epub?.spine.count ?? 1) - 1, 0))
-        return ReadingPosition(
+        ReadingPosition(
             zoom: fontScale,
-            cfi: EPUBCFI.make(spineIndex: index, start: 0, end: 0).value,
+            cfi: session.currentLocation(),
             section: session.sectionTitle,
             quote: session.selection?.text
         )
@@ -243,14 +341,20 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             (view.window?.windowController as? ReaderWindowController)?.dismissSelectionBar()
             return
         }
+        if body["kind"] as? String == "copy", let code = body["code"] as? String {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(code, forType: .string)
+            session.showToast("Copied")
+            return
+        }
         if body["kind"] as? String == "note", let id = body["id"] as? String {
             session.lastAnnotationHit = id
             session.openAnnotation(id)
             return
         }
         if body["kind"] as? String == "spine" {
-            guard acceptSpineReports, let index = integer(body["index"]), let epub = session.epub, epub.spine.indices.contains(index) else { return }
-            applySpine(index, count: epub.spine.count)
+            guard acceptSpineReports, let index = integer(body["index"]) else { return }
+            applySection(index)
             return
         }
         if body["kind"] as? String == "concept", let id = body["id"] as? String, let concept = session.concepts.first(where: { $0.id == id }) {
@@ -268,9 +372,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             return
         }
         guard let text = body["text"] as? String else { return }
-        if let index = integer(body["index"]), let epub = session.epub, epub.spine.indices.contains(index) {
-            applySpine(index, count: epub.spine.count)
-        }
+        if let index = integer(body["index"]) { applySection(index) }
         session.selection = SelectionContext(
             text: text,
             cfi: body["cfi"] as? String,
@@ -285,21 +387,27 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         }
     }
 
-    private func showSpine(index: Int) {
-        guard let epub = session.epub, epub.spine.indices.contains(index) else { return }
-        applySpine(index, count: epub.spine.count)
-        if session.continuous && spineLoaded {
-            scrollToSpine(epub.spine[index].id)
-        } else {
-            loadSpine()
+    private func showSection(index: Int) {
+        guard index >= 0, index < session.pageCount else { return }
+        applySection(index)
+        if let markdown = session.markdown {
+            guard markdown.sections.indices.contains(index) else { return }
+            scrollToAnchor(markdown.sections[index].anchorID)
+        } else if let epub = session.epub, epub.spine.indices.contains(index) {
+            if session.continuous && spineLoaded {
+                scrollToSpine(epub.spine[index].id)
+            } else {
+                loadDocument()
+            }
         }
     }
 
-    private func scrollToCurrentSpine() {
-        guard session.continuous, let epub = session.epub, !epub.spine.isEmpty else { return }
-        let index = min(max(session.page - 1, 0), epub.spine.count - 1)
-        applySpine(index, count: epub.spine.count)
-        scrollToSpine(epub.spine[index].id)
+    private func scrollToCurrentSection() {
+        guard session.isMarkdown || session.continuous else { return }
+        let index = min(max(session.page - 1, 0), max(session.pageCount - 1, 0))
+        // The top of a Markdown file includes its properties, so section one stays put.
+        if session.isMarkdown && index == 0 { return applySection(0) }
+        showSection(index: index)
     }
 
     private func scrollToSpine(_ id: String) {
@@ -311,12 +419,15 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         }
     }
 
-    private func applySpine(_ index: Int, count: Int) {
-        guard let epub = session.epub, epub.spine.indices.contains(index) else { return }
-        let placements = SpineChapters.placements(spine: epub.spine, toc: epub.toc)
-        let placement = placements[index]
-        let title = placement.title.isEmpty ? epub.spine[index].title : placement.title
-        session.updatePage(index + 1, count: count, section: title)
+    private func applySection(_ index: Int) {
+        if let markdown = session.markdown {
+            guard markdown.sections.indices.contains(index) else { return }
+            session.updatePage(index + 1, count: markdown.sections.count, section: markdown.sections[index].title)
+        } else if let epub = session.epub, epub.spine.indices.contains(index) {
+            let placement = SpineChapters.placements(spine: epub.spine, toc: epub.toc)[index]
+            let title = placement.title.isEmpty ? epub.spine[index].title : placement.title
+            session.updatePage(index + 1, count: epub.spine.count, section: title)
+        }
     }
 
     private func flash(_ quote: String) {
@@ -346,22 +457,21 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     }
 
     private func marginNoteScript() -> String {
-        let items = session.annotations.filter(\.hasNote).map { item -> String in
-            let quote = item.quote.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-            let body = item.body.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-            let color = String(format: "#%02X%02X%02X", Int((HighlightPalette.rgb(item.color)?.r ?? 0) * 255), Int((HighlightPalette.rgb(item.color)?.g ?? 0) * 255), Int((HighlightPalette.rgb(item.color)?.b ?? 0) * 255))
-            return "{\"id\":\"\(item.id)\",\"quote\":\"\(quote)\",\"body\":\"\(body)\",\"color\":\"\(color)\"}"
-        }
-        return "[\(items.joined(separator: ","))]"
+        json(session.annotations.filter(\.hasNote).map { item -> [String: Any] in
+            let rgb = HighlightPalette.rgb(item.color)
+            let color = String(format: "#%02X%02X%02X", Int((rgb?.r ?? 0) * 255), Int((rgb?.g ?? 0) * 255), Int((rgb?.b ?? 0) * 255))
+            return ["id": item.id, "quote": item.quote, "body": item.body, "color": color]
+        })
     }
 
     private func highlightScript() -> String {
-        let items = session.highlights.compactMap { highlight -> String? in
-            let quote = highlight.quote.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-            guard !quote.isEmpty else { return nil }
-            return "{\"quote\":\"\(quote)\",\"color\":\(highlight.color)}"
-        }
-        return "[\(items.joined(separator: ","))]"
+        json(session.highlights.filter { !$0.quote.isEmpty }.map { ["quote": $0.quote, "color": $0.color] as [String: Any] })
+    }
+
+    /// A JSON array literal; JSONSerialization escapes newlines and `</script>` slashes.
+    private func json(_ value: [[String: Any]]) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: value) else { return "[]" }
+        return String(decoding: data, as: UTF8.self)
     }
 
     private func epubAppearance() -> (font: String, line: String, margin: Int, background: String, foreground: String, align: String) {
@@ -391,7 +501,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         let chapter = ChapterFiles.number(in: session.sectionTitle)
         let visible = session.concepts.filter { concept in
             guard session.showConceptMarkers else { return false }
-            if session.continuous { return true }
+            if session.continuous || session.isMarkdown { return true }
             return concept.chapter == nil || concept.chapter == chapter
         }
         let items = visible.map { concept -> String in
@@ -410,6 +520,72 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             return "{\"id\":\"\(concept.id)\",\"color\":\"\(color)\",\"chapter\":\"\(chapterField)\",\"terms\":[\(terms)]}"
         }
         return "[\(items.joined(separator: ","))]"
+    }
+
+    private func loadDocument() {
+        if session.isMarkdown { loadMarkdown() } else { loadSpine() }
+    }
+
+    private func markdownOptions() -> MarkdownRenderOptions {
+        let state = session.package.state
+        return MarkdownRenderOptions(
+            documentDirectory: documentDirectory, vaultRoot: session.vaultRoot, theme: state.epubTheme, fontFamily: state.epubFont,
+            fontScale: fontScale, lineHeight: ["1.4", "1.6", "1.9"][min(max(state.epubLine, 0), 2)],
+            marginPx: [24, 48, 80][min(max(state.epubMargin, 0), 2)], justify: state.epubJustify, twoPages: session.twoPages
+        )
+    }
+
+    /// The same custom properties `renderDocumentHTML` puts on the body.
+    private func markdownVariables(_ options: MarkdownRenderOptions) -> [String: String] {
+        let family = epubAppearance().font
+        return [
+            "--font-family": family.isEmpty ? "-apple-system, sans-serif" : family,
+            "--font-scale": String(options.fontScale), "--line-height": options.lineHeight,
+            "--page-margin": "\(options.marginPx)px", "--text-align": options.justify ? "justify" : "start",
+        ]
+    }
+
+    private func highlightCSS() -> String {
+        switch session.package.state.epubTheme {
+        case "night": return HighlightAppearance.css(dark: true)
+        case "paper", "quiet": return HighlightAppearance.css(dark: false)
+        default: return HighlightAppearance.css(dark: false) + "\n@media (prefers-color-scheme: dark) {\n" + HighlightAppearance.css(dark: true) + "\n}"
+        }
+    }
+
+    private func windowAppearance() -> NSAppearance? {
+        switch session.package.state.epubTheme {
+        case "night": return NSAppearance(named: .darkAqua)
+        case "paper", "quiet": return NSAppearance(named: .aqua)
+        default: return nil
+        }
+    }
+
+    private func loadMarkdown() {
+        guard let model = session.markdown, let webView else { return }
+        acceptSpineReports = false
+        let script = readerScript() + """
+
+        window.readerStyle(null, null, \(session.twoPages), \(javaScriptString(highlightCSS())));
+        """
+        let html = MarkdownHTMLRenderer.renderDocumentHTML(model, options: markdownOptions(), injectedScript: script, fs: LocalFileSystem())
+        webView.loadHTMLString(html, baseURL: LocalAssetSchemeHandler.url(for: session.bookURL))
+    }
+
+    /// Swaps only the article, so the page neither flashes nor loses its scroll position.
+    private func reloadMarkdown(_ data: Data) {
+        session.reloadMarkdown(data: data)
+        (view.window?.windowController?.document as? ReaderDocument)?.bookDidChange(data)
+        guard spineLoaded, let model = session.markdown else { return loadMarkdown() }
+        let article = MarkdownHTMLRenderer.renderArticleHTML(model, options: markdownOptions(), fs: LocalFileSystem())
+        call("window.readerReplaceArticle(article, JSON.parse(highlights), JSON.parse(notes), JSON.parse(concepts))", [
+            "article": article, "highlights": highlightScript(), "notes": marginNoteScript(), "concepts": conceptScript(),
+        ])
+    }
+
+    private func javaScriptString(_ value: String) -> String {
+        let data = (try? JSONEncoder().encode(value)) ?? Data("\"\"".utf8)
+        return String(decoding: data, as: UTF8.self)
     }
 
     private func loadSpine() {
@@ -438,7 +614,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             body += "<section id=\"spine-\(item.id)\" data-index=\"\(index)\" data-chapter=\"\(chapter.map(String.init) ?? "")\">\(heading)\(html)</section>"
         }
         let target = min(max(session.page - 1, 0), max(epub.spine.count - 1, 0))
-        applySpine(target, count: epub.spine.count)
+        applySection(target)
         let appearance = epubAppearance()
         let css = """
         body { font: \(16 * fontScale)px \(appearance.font.isEmpty ? "inherit" : appearance.font); line-height: \(appearance.line); margin: \(appearance.margin)px auto; max-width: \(session.twoPages ? 920 : 680)px; \(columns) background: \(appearance.background); color: \(appearance.foreground); text-align: \(appearance.align); }
@@ -453,11 +629,21 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         .reader-badge { font: 10px -apple-system, sans-serif; margin-left: 3px; color: #8e8e93; cursor: pointer; }
         .reader-flash { background: #ffe08a; transition: background 1s; }
         """
-        let marks = session.words.map(\.word).map { "\"\($0.replacingOccurrences(of: "\"", with: ""))\"" }.joined(separator: ",")
         let html = """
         <!doctype html><html><head><meta charset="utf-8"><style>\(css)</style></head><body>
         \(body)
-        <script>
+        <script>\(readerScript())</script></body></html>
+        """
+        if let root = session.epubRoot {
+            webView.loadHTMLString(html, baseURL: root)
+        } else {
+            webView.loadHTMLString(html, baseURL: nil)
+        }
+    }
+
+    /// Selection, highlights, notes, concepts, and scroll reporting for both document kinds.
+    private func readerScript() -> String {
+        return """
         window.readerSelection = function() {
           const sel = document.getSelection();
           if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
@@ -465,10 +651,17 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
           const node = sel.anchorNode ? sel.anchorNode.textContent || "" : "";
           const start = Math.max(0, node.indexOf(text));
           const host = sel.anchorNode && (sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement);
-          const section = host && host.closest ? host.closest("section[id^='spine-']") : null;
-          const index = section ? Number(section.dataset.index || 0) : 0;
+          const section = host && host.closest ? host.closest("section[id^='spine-'], section[data-tts-section]") : null;
+          const index = section ? Number(section.dataset.index || section.dataset.ttsSection || 0) : 0;
           const box = sel.getRangeAt(0).getBoundingClientRect();
-          return { text, index, rect: { x: box.left, y: box.top, width: box.width, height: box.height }, prefix: node.slice(Math.max(0, start - 40), start), suffix: node.slice(start + text.length, start + text.length + 40), sentence: node.trim(), cfi: "epubcfi(/6/" + ((index + 1) * 2) + "!/4,/1:" + start + ",/1:" + (start + text.length) + ")" };
+          let offset = start;
+          if (section && section.dataset.anchor) {
+            const before = document.createRange();
+            before.selectNodeContents(section);
+            before.setEnd(sel.getRangeAt(0).startContainer, sel.getRangeAt(0).startOffset);
+            offset = before.toString().length;
+          }
+          return { text, index, rect: { x: box.left, y: box.top, width: box.width, height: box.height }, prefix: node.slice(Math.max(0, start - 40), start), suffix: node.slice(start + text.length, start + text.length + 40), sentence: node.trim(), cfi: section && section.dataset.anchor ? "mdloc(s=" + index + ",a=" + section.dataset.anchor + ",o=" + offset + ",e=" + (offset + text.length) + ")" : "epubcfi(/6/" + ((index + 1) * 2) + "!/4,/1:" + start + ",/1:" + (start + text.length) + ")" };
         };
         const sections = [...document.querySelectorAll("section[id^='spine-']")];
         if (sections.length) {
@@ -480,6 +673,67 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
           }, { root: null, threshold: [0.2, 0.5] });
           sections.forEach(section => observer.observe(section));
         }
+        let sectionTick = false;
+        window.addEventListener("scroll", () => {
+          if (sectionTick) return;
+          sectionTick = true;
+          requestAnimationFrame(() => {
+            sectionTick = false;
+            const all = [...document.querySelectorAll("section[data-tts-section]")];
+            if (!all.length) return;
+            const passed = all.filter(section => section.getBoundingClientRect().top <= window.innerHeight * 0.3);
+            const current = passed.length ? passed[passed.length - 1] : all[0];
+            window.webkit.messageHandlers.reader.postMessage({kind: "spine", index: Number(current.dataset.ttsSection)});
+          });
+        });
+        window.readerScrollToAnchor = function(anchor) {
+          const target = document.getElementById(anchor) || document.querySelector('section[data-anchor="' + CSS.escape(anchor) + '"]');
+          if (!target) return;
+          for (let el = target; el; el = el.parentElement) if (el.tagName === "DETAILS") el.open = true;
+          target.scrollIntoView({behavior: "smooth", block: "start"});
+        };
+        window.readerStyle = function(theme, variables, columns, highlightCSS) {
+          if (theme) document.body.dataset.theme = theme;
+          Object.entries(variables || {}).forEach(([key, value]) => document.body.style.setProperty(key, value));
+          const article = document.getElementById("reader-md-article");
+          if (article) {
+            article.style.columnCount = columns ? "2" : "auto";
+            document.body.style.maxWidth = columns ? "1400px" : "720px";
+          }
+          let style = document.getElementById("reader-app-style");
+          if (!style) {
+            style = document.createElement("style");
+            style.id = "reader-app-style";
+            document.head.appendChild(style);
+          }
+          style.textContent = highlightCSS + " .reader-glyph { float: right; clear: right; border: 0; background: transparent; cursor: pointer; } .reader-concept { border-bottom: 1px solid #8e8e93; cursor: pointer; } .reader-badge { font: 10px -apple-system, sans-serif; margin-left: 3px; color: #8e8e93; cursor: pointer; } .reader-flash { background: #ffe08a; transition: background 1s; } pre { position: relative; } .reader-copy { position: absolute; right: 8px; bottom: 8px; font: 11px -apple-system, sans-serif; opacity: 0; cursor: pointer; } pre:hover .reader-copy, .reader-copy:focus { opacity: 1; }";
+        };
+        window.readerAddCopyButtons = function() {
+          document.querySelectorAll("#reader-md-article pre").forEach(pre => {
+            const button = document.createElement("button");
+            button.className = "reader-copy";
+            button.dataset.ttsExclude = "true";
+            button.textContent = "Copy";
+            button.addEventListener("click", () => window.webkit.messageHandlers.reader.postMessage({kind: "copy", code: pre.querySelector("code").textContent}));
+            pre.appendChild(button);
+          });
+        };
+        window.readerAddCopyButtons();
+        window.readerReplaceArticle = function(html, highlights, notes, concepts) {
+          const x = window.scrollX, y = window.scrollY;
+          const article = document.getElementById("reader-md-article");
+          const open = [...article.querySelectorAll("details")].map(el => el.open);
+          article.style.minHeight = article.offsetHeight + "px";
+          article.innerHTML = html;
+          const details = article.querySelectorAll("details");
+          if (details.length === open.length) details.forEach((el, i) => { el.open = open[i]; });
+          article.style.minHeight = "";
+          window.readerAddCopyButtons();
+          window.readerPaint(highlights);
+          window.readerMarginNotes(notes);
+          window.readerPaintConcepts(concepts);
+          window.scrollTo(x, y);
+        };
         document.addEventListener("scroll", () => {
           if (window.webkit && window.webkit.messageHandlers.reader) window.webkit.messageHandlers.reader.postMessage({kind: "dismiss-bar"});
         }, true);
@@ -526,6 +780,12 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
           return -1;
         }
         window.readerPaint = function(marks) {
+          document.querySelectorAll("span[class^='reader-hl-']").forEach(span => {
+            const parent = span.parentNode;
+            while (span.firstChild) parent.insertBefore(span.firstChild, span);
+            parent.removeChild(span);
+            parent.normalize();
+          });
           (marks || []).forEach(mark => {
             if (!mark.quote) return;
             const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
@@ -569,8 +829,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
           });
         };
         window.readerMarginNotes(\(marginNoteScript()));
-        const concepts = \(conceptScript());
-        if (\(session.showConceptMarkers ? "true" : "false")) {
+        window.readerPaintConcepts = function(concepts) {
           concepts.forEach(concept => {
             const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
             const nodes = [];
@@ -603,7 +862,8 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
               }
             });
           });
-        }
+        };
+        window.readerPaintConcepts(\(conceptScript()));
         document.addEventListener("click", event => {
           const glyph = event.target.closest && event.target.closest(".reader-glyph");
           if (glyph && glyph.dataset.id && window.webkit) {
@@ -614,28 +874,6 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
           if (!el || !el.dataset.id || !window.webkit) return;
           window.webkit.messageHandlers.reader.postMessage({kind: "concept", id: el.dataset.id});
         });
-        const words = [\(marks)];
-        if (words.length) {
-          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-          const nodes = [];
-          while (walker.nextNode()) nodes.push(walker.currentNode);
-          nodes.forEach(node => {
-            let text = node.nodeValue;
-            words.forEach(word => {
-              if (!word || !text.toLowerCase().includes(word.toLowerCase())) return;
-              const span = document.createElement("span");
-              span.className = "reader-word";
-              const parent = node.parentNode;
-              if (!parent || parent.classList.contains("reader-word")) return;
-            });
-          });
-        }
-        </script></body></html>
         """
-        if let root = session.epubRoot {
-            webView.loadHTMLString(html, baseURL: root)
-        } else {
-            webView.loadHTMLString(html, baseURL: nil)
-        }
     }
 }

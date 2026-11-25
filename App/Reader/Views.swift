@@ -9,12 +9,12 @@ struct WelcomeView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Reader").font(.largeTitle.weight(.semibold))
-            Text("Open a PDF or EPUB. Drop a book here, or press Return on a recent one.")
+            Text("Open a PDF, EPUB, or Markdown file. Drop one here, or press Return on a recent one.")
                 .foregroundStyle(.secondary)
             Button("Open…") { NSDocumentController.shared.openDocument(nil) }
             let urls = NSDocumentController.shared.recentDocumentURLs
             if urls.isEmpty {
-                ContentUnavailableView("No recent books", systemImage: "books.vertical", description: Text("Open a PDF or EPUB to start reading."))
+                ContentUnavailableView("No recent books", systemImage: "books.vertical", description: Text("Open a PDF, EPUB, or Markdown file to start reading."))
             } else {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 16)], spacing: 16) {
                     ForEach(urls.prefix(12), id: \.path) { url in
@@ -90,7 +90,7 @@ private struct WelcomeTile: View {
             let image = page.thumbnail(of: NSSize(width: 160, height: 200), for: .mediaBox)
             Image(nsImage: image).resizable().scaledToFit()
         } else {
-            Image(systemName: "book.closed").font(.largeTitle).foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 88)
+            Image(systemName: BookKind.from(path: url.path) == .markdown ? "doc.richtext" : "book.closed").font(.largeTitle).foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 88)
         }
     }
 
@@ -172,8 +172,8 @@ struct SidebarView: View {
                         .onTapGesture { jump(page: index + 1) }
                     }
                 } else {
-                    ForEach(Array((session.epub?.spine ?? []).enumerated()), id: \.offset) { index, item in
-                        Text(item.title).font(.callout).padding(.vertical, 6)
+                    ForEach(Array(session.webSectionTitles.enumerated()), id: \.offset) { index, title in
+                        Text(title).font(.callout).padding(.vertical, 6)
                             .onTapGesture { jump(page: index + 1) }
                     }
                 }
@@ -195,7 +195,11 @@ struct SidebarView: View {
         .listStyle(.sidebar)
         .onChange(of: outlineSelection) { _, id in
             guard let id, let row = session.outline.first(where: { $0.id == id }) else { return }
-            if let page = row.page { jump(page: page) } else if let cfi = row.cfi { jumpEPUB(cfi) }
+            if let page = row.page {
+                jump(page: page)
+            } else if let cfi = row.cfi {
+                if let anchor = MarkdownAnchor(value: cfi) { jumpMarkdown(anchor) } else { jumpEPUB(cfi) }
+            }
         }
         }
     }
@@ -303,6 +307,12 @@ struct SidebarView: View {
         }
     }
 
+    private func jumpMarkdown(_ anchor: MarkdownAnchor) {
+        let target = ReadingPosition(page: anchor.sectionIndex + 1, cfi: anchor.rawValue)
+        session.recordJump(from: ReadingPosition(page: session.page, zoom: session.zoom, cfi: session.currentLocation(), section: session.sectionTitle), to: target)
+        (NSApp.keyWindow?.windowController as? ReaderWindowController)?.reveal(target)
+    }
+
     private func jumpEPUB(_ href: String) {
         if let index = session.epub?.spine.firstIndex(where: { href.hasPrefix($0.href) || $0.href == href }) {
             jump(page: index + 1)
@@ -397,15 +407,15 @@ struct ContactSheetView: View {
     }
 }
 
-struct EPUBContactSheet: View {
+struct WebContactSheet: View {
     @ObservedObject var session: ReaderSession
     var select: (Int) -> Void
 
     var body: some View {
         ScrollView {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 180))], spacing: 12) {
-                ForEach(Array((session.epub?.spine ?? []).enumerated()), id: \.offset) { index, item in
-                    Text(item.title).frame(maxWidth: .infinity, minHeight: 80).padding().background(Color(nsColor: .controlBackgroundColor)).onTapGesture { select(index) }
+                ForEach(Array(session.webSectionTitles.enumerated()), id: \.offset) { index, title in
+                    Text(title).frame(maxWidth: .infinity, minHeight: 80).padding().background(Color(nsColor: .controlBackgroundColor)).onTapGesture { select(index) }
                 }
             }
             .padding(20)
@@ -996,5 +1006,12 @@ struct ShortcutsView: View {
         }
         .padding()
         .frame(minWidth: 480, minHeight: 560)
+    }
+}
+
+extension ReaderSession {
+    /// One title per EPUB spine item or Markdown section.
+    var webSectionTitles: [String] {
+        markdown?.sections.map(\.title) ?? epub?.spine.map(\.title) ?? []
     }
 }

@@ -5,8 +5,9 @@ import UniformTypeIdentifiers
 
 final class ReaderSession: ObservableObject {
     let bookURL: URL
-    let bookData: Data
-    let fingerprint: String
+    let bookKind: BookKind
+    private(set) var bookData: Data
+    private(set) var fingerprint: String
     var package: SidecarPackage
     var directory: String
     var placement: Placement
@@ -84,6 +85,9 @@ final class ReaderSession: ObservableObject {
 
     var pdfDocument: PDFDocument?
     var epub: EPUBBook?
+    @Published private(set) var markdown: MarkdownDocumentModel?
+    /// A heading to scroll to once the document is on screen.
+    var pendingAnchor: String?
     var epubRoot: URL?
     var bookText: BookText?
     var onDirty: (() -> Void)?
@@ -102,7 +106,10 @@ final class ReaderSession: ObservableObject {
     private var toastTimer: Timer?
     private var viewStateTimer: Timer?
 
-    var isPDF: Bool { bookURL.pathExtension.lowercased() == "pdf" }
+    var isPDF: Bool { bookKind == .pdf }
+    var isEPUB: Bool { bookKind == .epub }
+    var isMarkdown: Bool { bookKind == .markdown }
+    var isWebDocument: Bool { !isPDF }
     var notes: [NoteEntry] { package.notes.notes }
     var words: [WordEntry] { package.words.words }
     var highlights: [HighlightEntry] { package.highlights.highlights }
@@ -111,6 +118,7 @@ final class ReaderSession: ObservableObject {
 
     init(bookURL: URL, bookData: Data, open: OpenResult) {
         self.bookURL = bookURL
+        self.bookKind = BookKind.from(path: bookURL.path) ?? .pdf
         self.bookData = bookData
         self.fingerprint = SHA256.fingerprint(bookData)
         self.package = open.package
@@ -137,10 +145,10 @@ final class ReaderSession: ObservableObject {
         self.settings = SettingsStore.load()
         self.provider = SettingsStore.load().defaultProvider
         self.globalMarks = GlobalMarks.load(applicationSupport: AppPaths.support, fs: LocalFileSystem())
-        if isPDF {
-            loadPDF()
-        } else {
-            loadEPUB()
+        switch bookKind {
+        case .pdf: loadPDF()
+        case .epub: loadEPUB()
+        case .markdown: loadMarkdown()
         }
         prepareBookText()
     }
@@ -401,7 +409,7 @@ final class ReaderSession: ObservableObject {
     func toggleBookmark() {
         let title = sectionTitle.isEmpty ? "Page \(page)" : sectionTitle
         let pageNumber = isPDF ? page : nil
-        let cfi = isPDF ? nil : currentEPUBCFI()
+        let cfi = isPDF ? nil : currentLocation()
         let before = package.state.bookmarks
         let added = BookmarkEdit.toggle(page: pageNumber, cfi: cfi, title: title, section: sectionTitle, id: IDs.make("b"), bookmarks: &package.state.bookmarks)
         undoManager?.registerUndo(withTarget: self) { session in
@@ -414,7 +422,7 @@ final class ReaderSession: ObservableObject {
 
     func bookmarkExistsForCurrentPosition() -> Bool {
         let pageNumber = isPDF ? page : nil
-        let cfi = isPDF ? nil : currentEPUBCFI()
+        let cfi = isPDF ? nil : currentLocation()
         return package.state.bookmarks.contains { BookmarkEdit.matches($0, page: pageNumber, cfi: cfi) }
     }
 
@@ -1047,7 +1055,13 @@ final class ReaderSession: ObservableObject {
         return sectionTitle
     }
 
-    private func currentEPUBCFI() -> String? {
+    /// The stored location of the current section in a web document.
+    func currentLocation() -> String? {
+        if let markdown {
+            let index = min(max(page - 1, 0), max(markdown.sections.count - 1, 0))
+            guard markdown.sections.indices.contains(index) else { return nil }
+            return MarkdownAnchor.make(sectionIndex: index, anchorID: markdown.sections[index].anchorID).rawValue
+        }
         guard let epub else { return nil }
         let index = min(max(page - 1, 0), max(epub.spine.count - 1, 0))
         return EPUBCFI.make(spineIndex: index, start: 0, end: 0).value
@@ -1078,7 +1092,31 @@ final class ReaderSession: ObservableObject {
         sectionTitle = book.spine.first?.title ?? book.title
     }
 
+    private func loadMarkdown() {
+        let source = String(decoding: bookData, as: UTF8.self)
+        let model = MarkdownDocumentModel.parse(source: source, fileName: bookURL.lastPathComponent)
+        markdown = model
+        pageCount = max(model.sections.count, 1)
+        page = min(page, pageCount)
+        outline = model.headings.enumerated().map { index, heading in
+            OutlineRow(id: "md-\(index)-\(heading.id)", title: heading.title, page: nil,
+                       cfi: MarkdownAnchor.make(sectionIndex: heading.sectionIndex, anchorID: heading.id).rawValue,
+                       depth: max(heading.level - 1, 0))
+        }
+        sectionTitle = model.sections.indices.contains(page - 1) ? model.sections[page - 1].title : model.title
+        bookText = model.bookText()
+    }
+
+    func reloadMarkdown(data: Data) {
+        bookData = data
+        fingerprint = SHA256.fingerprint(data)
+        loadMarkdown()
+        onPageChange?()
+    }
+
     private func prepareBookText() {
+        // Markdown parses quickly and changes on disk, so its text is never cached.
+        if isMarkdown { return }
         if let cached = BookTextCache.load(caches: AppPaths.caches, fingerprint: fingerprint, fs: LocalFileSystem()) {
             bookText = cached
             return

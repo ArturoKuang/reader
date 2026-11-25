@@ -37,7 +37,10 @@ final class VaultCoordinator {
         return (VaultCoordinator(location: location, settings: settings), nil)
     }
 
+    private var openBook: URL?
+
     func attach(_ session: ReaderSession) {
+        openBook = session.bookURL
         session.usesVault = true
         session.vaultName = location.vaultName
         session.vaultRoot = location.vaultRoot
@@ -298,6 +301,8 @@ final class VaultCoordinator {
     }
 
     private func writeIfChanged(_ path: String, _ text: String) {
+        // An open Markdown file inside the vault is never a place for Reader's blocks.
+        if let openBook, URL(fileURLWithPath: path).resolvingSymlinksInPath() == openBook.resolvingSymlinksInPath() { return }
         if lastWritten[path] == text { return }
         if (try? fs.readString(path)) == text { lastWritten[path] = text; return }
         applyingOwnWrite = true

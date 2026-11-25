@@ -14,7 +14,11 @@ final class ReaderDocument: NSDocument {
         let opened = try Self.resolveBook(url)
         bookData = opened.data
         fileURL = opened.url
-        fileType = opened.kind == .epub ? "org.idpf.epub-container" : "com.adobe.pdf"
+        switch opened.kind {
+        case .pdf: fileType = "com.adobe.pdf"
+        case .epub: fileType = "org.idpf.epub-container"
+        case .markdown: fileType = "net.daringfireball.markdown"
+        }
         let fs = LocalFileSystem()
         let library = LibraryIndex.load(from: AppPaths.indexFile, fs: fs)
         let linked = library.documents.first { $0.bookPath == opened.url.path }?.vaultBookFolder
@@ -138,9 +142,17 @@ final class ReaderDocument: NSDocument {
         if session.isPDF {
             window.subtitle = "Page \(session.page) of \(max(session.pageCount, 1))"
         } else {
-            window.subtitle = session.sectionTitle.isEmpty ? "EPUB" : session.sectionTitle
+            window.subtitle = session.sectionTitle.isEmpty ? (session.isMarkdown ? "Markdown" : "EPUB") : session.sectionTitle
         }
         window.title = session.bookURL.deletingPathExtension().lastPathComponent
+    }
+
+    /// The Markdown file was edited elsewhere; adopt the new bytes and date.
+    func bookDidChange(_ data: Data) {
+        bookData = data
+        if let fileURL {
+            fileModificationDate = (try? FileManager.default.attributesOfItem(atPath: fileURL.path))?[.modificationDate] as? Date
+        }
     }
 
     private static func resolveBook(_ url: URL) throws -> (url: URL, data: Data, kind: BookKind) {
@@ -154,6 +166,12 @@ final class ReaderDocument: NSDocument {
             }
             if FileManager.default.fileExists(atPath: siblingEPUB.path) {
                 return (siblingEPUB, try Data(contentsOf: siblingEPUB), .epub)
+            }
+            for pathExtension in ["md", "markdown", "mdown"] {
+                let sibling = url.deletingPathExtension().appendingPathExtension(pathExtension)
+                if FileManager.default.fileExists(atPath: sibling.path) {
+                    return (sibling, try Data(contentsOf: sibling), .markdown)
+                }
             }
             let index = LibraryIndex.load(from: AppPaths.indexFile, fs: LocalFileSystem())
             if let entry = index.documents.first(where: { $0.sidecarPath == url.path }),

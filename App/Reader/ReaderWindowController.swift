@@ -21,7 +21,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     private let panelHost: NSHostingController<RightPanelView>
     private let center: NSViewController
     private var pdfController: PDFContainerViewController?
-    private var epubController: EPUBContainerViewController?
+    private var webController: WebDocumentContainerViewController?
     private var keyMonitor: Any?
     private var sidebarItem: NSSplitViewItem?
     private var panelItem: NSSplitViewItem?
@@ -42,9 +42,9 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             pdfController = pdf
             center = pdf
         } else {
-            let epub = EPUBContainerViewController(session: session)
-            epubController = epub
-            center = epub
+            let web = WebDocumentContainerViewController(session: session)
+            webController = web
+            center = web
         }
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 840),
@@ -74,8 +74,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         }
         session.onCaptureSelection = { [weak self] done in
             guard let self else { done(); return }
-            if let epub = self.epubController {
-                epub.captureSelection(completion: done)
+            if let web = self.webController {
+                web.captureSelection(completion: done)
             } else {
                 self.pdfController?.captureSelection()
                 done()
@@ -85,7 +85,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         session.onPageChange = { [weak self] in
             self?.document.map { ($0 as? ReaderDocument)?.refreshSubtitle() }
             self?.pdfController?.consumePendingJump()
-            self?.epubController?.consumePendingJump()
+            self?.webController?.consumePendingJump()
         }
         applyChrome()
     }
@@ -184,7 +184,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
                 self.stopSlideshow()
                 return nil
             }
-            let position = self.pdfController?.currentPosition() ?? self.epubController?.currentPosition() ?? ReadingPosition(page: self.session.page, zoom: self.session.zoom)
+            let position = self.pdfController?.currentPosition() ?? self.webController?.currentPosition() ?? ReadingPosition(page: self.session.page, zoom: self.session.zoom)
             let handled = self.session.handleMarkEvent(event, documentFocused: true, position: position)
             if handled.consumed {
                 if let jump = handled.jump {
@@ -236,6 +236,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         storeWindowFrame()
         pdfController?.capturePositionForSave()
         session.saveViewNow()
+        webController?.tearDown()
+    }
+
+    func consumePendingJump() {
+        webController?.consumePendingJump()
     }
 
     func applyChrome() {
@@ -246,7 +251,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             toolbar.removeItem(at: index)
         }
         pdfController?.setContactSheet(contact)
-        epubController?.setContactSheet(contact)
+        webController?.setContactSheet(contact)
         sidebarHost.rootView = SidebarView(session: session)
         panelHost.rootView = RightPanelView(session: session)
     }
@@ -255,7 +260,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         if session.isPDF {
             pdfController?.reveal(position)
         } else {
-            epubController?.reveal(position)
+            webController?.reveal(position)
         }
     }
 
@@ -521,14 +526,14 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             break
         }
         pdfController?.applyDisplayMode()
-        epubController?.applyDisplayMode()
+        webController?.applyDisplayMode()
         applyChrome()
     }
-    @objc func actualSize(_ sender: Any?) { pdfController?.actualSize(); epubController?.actualSize() }
-    @objc func zoomToFit(_ sender: Any?) { pdfController?.zoomToFit(); epubController?.zoomToFit() }
-    @objc func fitWidth(_ sender: Any?) { pdfController?.fitWidth(); epubController?.fitWidth() }
-    @objc func zoomIn(_ sender: Any?) { pdfController?.zoomIn(); epubController?.zoom(by: 1.15); session.showToast("\(Int((session.zoom * 100).rounded()))%") }
-    @objc func zoomOut(_ sender: Any?) { pdfController?.zoomOut(); epubController?.zoom(by: 1 / 1.15); session.showToast("\(Int((session.zoom * 100).rounded()))%") }
+    @objc func actualSize(_ sender: Any?) { pdfController?.actualSize(); webController?.actualSize() }
+    @objc func zoomToFit(_ sender: Any?) { pdfController?.zoomToFit(); webController?.zoomToFit() }
+    @objc func fitWidth(_ sender: Any?) { pdfController?.fitWidth(); webController?.fitWidth() }
+    @objc func zoomIn(_ sender: Any?) { pdfController?.zoomIn(); webController?.zoom(by: 1.15); session.showToast("\(Int((session.zoom * 100).rounded()))%") }
+    @objc func zoomOut(_ sender: Any?) { pdfController?.zoomOut(); webController?.zoom(by: 1 / 1.15); session.showToast("\(Int((session.zoom * 100).rounded()))%") }
     @objc func zoomToSelection(_ sender: Any?) { pdfController?.zoomToSelection() }
     @objc func rotateLeft(_ sender: Any?) { session.rotate(clockwise: false); pdfController?.refreshAnnotations() }
     @objc func rotateRight(_ sender: Any?) { session.rotate(clockwise: true); pdfController?.refreshAnnotations() }
@@ -578,19 +583,19 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     @objc func chooseLineSpacing(_ sender: NSMenuItem) {
         session.package.state.epubLine = sender.tag
         session.saveViewQuietly()
-        epubController?.applyLiveStyle()
+        webController?.applyLiveStyle()
     }
 
     @objc func chooseMargin(_ sender: NSMenuItem) {
         session.package.state.epubMargin = sender.tag
         session.saveViewQuietly()
-        epubController?.applyLiveStyle()
+        webController?.applyLiveStyle()
     }
 
     @objc func chooseJustify(_ sender: NSMenuItem) {
         session.package.state.epubJustify.toggle()
         session.saveViewQuietly()
-        epubController?.applyLiveStyle()
+        webController?.applyLiveStyle()
     }
 
     @objc func showAppearance(_ sender: Any?) {
@@ -616,13 +621,13 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     @objc func chooseTheme(_ sender: NSMenuItem) {
         session.package.state.epubTheme = sender.title.lowercased()
         session.saveViewQuietly()
-        epubController?.applyDisplayMode()
+        webController?.applyDisplayMode()
     }
 
     @objc func chooseFont(_ sender: NSMenuItem) {
         session.package.state.epubFont = sender.title
         session.saveViewQuietly()
-        epubController?.applyDisplayMode()
+        webController?.applyDisplayMode()
     }
 
     @objc func showMarginNotes(_ sender: Any?) { session.toggleMarginNotes(); applyChrome() }
@@ -668,7 +673,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     func dismissSelectionBar() { selectionBar.dismiss() }
 
     func presentNote(_ id: String) {
-        let host = (pdfController?.view ?? epubController?.view) ?? window?.contentView
+        let host = (pdfController?.view ?? webController?.view) ?? window?.contentView
         guard let host else { return }
         let hostView = pdfController?.noteHostView ?? host
         let rect = pdfController?.noteRect(for: id) ?? NSRect(x: hostView.bounds.midX, y: hostView.bounds.midY, width: 1, height: 1)
@@ -689,18 +694,18 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
 
     @objc func goBack(_ sender: Any?) {
         if let pdf = pdfController, pdf.goBack() { return }
-        guard let position = session.backPosition(current: pdfController?.currentPosition() ?? epubController?.currentPosition() ?? ReadingPosition(page: session.page)) else { return }
+        guard let position = session.backPosition(current: pdfController?.currentPosition() ?? webController?.currentPosition() ?? ReadingPosition(page: session.page)) else { return }
         reveal(position)
     }
     @objc func goForward(_ sender: Any?) {
         if let pdf = pdfController, pdf.goForward() { return }
-        guard let position = session.forwardPosition(current: pdfController?.currentPosition() ?? epubController?.currentPosition() ?? ReadingPosition(page: session.page)) else { return }
+        guard let position = session.forwardPosition(current: pdfController?.currentPosition() ?? webController?.currentPosition() ?? ReadingPosition(page: session.page)) else { return }
         reveal(position)
     }
-    @objc func nextPage(_ sender: Any?) { pdfController?.nextPage(); epubController?.nextPage() }
-    @objc func previousPage(_ sender: Any?) { pdfController?.previousPage(); epubController?.previousPage() }
-    @objc func nextChapter(_ sender: Any?) { epubController?.nextPage() }
-    @objc func previousChapter(_ sender: Any?) { epubController?.previousPage() }
+    @objc func nextPage(_ sender: Any?) { pdfController?.nextPage(); webController?.nextPage() }
+    @objc func previousPage(_ sender: Any?) { pdfController?.previousPage(); webController?.previousPage() }
+    @objc func nextChapter(_ sender: Any?) { webController?.nextPage() }
+    @objc func previousChapter(_ sender: Any?) { webController?.previousPage() }
     @objc func goToPage(_ sender: Any?) {
         guard let window else { return }
         let alert = NSAlert()
@@ -725,7 +730,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         let query = searchItem?.searchField.stringValue ?? ""
         session.findQuery = query
         pdfController?.search(query)
-        epubController?.search(query)
+        webController?.search(query)
     }
 
     func showFindCount(_ index: Int, of total: Int) {
@@ -748,8 +753,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         }
         findCountLabel.stringValue = ""
     }
-    @objc func findNext(_ sender: Any?) { pdfController?.findNext(); epubController?.find(forward: true) }
-    @objc func findPrevious(_ sender: Any?) { pdfController?.findPrevious(); epubController?.find(forward: false) }
+    @objc func findNext(_ sender: Any?) { pdfController?.findNext(); webController?.find(forward: true) }
+    @objc func findPrevious(_ sender: Any?) { pdfController?.findPrevious(); webController?.find(forward: false) }
 
     @objc func highlight1(_ sender: Any?) { highlight(1) }
     @objc func highlight2(_ sender: Any?) { highlight(2) }
@@ -866,12 +871,12 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             menuItem.title = session.usesVault ? "Unlink Vault Book Folder" : "Link to Vault Book Folder…"
             return true
         case #selector(nextChapter(_:)), #selector(previousChapter(_:)):
-            return epubController != nil
+            return webController != nil
         case #selector(bookmarkPage(_:)):
             menuItem.title = session.bookmarkExistsForCurrentPosition() ? "Remove Bookmark" : "Add Bookmark"
             return true
         case #selector(chooseTheme(_:)), #selector(chooseFont(_:)), #selector(chooseLineSpacing(_:)), #selector(chooseMargin(_:)), #selector(chooseJustify(_:)):
-            return epubController != nil
+            return webController != nil
         default: break
         }
         return true
