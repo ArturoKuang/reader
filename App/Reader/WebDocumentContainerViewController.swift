@@ -132,8 +132,8 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
                 self.hasLoadedDocument = true
                 self.loadDocument()
             }
-        } else if spineLoaded {
-            scheduleRenderHealthCheck(delay: 0.35)
+        } else {
+            ensureDocumentHealthAfterReveal(delay: 0.35)
         }
     }
 
@@ -146,12 +146,24 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
             object: window,
             queue: .main
         ) { [weak self] _ in
-            guard let self, self.hasLoadedDocument, self.spineLoaded, self.isViewVisibleOnScreen else { return }
-            self.scheduleRenderHealthCheck(delay: 0.45)
+            guard let self else { return }
+            self.ensureDocumentHealthAfterReveal(delay: 0.45)
+        }
+    }
+
+    /// Re-checks a loaded page or re-arms a stalled load timer whenever the view becomes visible.
+    private func ensureDocumentHealthAfterReveal(delay: TimeInterval) {
+        guard hasLoadedDocument, isViewVisibleOnScreen else { return }
+        if spineLoaded {
+            scheduleRenderHealthCheck(delay: delay)
+        } else if loadTimeoutWorkItem == nil, webView != nil {
+            scheduleLoadTimeout(generation: loadGeneration, delay: 4.0, allowProgressGrace: true)
         }
     }
 
     private func detachWebView() {
+        // Invalidates any in-flight probes or recovery callbacks bound to the old WKWebView.
+        loadGeneration += 1
         renderHealthWorkItem?.cancel()
         renderHealthWorkItem = nil
         loadTimeoutWorkItem?.cancel()
@@ -230,7 +242,7 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
         contactHost = nil
         webView?.isHidden = visible
         guard visible else {
-            if hasLoadedDocument, spineLoaded { scheduleRenderHealthCheck(delay: 0.35) }
+            ensureDocumentHealthAfterReveal(delay: 0.35)
             return
         }
         let host = NSHostingController(rootView: WebContactSheet(session: session) { [weak self] index in
@@ -443,24 +455,42 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
+    private func scheduleLoadTimeout(generation: Int, delay: TimeInterval, allowProgressGrace: Bool) {
+        loadTimeoutWorkItem?.cancel()
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.loadTimeoutWorkItem = nil
+            guard generation == self.loadGeneration, !self.spineLoaded, self.isViewVisibleOnScreen else { return }
+            if allowProgressGrace, let webView = self.webView, webView.isLoading, webView.estimatedProgress > 0.15 {
+                self.scheduleLoadTimeout(generation: generation, delay: 4.0, allowProgressGrace: false)
+                return
+            }
+            self.recoverBlankWebView(reason: "load-timeout")
+        }
+        loadTimeoutWorkItem = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: timeout)
+    }
+
     private func isWebLayerTreeHealthy(_ webView: WKWebView) -> Bool {
         guard let root = webView.layer, !root.isHidden, root.opacity > 0.01 else { return false }
         var stack: [(layer: CALayer, depth: Int, ancestorHidden: Bool)] = (root.sublayers ?? []).map { ($0, 1, false) }
         var sawDrawingRoot = false
+        var drawingRootVisible = false
+        var hasVisibleDeepLeaf = false
         while let item = stack.popLast() {
             let hidden = item.ancestorHidden || item.layer.isHidden || item.layer.opacity <= 0.01
             if let name = item.layer.name, name.hasPrefix("drawing area root") {
                 sawDrawingRoot = true
-                if !hidden { return true }
+                if !hidden { drawingRootVisible = true }
             }
             if let subs = item.layer.sublayers, !subs.isEmpty {
                 for sub in subs { stack.append((sub, item.depth + 1, hidden)) }
-            } else if !sawDrawingRoot, item.depth >= 2, !hidden,
+            } else if item.depth >= 2, !hidden,
                       item.layer.bounds.width > 0, item.layer.bounds.height > 0 {
-                return true
+                hasVisibleDeepLeaf = true
             }
         }
-        return false
+        return sawDrawingRoot ? drawingRootVisible : hasVisibleDeepLeaf
     }
 
     private func performRenderHealthCheck(generation: Int) {
@@ -471,8 +501,9 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
         }
         let expectsContent = session.isMarkdown ? !(session.markdown?.sections.isEmpty ?? true) : !(session.epub?.spine.isEmpty ?? true)
         var settled = false
-        let watchdog = DispatchWorkItem { [weak self] in
-            guard let self, !settled, generation == self.loadGeneration, self.isViewVisibleOnScreen else { return }
+        let watchdog = DispatchWorkItem { [weak self, weak webView] in
+            guard let self, !settled, let webView, webView === self.webView,
+                  generation == self.loadGeneration, self.isViewVisibleOnScreen else { return }
             settled = true
             self.recoverBlankWebView(reason: "frame-watchdog-timeout")
         }
@@ -490,12 +521,13 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
           setTimeout(() => finish(false), 900);
         });
         """
-        webView.callAsyncJavaScript(probe, arguments: [:], in: nil, in: .page) { [weak self] result in
+        webView.callAsyncJavaScript(probe, arguments: [:], in: nil, in: .page) { [weak self, weak webView] result in
             DispatchQueue.main.async {
                 guard let self, !settled else { return }
                 settled = true
                 watchdog.cancel()
-                guard generation == self.loadGeneration, self.isViewVisibleOnScreen else { return }
+                guard let webView, webView === self.webView,
+                      generation == self.loadGeneration, self.isViewVisibleOnScreen else { return }
                 guard case .success(let value) = result, let info = value as? [String: Any] else {
                     self.recoverBlankWebView(reason: "frame-probe-failed")
                     return
@@ -828,12 +860,7 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
         renderHealthWorkItem = nil
         loadTimeoutWorkItem?.cancel()
         loadedLayout = pageLayout
-        let timeout = DispatchWorkItem { [weak self] in
-            guard let self, generation == self.loadGeneration, !self.spineLoaded, self.isViewVisibleOnScreen else { return }
-            self.recoverBlankWebView(reason: "load-timeout")
-        }
-        loadTimeoutWorkItem = timeout
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: timeout)
+        scheduleLoadTimeout(generation: generation, delay: 6.0, allowProgressGrace: true)
         if session.isMarkdown { loadMarkdown() } else { loadSpine() }
     }
 
