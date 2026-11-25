@@ -24,8 +24,12 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
     private var hasLoadedDocument = false
     private var initialLoadScheduled = false
     private var loadGeneration = 0
+    private var probeGeneration = 0
+    private var loadTimeoutGeneration = 0
     private var recoveryAttempts = 0
+    private var pendingHiddenRecoveryReason: String?
     private var renderHealthWorkItem: DispatchWorkItem?
+    private var frameWatchdogWorkItem: DispatchWorkItem?
     private var loadTimeoutWorkItem: DispatchWorkItem?
     private var occlusionObserver: NSObjectProtocol?
     private var webViewConstraints: [NSLayoutConstraint] = []
@@ -48,6 +52,7 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
 
     deinit {
         renderHealthWorkItem?.cancel()
+        frameWatchdogWorkItem?.cancel()
         loadTimeoutWorkItem?.cancel()
         if let occlusionObserver { NotificationCenter.default.removeObserver(occlusionObserver) }
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
@@ -66,9 +71,16 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
 
     private var documentDirectory: String { session.bookURL.deletingLastPathComponent().path }
 
-    private var isViewVisibleOnScreen: Bool {
+    private var isContainerVisibleOnScreen: Bool {
         guard let window = view.window, window.isVisible,
               window.occlusionState.contains(.visible),
+              contactHost == nil,
+              view.bounds.width >= 80, view.bounds.height >= 80 else { return false }
+        return true
+    }
+
+    private var isViewVisibleOnScreen: Bool {
+        guard isContainerVisibleOnScreen,
               let webView, !webView.isHidden,
               webView.bounds.width >= 80, webView.bounds.height >= 80 else { return false }
         return true
@@ -137,6 +149,11 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
         }
     }
 
+    override func viewDidDisappear() {
+        super.viewDidDisappear()
+        handleVisibilityHidden()
+    }
+
     private func observeWindowOcclusion() {
         if let occlusionObserver { NotificationCenter.default.removeObserver(occlusionObserver) }
         occlusionObserver = nil
@@ -147,27 +164,56 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            self.ensureDocumentHealthAfterReveal(delay: 0.45)
+            if self.isContainerVisibleOnScreen {
+                self.ensureDocumentHealthAfterReveal(delay: 0.45)
+            } else {
+                self.handleVisibilityHidden()
+            }
         }
     }
 
-    /// Re-checks a loaded page or re-arms a stalled load timer whenever the view becomes visible.
+    private func invalidateInFlightHealthProbes() {
+        probeGeneration += 1
+        renderHealthWorkItem?.cancel()
+        renderHealthWorkItem = nil
+        frameWatchdogWorkItem?.cancel()
+        frameWatchdogWorkItem = nil
+    }
+
+    private func cancelLoadTimeout() {
+        loadTimeoutGeneration += 1
+        loadTimeoutWorkItem?.cancel()
+        loadTimeoutWorkItem = nil
+    }
+
+    private func handleVisibilityHidden() {
+        invalidateInFlightHealthProbes()
+        cancelLoadTimeout()
+    }
+
+    /// Re-checks a loaded page, flushes deferred recovery, or arms a fresh load timeout on reveal.
     private func ensureDocumentHealthAfterReveal(delay: TimeInterval) {
-        guard hasLoadedDocument, isViewVisibleOnScreen else { return }
+        guard hasLoadedDocument || pendingHiddenRecoveryReason != nil, isContainerVisibleOnScreen else { return }
+        invalidateInFlightHealthProbes()
+        if let reason = pendingHiddenRecoveryReason {
+            pendingHiddenRecoveryReason = nil
+            recoverBlankWebView(reason: reason)
+            return
+        }
+        guard isViewVisibleOnScreen else { return }
         if spineLoaded {
             scheduleRenderHealthCheck(delay: delay)
-        } else if loadTimeoutWorkItem == nil, webView != nil {
-            scheduleLoadTimeout(generation: loadGeneration, delay: 4.0, allowProgressGrace: true)
+        } else {
+            scheduleLoadTimeout(generation: loadGeneration, delay: 6.0, allowProgressGrace: true)
         }
     }
 
     private func detachWebView() {
         // Invalidates any in-flight probes or recovery callbacks bound to the old WKWebView.
         loadGeneration += 1
-        renderHealthWorkItem?.cancel()
-        renderHealthWorkItem = nil
-        loadTimeoutWorkItem?.cancel()
-        loadTimeoutWorkItem = nil
+        pendingHiddenRecoveryReason = nil
+        invalidateInFlightHealthProbes()
+        cancelLoadTimeout()
         spineLoaded = false
         NSLayoutConstraint.deactivate(webViewConstraints)
         webViewConstraints = []
@@ -245,6 +291,7 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
             ensureDocumentHealthAfterReveal(delay: 0.35)
             return
         }
+        handleVisibilityHidden()
         let host = NSHostingController(rootView: WebContactSheet(session: session) { [weak self] index in
             self?.session.setSidebar(.thumbnails)
             self?.showSection(index: index)
@@ -407,18 +454,23 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard webView === self.webView else { return }
-        loadTimeoutWorkItem?.cancel()
-        loadTimeoutWorkItem = nil
+        cancelLoadTimeout()
+        pendingHiddenRecoveryReason = nil
         spineLoaded = true
         // Picks up anything chosen while the page was loading, before scrolling measures it.
         applyLiveStyle()
         resumeTTSAfterLoad()
         if session.pendingReaderLink == nil, session.pendingAnchor == nil { scrollToCurrentSection() }
         consumePendingJump()
-        scheduleRenderHealthCheck(delay: 0.55)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
-            self?.acceptSpineReports = true
-            self?.session.finishViewRestore()
+        if isViewVisibleOnScreen {
+            scheduleRenderHealthCheck(delay: 0.55)
+        }
+        let generation = loadGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self, weak webView] in
+            guard let self, let webView, webView === self.webView,
+                  generation == self.loadGeneration, self.spineLoaded else { return }
+            self.acceptSpineReports = true
+            self.session.finishViewRestore()
         }
     }
 
@@ -446,19 +498,21 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
     }
 
     private func scheduleRenderHealthCheck(delay: TimeInterval) {
-        renderHealthWorkItem?.cancel()
+        invalidateInFlightHealthProbes()
         let generation = loadGeneration
+        let probeID = probeGeneration
         let item = DispatchWorkItem { [weak self] in
-            self?.performRenderHealthCheck(generation: generation)
+            self?.performRenderHealthCheck(generation: generation, probeID: probeID)
         }
         renderHealthWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
     private func scheduleLoadTimeout(generation: Int, delay: TimeInterval, allowProgressGrace: Bool) {
-        loadTimeoutWorkItem?.cancel()
+        cancelLoadTimeout()
+        let timeoutID = loadTimeoutGeneration
         let timeout = DispatchWorkItem { [weak self] in
-            guard let self else { return }
+            guard let self, timeoutID == self.loadTimeoutGeneration else { return }
             self.loadTimeoutWorkItem = nil
             guard generation == self.loadGeneration, !self.spineLoaded, self.isViewVisibleOnScreen else { return }
             if allowProgressGrace, let webView = self.webView, webView.isLoading, webView.estimatedProgress > 0.15 {
@@ -493,8 +547,10 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
         return sawDrawingRoot ? drawingRootVisible : hasVisibleDeepLeaf
     }
 
-    private func performRenderHealthCheck(generation: Int) {
-        guard generation == loadGeneration, spineLoaded, let webView, isViewVisibleOnScreen else { return }
+    private func performRenderHealthCheck(generation: Int, probeID: Int) {
+        renderHealthWorkItem = nil
+        guard generation == loadGeneration, probeID == probeGeneration,
+              spineLoaded, let webView, isViewVisibleOnScreen else { return }
         if !isWebLayerTreeHealthy(webView) {
             recoverBlankWebView(reason: "layer-tree-hidden")
             return
@@ -502,11 +558,16 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
         let expectsContent = session.isMarkdown ? !(session.markdown?.sections.isEmpty ?? true) : !(session.epub?.spine.isEmpty ?? true)
         var settled = false
         let watchdog = DispatchWorkItem { [weak self, weak webView] in
-            guard let self, !settled, let webView, webView === self.webView,
-                  generation == self.loadGeneration, self.isViewVisibleOnScreen else { return }
+            guard let self else { return }
+            if probeID == self.probeGeneration { self.frameWatchdogWorkItem = nil }
+            guard !settled, let webView, webView === self.webView,
+                  generation == self.loadGeneration, probeID == self.probeGeneration,
+                  self.isViewVisibleOnScreen else { return }
             settled = true
             self.recoverBlankWebView(reason: "frame-watchdog-timeout")
         }
+        frameWatchdogWorkItem?.cancel()
+        frameWatchdogWorkItem = watchdog
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: watchdog)
         let probe = """
         return await new Promise(resolve => {
@@ -526,8 +587,10 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
                 guard let self, !settled else { return }
                 settled = true
                 watchdog.cancel()
+                if probeID == self.probeGeneration { self.frameWatchdogWorkItem = nil }
                 guard let webView, webView === self.webView,
-                      generation == self.loadGeneration, self.isViewVisibleOnScreen else { return }
+                      generation == self.loadGeneration, probeID == self.probeGeneration,
+                      self.isViewVisibleOnScreen else { return }
                 guard case .success(let value) = result, let info = value as? [String: Any] else {
                     self.recoverBlankWebView(reason: "frame-probe-failed")
                     return
@@ -550,7 +613,14 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
     /// Rebuilds the WKWebView so WebKit spawns a fresh WebContent process if the previous one
     /// crashed, stalled, or got wedged with a hidden remote layer tree.
     private func recoverBlankWebView(reason: String) {
-        guard recoveryAttempts < 2, view.window != nil else { return }
+        guard view.window != nil else { return }
+        if !isContainerVisibleOnScreen || (webView != nil && !isViewVisibleOnScreen) {
+            pendingHiddenRecoveryReason = reason
+            handleVisibilityHidden()
+            return
+        }
+        guard recoveryAttempts < 2 else { return }
+        pendingHiddenRecoveryReason = nil
         recoveryAttempts += 1
         NSLog("Reader: recovering WKWebView (%@, attempt %d)", reason, recoveryAttempts)
         installWebView()
@@ -853,15 +923,14 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
     }
 
     private func loadDocument() {
+        hasLoadedDocument = true
         loadGeneration += 1
         let generation = loadGeneration
         spineLoaded = false
-        renderHealthWorkItem?.cancel()
-        renderHealthWorkItem = nil
-        loadTimeoutWorkItem?.cancel()
+        invalidateInFlightHealthProbes()
+        cancelLoadTimeout()
         loadedLayout = pageLayout
-        scheduleLoadTimeout(generation: generation, delay: 6.0, allowProgressGrace: true)
-        if session.isMarkdown { loadMarkdown() } else { loadSpine() }
+        if session.isMarkdown { loadMarkdown(generation: generation) } else { loadSpine(generation: generation) }
     }
 
     private func markdownOptions() -> MarkdownRenderOptions {
@@ -899,7 +968,7 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
         }
     }
 
-    private func loadMarkdown() {
+    private func loadMarkdown(generation: Int) {
         guard let model = session.markdown, let webView else { return }
         acceptSpineReports = false
         let script = readerScript() + """
@@ -907,6 +976,9 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
         window.readerStyle(null, null, \(session.twoPages), \(javaScriptString(highlightCSS())));
         """
         let html = MarkdownHTMLRenderer.renderDocumentHTML(model, options: markdownOptions(), injectedScript: script, fs: LocalFileSystem())
+        if isViewVisibleOnScreen {
+            scheduleLoadTimeout(generation: generation, delay: 6.0, allowProgressGrace: true)
+        }
         webView.loadHTMLString(html, baseURL: LocalAssetSchemeHandler.url(for: session.bookURL))
     }
 
@@ -931,7 +1003,7 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
             .replacingOccurrences(of: "\u{2029}", with: "\\u2029")
     }
 
-    private func loadSpine() {
+    private func loadSpine(generation: Int) {
         guard let epub = session.epub, let webView else { return }
         let items: [EPUBSpineItem]
         if session.continuous {
@@ -975,6 +1047,9 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
         \(body)
         <script>\(readerScript())</script></body></html>
         """
+        if isViewVisibleOnScreen {
+            scheduleLoadTimeout(generation: generation, delay: 6.0, allowProgressGrace: true)
+        }
         if let root = session.epubRoot {
             webView.loadHTMLString(html, baseURL: root)
         } else {
