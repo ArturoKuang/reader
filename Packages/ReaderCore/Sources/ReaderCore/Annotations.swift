@@ -179,12 +179,14 @@ public enum AnnotationIndex {
         text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
     }
 
-    /// Page, then top-of-page first (PDF y grows upward), then x. EPUB uses spine index and CFI offset.
+    /// Page, then top-of-page first (PDF y grows upward), then x. EPUB uses spine index and CFI offset;
+    /// Markdown uses section index and text offset.
     private static func positionKey(_ item: Annotation) -> (Int, Int, Int, Double, Double) {
         let cfi = item.cfi.flatMap { EPUBCFI(value: $0) }
+        let markdown = item.cfi.flatMap { MarkdownAnchor(value: $0) }
         let page = item.page ?? Int.max
-        let spine = cfi?.spineIndex ?? (item.page == nil ? Int.max : 0)
-        let offset = cfi?.startOffset ?? 0
+        let spine = cfi?.spineIndex ?? markdown?.sectionIndex ?? (item.page == nil ? Int.max : 0)
+        let offset = cfi?.startOffset ?? markdown?.startOffset ?? 0
         let rect = item.rects.first
         let top = rect.flatMap { $0.count > 3 ? $0[3] : nil } ?? 0
         let x = rect?.first ?? 0

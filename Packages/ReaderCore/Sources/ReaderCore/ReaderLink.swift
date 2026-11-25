@@ -45,7 +45,7 @@ public struct ReaderLink: Equatable, Sendable {
 
     /// `page=4` or `page=4&y=120` from a PDF deep link. EPUB locations stay CFIs.
     public var pageNumber: Int? {
-        guard let location, !location.hasPrefix("epubcfi(") else { return nil }
+        guard let location, !location.hasPrefix("epubcfi("), !location.hasPrefix("mdloc(") else { return nil }
         for part in location.split(whereSeparator: { $0 == "&" || $0 == ";" }) {
             let piece = String(part)
             if piece.hasPrefix("page="), let number = Int(piece.dropFirst("page=".count)) { return number }

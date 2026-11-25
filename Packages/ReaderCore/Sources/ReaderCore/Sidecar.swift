@@ -152,11 +152,13 @@ public struct OpenResult: Equatable, Sendable {
 public enum BookKind: String, Equatable, Sendable {
     case pdf
     case epub
+    case markdown
 
     public static func from(path: String) -> BookKind? {
         let lower = path.lowercased()
         if lower.hasSuffix(".pdf") { return .pdf }
         if lower.hasSuffix(".epub") { return .epub }
+        if [".md", ".markdown", ".mdown"].contains(where: lower.hasSuffix) { return .markdown }
         return nil
     }
 }
