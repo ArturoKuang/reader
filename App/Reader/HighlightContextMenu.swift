@@ -34,7 +34,8 @@ final class HighlightContextMenuBuilder: NSObject {
         if item?.hasNote == true {
             menu.addItem(entry("Remove Note", #selector(removeNote(_:)), id))
         }
-        menu.addItem(entry("Remove Highlight & Note", #selector(removeHighlight(_:)), id))
+        let removeTitle = item?.hasNote == true ? "Remove Highlight & Note" : "Remove Highlight"
+        menu.addItem(entry(removeTitle, #selector(removeHighlight(_:)), id))
         return menu
     }
 

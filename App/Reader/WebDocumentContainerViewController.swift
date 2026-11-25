@@ -870,10 +870,14 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
         };
         window.readerPaintConcepts(\(conceptScript()));
         window.readerTTSSetTheme(\(javaScriptString(session.package.state.epubTheme)));
-        document.addEventListener("contextmenu", event => {
-          const painted = event.target.closest && event.target.closest("span[data-annotation-id]");
+        const reportContextHighlight = event => {
+          const painted = event.target && event.target.closest && event.target.closest("span[data-annotation-id]");
           if (window.webkit) window.webkit.messageHandlers.reader.postMessage({kind: "context-highlight", id: painted ? painted.dataset.annotationId : null});
+        };
+        document.addEventListener("mousedown", event => {
+          if (event.button === 2 || event.ctrlKey) reportContextHighlight(event);
         }, true);
+        document.addEventListener("contextmenu", reportContextHighlight, true);
         document.addEventListener("click", event => {
           const glyph = event.target.closest && event.target.closest(".reader-glyph");
           if (glyph && glyph.dataset.id && window.webkit) {
