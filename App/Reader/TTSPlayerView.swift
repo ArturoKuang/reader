@@ -79,6 +79,7 @@ final class TTSPlayerView: NSView {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
+        TTSVoiceCatalog.prewarm()
         wantsLayer = true
         layer?.masksToBounds = false
         layer?.shadowColor = NSColor.black.cgColor

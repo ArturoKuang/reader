@@ -3,7 +3,7 @@ import ReaderCore
 import SwiftUI
 import UniformTypeIdentifiers
 
-final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWindowDelegate, NSSearchFieldDelegate {
+final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWindowDelegate, NSSearchFieldDelegate, NSMenuDelegate, NSMenuItemValidation {
     let session: ReaderSession
     private let split = NSSplitViewController()
     private var searchItem: NSSearchToolbarItem?
@@ -689,6 +689,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     @objc func showAskTab(_ sender: Any?) { session.show(tab: .askAI); applyChrome() }
     private func appearanceMenu() -> NSMenu {
         let menu = NSMenu()
+        menu.delegate = self
+        menu.autoenablesItems = true
         for theme in ["original", "paper", "quiet", "night"] {
             let item = NSMenuItem(title: theme.capitalized, action: #selector(chooseTheme(_:)), keyEquivalent: "")
             item.target = self
@@ -725,22 +727,49 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         return menu
     }
 
+    /// The live checkmark for an appearance item, or nil for any other item. Fonts and
+    /// themes both offer "Original", so only the action tells them apart.
+    private func appearanceState(for item: NSMenuItem) -> NSControl.StateValue? {
+        let state = session.package.state
+        let checked: Bool
+        switch item.action {
+        case #selector(chooseTheme(_:)): checked = state.epubTheme == item.title.lowercased()
+        case #selector(chooseFont(_:)): checked = state.epubFont == item.title
+        case #selector(chooseLineSpacing(_:)): checked = state.epubLine == item.tag
+        case #selector(chooseMargin(_:)): checked = state.epubMargin == item.tag
+        case #selector(chooseJustify(_:)): checked = state.epubJustify
+        default: return nil
+        }
+        return checked && webController != nil ? .on : .off
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        for item in menu.items {
+            if let state = appearanceState(for: item) { item.state = state }
+        }
+    }
+
+    /// Restyles the page, saves shortly after, and moves the checkmarks at once.
+    private func appearanceDidChange(from sender: NSMenuItem) {
+        webController?.applyLiveStyle()
+        session.scheduleViewStateSave()
+        let toolbarMenu = (window?.toolbar?.items.first { $0.itemIdentifier == .appearance } as? NSMenuToolbarItem)?.menu
+        for menu in [sender.menu, toolbarMenu].compactMap({ $0 }) { menuNeedsUpdate(menu) }
+    }
+
     @objc func chooseLineSpacing(_ sender: NSMenuItem) {
         session.package.state.epubLine = sender.tag
-        session.saveViewQuietly()
-        webController?.applyLiveStyle()
+        appearanceDidChange(from: sender)
     }
 
     @objc func chooseMargin(_ sender: NSMenuItem) {
         session.package.state.epubMargin = sender.tag
-        session.saveViewQuietly()
-        webController?.applyLiveStyle()
+        appearanceDidChange(from: sender)
     }
 
     @objc func chooseJustify(_ sender: NSMenuItem) {
         session.package.state.epubJustify.toggle()
-        session.saveViewQuietly()
-        webController?.applyLiveStyle()
+        appearanceDidChange(from: sender)
     }
 
     @objc func showAppearance(_ sender: Any?) {
@@ -765,15 +794,13 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
 
     @objc func chooseTheme(_ sender: NSMenuItem) {
         session.package.state.epubTheme = sender.title.lowercased()
-        session.saveViewQuietly()
-        webController?.applyDisplayMode()
+        appearanceDidChange(from: sender)
         updateTTSTheme()
     }
 
     @objc func chooseFont(_ sender: NSMenuItem) {
         session.package.state.epubFont = sender.title
-        session.saveViewQuietly()
-        webController?.applyDisplayMode()
+        appearanceDidChange(from: sender)
     }
 
     @objc func showMarginNotes(_ sender: Any?) { session.toggleMarginNotes(); applyChrome() }
@@ -1023,6 +1050,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             menuItem.title = session.bookmarkExistsForCurrentPosition() ? "Remove Bookmark" : "Add Bookmark"
             return true
         case #selector(chooseTheme(_:)), #selector(chooseFont(_:)), #selector(chooseLineSpacing(_:)), #selector(chooseMargin(_:)), #selector(chooseJustify(_:)):
+            if let state = appearanceState(for: menuItem) { menuItem.state = state }
             return webController != nil
         default: break
         }

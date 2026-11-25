@@ -15,6 +15,7 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
     private var fontScale: Double = 1
     private var contactHost: NSHostingController<WebContactSheet>?
     var spineLoaded = false
+    private var loadedLayout: PageLayout?
     private var watcher: MarkdownFileWatcher?
     private var keyMonitor: Any?
     private var acceptSpineReports = false
@@ -116,13 +117,18 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
         }
     }
 
+    /// Which spine items the page holds. Markdown always holds the whole file.
+    private enum PageLayout { case wholeDocument, single, twoPages }
+
+    private var pageLayout: PageLayout {
+        if session.isMarkdown || session.continuous { return .wholeDocument }
+        return session.twoPages ? .twoPages : .single
+    }
+
+    /// Reloads only when the layout needs different content in the page.
     func applyDisplayMode() {
-        view.window?.appearance = windowAppearance()
-        if webView?.url != nil, session.continuous || session.isMarkdown {
-            applyLiveStyle()
-        } else {
-            loadDocument()
-        }
+        if loadedLayout != pageLayout { loadDocument() }
+        applyLiveStyle()
     }
 
     func setContactSheet(_ visible: Bool) {
@@ -155,20 +161,25 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
         applyLiveStyle()
     }
 
+    /// Restyles the page in place. A page still loading is styled by `didFinish`.
     func applyLiveStyle() {
-        guard webView?.url != nil else { loadDocument(); return }
-        view.window?.appearance = windowAppearance()
+        if spineLoaded { webView?.evaluateJavaScript(liveStyleScript()) }
+        webView?.underPageBackgroundColor = pageBackgroundColor()
+        let appearance = windowAppearance()
+        if let window = view.window, window.appearance?.name != appearance?.name {
+            window.appearance = appearance
+        }
+    }
+
+    private func liveStyleScript() -> String {
         if session.isMarkdown {
             let options = markdownOptions()
-            call("window.readerStyle(theme, variables, columns, highlightCSS)", [
-                "theme": options.theme, "variables": markdownVariables(options),
-                "columns": session.twoPages, "highlightCSS": highlightCSS(),
-            ])
-            return
+            let variables = (try? JSONEncoder().encode(markdownVariables(options))).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+            return "window.readerStyle && window.readerStyle(\(javaScriptString(options.theme)), \(variables), \(session.twoPages), \(javaScriptString(highlightCSS())));"
         }
         let appearance = epubAppearance()
         let family = appearance.font.isEmpty ? "inherit" : appearance.font
-        let script = """
+        return """
         document.body.style.fontSize = '\(16 * fontScale)px';
         document.body.style.fontFamily = '\(family)';
         document.body.style.lineHeight = '\(appearance.line)';
@@ -178,8 +189,20 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
         document.body.style.textAlign = '\(appearance.align)';
         window.readerTTSSetTheme && window.readerTTSSetTheme(\(javaScriptString(session.package.state.epubTheme)));
         """
-        webView?.evaluateJavaScript(script)
     }
+
+    private func pageBackgroundColor() -> NSColor {
+        func rgb(_ hex: Int) -> NSColor {
+            NSColor(srgbRed: CGFloat(hex >> 16 & 0xFF) / 255, green: CGFloat(hex >> 8 & 0xFF) / 255, blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
+        }
+        switch session.package.state.epubTheme {
+        case "paper": return rgb(0xF4ECD8)
+        case "quiet": return rgb(0xECECEC)
+        case "night": return rgb(0x1C1C1E)
+        default: return .textBackgroundColor
+        }
+    }
+
     func nextPage() { showSection(index: min(session.page, max(session.pageCount - 1, 0))) }
     func previousPage() { showSection(index: max(session.page - 2, 0)) }
     func toggleFind() {
@@ -275,8 +298,9 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         spineLoaded = true
+        // Picks up anything chosen while the page was loading, before scrolling measures it.
+        applyLiveStyle()
         resumeTTSAfterLoad()
-        view.window?.appearance = windowAppearance()
         if session.pendingReaderLink == nil, session.pendingAnchor == nil { scrollToCurrentSection() }
         consumePendingJump()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
@@ -546,6 +570,7 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
     }
 
     private func loadDocument() {
+        loadedLayout = pageLayout
         if session.isMarkdown { loadMarkdown() } else { loadSpine() }
     }
 
@@ -719,7 +744,9 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
             style.id = "reader-app-style";
             document.head.appendChild(style);
           }
-          style.textContent = highlightCSS + " .reader-glyph { float: right; clear: right; border: 0; background: transparent; cursor: pointer; } .reader-concept { border-bottom: 1px solid #8e8e93; cursor: pointer; } .reader-badge { font: 10px -apple-system, sans-serif; margin-left: 3px; color: #8e8e93; cursor: pointer; } .reader-flash { background: #ffe08a; transition: background 1s; } pre { position: relative; } .reader-copy { position: absolute; right: 8px; bottom: 8px; font: 11px -apple-system, sans-serif; opacity: 0; cursor: pointer; } pre:hover .reader-copy, .reader-copy:focus { opacity: 1; }";
+          const nextCSS = highlightCSS + " .reader-glyph { float: right; clear: right; border: 0; background: transparent; cursor: pointer; } .reader-concept { border-bottom: 1px solid #8e8e93; cursor: pointer; } .reader-badge { font: 10px -apple-system, sans-serif; margin-left: 3px; color: #8e8e93; cursor: pointer; } .reader-flash { background: #ffe08a; transition: background 1s; } pre { position: relative; } .reader-copy { position: absolute; right: 8px; bottom: 8px; font: 11px -apple-system, sans-serif; opacity: 0; cursor: pointer; } pre:hover .reader-copy, .reader-copy:focus { opacity: 1; }";
+          // Reassigning identical CSS would re-parse the sheet and restyle the whole page.
+          if (style.textContent !== nextCSS) style.textContent = nextCSS;
         };
         window.readerAddCopyButtons = function() {
           document.querySelectorAll("#reader-md-article pre").forEach(pre => {

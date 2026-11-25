@@ -89,6 +89,7 @@ final class TTSEngine: NSObject, AVSpeechSynthesizerDelegate {
         self.volume = volume
         super.init()
         synthesizer.delegate = self
+        TTSVoiceCatalog.prewarm()
     }
 
     deinit {
@@ -527,27 +528,74 @@ final class TTSEngine: NSObject, AVSpeechSynthesizerDelegate {
 }
 
 /// Installed voices offered in the player menu and in Settings.
+///
+/// `speechVoices()` is a slow round trip to the speech daemon, so the list is
+/// fetched once off the main thread and kept until the installed voices change.
 enum TTSVoiceCatalog {
     struct Group {
         var title: String
         var voices: [(identifier: String, label: String)]
     }
 
+    private struct Voice {
+        var identifier: String
+        var language: String
+        var name: String
+        var label: String
+        var quality: AVSpeechSynthesisVoiceQuality
+        /// Offered without having been selected.
+        var isListed: Bool
+    }
+
+    /// Held across the fetch, so a caller that arrives early waits for it instead of repeating it.
+    private static let lock = NSLock()
+    private static var cache: [Voice]?
+
+    private static let changeObserver = NotificationCenter.default.addObserver(
+        forName: AVSpeechSynthesizer.availableVoicesDidChangeNotification, object: nil, queue: nil
+    ) { _ in
+        DispatchQueue.global(qos: .userInitiated).async {
+            lock.withLock { cache = fetch() }
+        }
+    }
+
+    /// Fills the cache in the background. Cheap to call again.
+    static func prewarm() {
+        _ = changeObserver
+        DispatchQueue.global(qos: .userInitiated).async { _ = voices() }
+    }
+
+    private static func voices() -> [Voice] {
+        lock.withLock {
+            if let cache { return cache }
+            let fetched = fetch()
+            cache = fetched
+            return fetched
+        }
+    }
+
+    /// Every installed voice, sorted by language and name.
+    private static func fetch() -> [Voice] {
+        let languages: Set<String> = ["en", String(AVSpeechSynthesisVoice.currentLanguageCode().prefix(2))]
+        return AVSpeechSynthesisVoice.speechVoices().map { voice in
+            Voice(
+                identifier: voice.identifier, language: voice.language, name: voice.name,
+                label: "\(voice.name) — \(Locale.current.localizedString(forIdentifier: voice.language) ?? voice.language)",
+                quality: voice.quality,
+                isListed: languages.contains(String(voice.language.prefix(2)))
+                    && !voice.voiceTraits.contains(.isNoveltyVoice)
+                    && !voice.identifier.contains(".eloquence.")
+            )
+        }.sorted { ($0.language, $0.name) < ($1.language, $1.name) }
+    }
+
     /// English and system-language voices, best quality first. `selected` is
     /// listed even when it falls outside that filter.
     static func groups(including selected: String? = nil) -> [Group] {
-        let languages: Set<String> = ["en", String(AVSpeechSynthesisVoice.currentLanguageCode().prefix(2))]
-        let voices = AVSpeechSynthesisVoice.speechVoices().filter { voice in
-            if voice.identifier == selected { return true }
-            return languages.contains(String(voice.language.prefix(2)))
-                && !voice.voiceTraits.contains(.isNoveltyVoice)
-                && !voice.identifier.contains(".eloquence.")
-        }
+        let offered = voices().filter { $0.isListed || $0.identifier == selected }
         let qualities: [(AVSpeechSynthesisVoiceQuality, String)] = [(.premium, "Premium"), (.enhanced, "Enhanced"), (.default, "Standard")]
         return qualities.compactMap { quality, title in
-            let members = voices.filter { $0.quality == quality }
-                .sorted { ($0.language, $0.name) < ($1.language, $1.name) }
-                .map { ($0.identifier, "\($0.name) — \(Locale.current.localizedString(forIdentifier: $0.language) ?? $0.language)") }
+            let members = offered.filter { $0.quality == quality }.map { ($0.identifier, $0.label) }
             return members.isEmpty ? nil : Group(title: title, voices: members)
         }
     }
