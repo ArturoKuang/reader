@@ -9,6 +9,8 @@ protocol TTSDocumentBridge: AnyObject {
     func buildTTSChapters(completion: @escaping ([TTSChapterPlan]) -> Void)
     /// The first visible position. `chapterIndex` indexes `chapters`.
     func currentTTSViewportStart(in chapters: [TTSChapterPlan]) -> (chapterIndex: Int, segmentIndex: Int, utf16Offset: Int)
+    /// Like `currentTTSViewportStart`, but asks the live document first.
+    func resolveCurrentTTSViewportStart(in chapters: [TTSChapterPlan], completion: @escaping ((chapterIndex: Int, segmentIndex: Int, utf16Offset: Int)) -> Void)
     /// Paints the sentence and, when known, the spoken word (relative to `segment.text`).
     /// Scrolls to keep it visible only when `autoScroll` is true.
     func applyTTSHighlight(chapter: TTSChapterPlan, segment: TTSDocumentSegment, wordRangeInSegment: NSRange?, autoScroll: Bool)
@@ -19,4 +21,10 @@ protocol TTSDocumentBridge: AnyObject {
     /// Called for user-initiated scrolls only, never for the bridge's own scrolling.
     var onManualScrollDuringTTS: (() -> Void)? { get set }
     var preferredTTSAppearanceIsDark: Bool { get }
+}
+
+extension TTSDocumentBridge {
+    func resolveCurrentTTSViewportStart(in chapters: [TTSChapterPlan], completion: @escaping ((chapterIndex: Int, segmentIndex: Int, utf16Offset: Int)) -> Void) {
+        completion(currentTTSViewportStart(in: chapters))
+    }
 }

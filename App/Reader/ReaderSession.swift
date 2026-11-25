@@ -1113,7 +1113,36 @@ final class ReaderSession: ObservableObject {
         bookData = data
         fingerprint = SHA256.fingerprint(data)
         loadMarkdown()
+        adoptEditedMarkdown()
         onPageChange?()
+    }
+
+    /// Re-anchors annotations to the new text and records the new fingerprint.
+    private func adoptEditedMarkdown() {
+        guard let model = markdown else { return }
+        let hasAnnotations = !highlights.isEmpty || !notes.isEmpty || !words.isEmpty || !marks.isEmpty
+        if hasAnnotations {
+            // Entries whose quote is gone keep their old anchor.
+            _ = Reanchorer.apply(package: &package, corpus: model.textCorpus())
+            needsReanchor = false
+        }
+        captureState()
+        let fs = LocalFileSystem()
+        var index = LibraryIndex.load(from: AppPaths.indexFile, fs: fs)
+        do {
+            try SidecarStore.adoptEditedBook(
+                package: &package, directory: usesVault ? nil : directory, bookPath: bookURL.path,
+                fingerprint: fingerprint, index: &index, fs: fs
+            )
+            try index.save(to: AppPaths.indexFile, fs: fs)
+        } catch {
+            notice = error.localizedDescription
+        }
+        if hasAnnotations {
+            annotationRevision += 1
+            onAnnotationsChanged?()
+            objectWillChange.send()
+        }
     }
 
     private func prepareBookText() {

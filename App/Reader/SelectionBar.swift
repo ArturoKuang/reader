@@ -13,6 +13,8 @@ final class SelectionBarController: NSObject {
     /// Still true while the dismissal fades out.
     var isShowing: Bool { bar?.superview != nil }
 
+    deinit { removeMonitor() }
+
     func dismiss() {
         guard let bar, !dismissing else { return }
         dismissing = true

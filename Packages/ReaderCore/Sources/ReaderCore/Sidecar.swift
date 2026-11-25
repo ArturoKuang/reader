@@ -306,6 +306,21 @@ public enum SidecarStore {
         }
     }
 
+    /// The open book was rewritten on disk. Moves the notes package and its library entry to the
+    /// new fingerprint, so the next open does not report a mismatch. Pass a nil `directory` when
+    /// the notes live elsewhere (a vault) and no package should be written.
+    public static func adoptEditedBook(
+        package: inout SidecarPackage, directory: String?, bookPath: String, fingerprint: String,
+        index: inout LibraryIndex, fs: FileSystem, now: String = ISO8601DateFormatter().string(from: Date())
+    ) throws {
+        package = package.refreshingFingerprint(fingerprint)
+        for position in index.documents.indices where index.documents[position].bookPath == bookPath {
+            index.documents[position].fingerprint = fingerprint
+            index.documents[position].updated = now
+        }
+        if let directory { try package.write(to: directory, fs: fs) }
+    }
+
     private static func create(_ package: SidecarPackage, sibling: String, digest: String, applicationSupport: String, fs: FileSystem) throws -> (directory: String, placement: Placement, notice: String?) {
         let parent = Paths.parent(sibling)
         do {

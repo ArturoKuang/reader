@@ -58,12 +58,7 @@ extension WebDocumentContainerViewController: TTSDocumentBridge {
         ) { [weak self] result in
             guard let self, case .success(let value) = result, let object = value as? [String: Any],
                   let rows = object["sections"] as? [[String: Any]] else { return completion([]) }
-            if let viewport = object["viewport"] as? [String: Any],
-               let section = self.integer(viewport["sectionIndex"]), let offset = self.integer(viewport["offset"]) {
-                self.ttsViewport = (section, offset)
-            } else {
-                self.ttsViewport = nil
-            }
+            self.ttsViewport = self.viewportPosition(object["viewport"])
             let sources = rows.compactMap { row -> TTSTextPlanner.WebSectionSource? in
                 guard let index = self.integer(row["index"]), let text = row["text"] as? String else { return nil }
                 return TTSTextPlanner.WebSectionSource(sectionIndex: index, title: titles(index), text: text)
@@ -129,6 +124,24 @@ extension WebDocumentContainerViewController: TTSDocumentBridge {
         }
         // Past the end of the text, the last sentence is the nearest one.
         return (ttsViewport == nil ? first : last) ?? (0, 0, 0)
+    }
+
+    func resolveCurrentTTSViewportStart(in chapters: [TTSChapterPlan], completion: @escaping ((chapterIndex: Int, segmentIndex: Int, utf16Offset: Int)) -> Void) {
+        guard let webView, spineLoaded else { return completion(currentTTSViewportStart(in: chapters)) }
+        webView.callAsyncJavaScript(
+            "return window.readerTTSViewportStart ? window.readerTTSViewportStart() : null;",
+            arguments: [:], in: nil, in: .page
+        ) { [weak self] result in
+            guard let self else { return }
+            if case .success(let value) = result { self.ttsViewport = self.viewportPosition(value) }
+            completion(self.currentTTSViewportStart(in: chapters))
+        }
+    }
+
+    private func viewportPosition(_ value: Any?) -> (section: Int, offset: Int)? {
+        guard let object = value as? [String: Any],
+              let section = integer(object["sectionIndex"]), let offset = integer(object["offset"]) else { return nil }
+        return (section, offset)
     }
 
     // MARK: Highlight

@@ -192,7 +192,7 @@ public enum MarkdownHTMLRenderer {
                 citations[id, default: 0] += 1
                 let suffix = citations[id]! > 1 ? "-\(citations[id]!)" : ""
                 return "<a class=\"footnote-ref\" id=\"fnref-\(escape(id))\(suffix)\" href=\"#fn-\(escape(id))\" data-tts-exclude=\"true\">\(number)</a>"
-            case .softBreak: return "\n"
+            case .softBreak: return " "
             case .lineBreak: return "<br>\n"
             }
         }

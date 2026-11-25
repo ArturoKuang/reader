@@ -130,7 +130,8 @@ public struct MarkdownAnchor: Equatable, Sendable {
     public var rawValue: String
 
     public init?(value: String) {
-        guard value.hasPrefix("mdloc("), let close = value.lastIndex(of: ")") else { return nil }
+        // The first ")" ends the anchor; a trailing `&quote=` may contain more.
+        guard value.hasPrefix("mdloc("), let close = value.firstIndex(of: ")") else { return nil }
         let body = value[value.index(value.startIndex, offsetBy: 6)..<close]
         var fields: [String: String] = [:]
         for part in body.split(separator: ",") {

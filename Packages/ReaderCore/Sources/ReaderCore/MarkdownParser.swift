@@ -6,13 +6,12 @@ public enum MarkdownParser {
         var lines = source.replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
             .replacingOccurrences(of: "\u{FEFF}", with: "")
-            .replacingOccurrences(of: "\t", with: "    ")
             .components(separatedBy: "\n")
         var lineOffset = 0
         var frontMatter: MarkdownFrontMatter?
         if lines.first?.trimmed == "---",
            let end = lines.indices.dropFirst().first(where: { ["---", "..."].contains(lines[$0].trimmed) }) {
-            frontMatter = parseFrontMatter(Array(lines[1..<end]))
+            frontMatter = parseFrontMatter(lines[1..<end].map(expandingTabs))
             lineOffset = end + 1
             lines.removeFirst(end + 1)
         }
@@ -123,6 +122,21 @@ public enum MarkdownParser {
 
     private static func indent(_ line: String) -> Int { line.prefix { $0 == " " }.count }
 
+    /// The form block patterns and prose are read from. Code keeps the original line.
+    private static func expandingTabs(_ line: String) -> String { line.replacingOccurrences(of: "\t", with: "    ") }
+
+    /// Removes up to `columns` of leading indentation, counting a tab as four. Tabs
+    /// past that point stay; a tab cut partway leaves its remaining columns as spaces.
+    private static func dedent(_ line: String, _ columns: Int) -> String {
+        var rest = Substring(line)
+        var left = columns
+        while left > 0, let first = rest.first, first == " " || first == "\t" {
+            rest.removeFirst()
+            left -= first == "\t" ? 4 : 1
+        }
+        return String(repeating: " ", count: max(-left, 0)) + rest
+    }
+
     private static func cells(_ line: String) -> [String] {
         var parts: [String] = [""]
         var escaped = false
@@ -178,17 +192,19 @@ public enum MarkdownParser {
             if depth > 24 { return [(.paragraph([.text(input.joined(separator: "\n"))]), 0)] }
             var lines = input
             if depth == 0 { collectReferences(&lines) }
+            // `lines` keeps tabs for code and nested containers; `flat` is for matching.
+            let flat = lines.map(expandingTabs)
             var result: [(MarkdownBlock, Int)] = []
             var i = 0
             while i < lines.count {
-                let line = lines[i]
+                let line = flat[i]
                 let start = i
                 let trimmed = line.trimmed
                 if trimmed.isEmpty { i += 1; continue }
                 if indent(line) >= 4 {
                     var code: [String] = []
-                    while i < lines.count, indent(lines[i]) >= 4 || lines[i].trimmed.isEmpty {
-                        code.append(String(lines[i].dropFirst(4)))
+                    while i < lines.count, indent(flat[i]) >= 4 || flat[i].trimmed.isEmpty {
+                        code.append(dedent(lines[i], 4))
                         i += 1
                     }
                     while code.last?.trimmed.isEmpty == true { code.removeLast() }
@@ -197,14 +213,14 @@ public enum MarkdownParser {
                     var code: [String] = []
                     i += 1
                     while i < lines.count {
-                        let close = lines[i].trimmed
-                        if indent(lines[i]) < 4, close.hasPrefix(open[2]), close.allSatisfy({ $0 == open[2].first }) { i += 1; break }
-                        code.append(String(lines[i].dropFirst(min(indent(lines[i]), open[1].count))))
+                        let close = flat[i].trimmed
+                        if indent(flat[i]) < 4, close.hasPrefix(open[2]), close.allSatisfy({ $0 == open[2].first }) { i += 1; break }
+                        code.append(dedent(lines[i], open[1].count))
                         i += 1
                     }
                     let language = open[3].split(separator: " ").first.map(String.init)
                     result.append((.code(language: language, text: code.joined(separator: "\n")), start))
-                } else if trimmed.hasPrefix("$$"), let math = displayMath(lines, &i) {
+                } else if trimmed.hasPrefix("$$"), let math = displayMath(flat, &i) {
                     result.append((.math(math), start))
                 } else if let found = match(line, atx) {
                     var text = found[2]
@@ -217,14 +233,14 @@ public enum MarkdownParser {
                 } else if match(line, quote) != nil {
                     var inner: [String] = []
                     while i < lines.count {
-                        if let found = match(lines[i], quote) {
-                            inner.append(found[1])
-                        } else if !lines[i].trimmed.isEmpty, inner.last?.trimmed.isEmpty == false, !interrupts(lines[i]) {
+                        if match(flat[i], quote) != nil, let mark = lines[i].firstIndex(of: ">") {
+                            inner.append(dedent(String(lines[i][lines[i].index(after: mark)...]), 1))
+                        } else if !flat[i].trimmed.isEmpty, inner.last?.trimmed.isEmpty == false, !interrupts(flat[i]) {
                             inner.append(lines[i])
                         } else { break }
                         i += 1
                     }
-                    if let head = match(inner.first ?? "", "^\\[!([A-Za-z-]+)\\]([-+]?)[ ]*(.*)$") {
+                    if let head = match(expandingTabs(inner.first ?? ""), "^\\[!([A-Za-z-]+)\\]([-+]?)[ ]*(.*)$") {
                         let type = head[1].lowercased()
                         let title = head[3].isEmpty ? [.text(type.capitalized)] : inline(head[3])
                         let fold: MarkdownCalloutFold = head[2] == "-" ? .collapsed : head[2] == "+" ? .expanded : .fixed
@@ -237,11 +253,11 @@ public enum MarkdownParser {
                     var body = [found[2]]
                     i += 1
                     while i < lines.count {
-                        if indent(lines[i]) >= 2 {
-                            body.append(String(lines[i].dropFirst(min(4, indent(lines[i])))))
-                        } else if lines[i].trimmed.isEmpty, i + 1 < lines.count, indent(lines[i + 1]) >= 2 {
+                        if indent(flat[i]) >= 2 {
+                            body.append(dedent(lines[i], 4))
+                        } else if flat[i].trimmed.isEmpty, i + 1 < lines.count, indent(flat[i + 1]) >= 2 {
                             body.append("")
-                        } else if !lines[i].trimmed.isEmpty, body.last?.isEmpty == false, !interrupts(lines[i]), match(lines[i], footnote) == nil {
+                        } else if !flat[i].trimmed.isEmpty, body.last?.isEmpty == false, !interrupts(flat[i]), match(flat[i], footnote) == nil {
                             body.append(lines[i])
                         } else { break }
                         i += 1
@@ -249,10 +265,10 @@ public enum MarkdownParser {
                     let parsed = blocks(body, depth: depth + 1).map(\.0)
                     footnotes[found[1]] = parsed
                 } else if match(line, marker) != nil {
-                    result.append((list(lines, &i, depth: depth), start))
-                } else if trimmed.contains("|"), i + 1 < lines.count, lines[i + 1].contains("-"),
-                          match(lines[i + 1], delimiterRow) != nil, cells(line).count == cells(lines[i + 1]).count {
-                    let alignments: [MarkdownColumnAlignment] = cells(lines[i + 1]).map {
+                    result.append((list(lines, flat, &i, depth: depth), start))
+                } else if trimmed.contains("|"), i + 1 < lines.count, flat[i + 1].contains("-"),
+                          match(flat[i + 1], delimiterRow) != nil, cells(line).count == cells(flat[i + 1]).count {
+                    let alignments: [MarkdownColumnAlignment] = cells(flat[i + 1]).map {
                         switch ($0.hasPrefix(":"), $0.hasSuffix(":")) {
                         case (true, true): return .center
                         case (true, false): return .left
@@ -263,8 +279,8 @@ public enum MarkdownParser {
                     let header = cells(line).map { inline($0) }
                     var rows: [[[MarkdownInline]]] = []
                     i += 2
-                    while i < lines.count, lines[i].contains("|"), !interrupts(lines[i]) {
-                        var row = cells(lines[i]).prefix(header.count).map { inline($0) }
+                    while i < lines.count, flat[i].contains("|"), !interrupts(flat[i]) {
+                        var row = cells(flat[i]).prefix(header.count).map { inline($0) }
                         while row.count < header.count { row.append([]) }
                         rows.append(row)
                         i += 1
@@ -274,14 +290,14 @@ public enum MarkdownParser {
                     var text = [line]
                     i += 1
                     var level = 0
-                    while i < lines.count, !lines[i].trimmed.isEmpty {
-                        if let setext = match(lines[i], "^ {0,3}(=+|-+)[ ]*$") {
+                    while i < lines.count, !flat[i].trimmed.isEmpty {
+                        if let setext = match(flat[i], "^ {0,3}(=+|-+)[ ]*$") {
                             level = setext[1].hasPrefix("=") ? 1 : 2
                             i += 1
                             break
                         }
-                        if interrupts(lines[i]) { break }
-                        text.append(lines[i])
+                        if interrupts(flat[i]) { break }
+                        text.append(flat[i])
                         i += 1
                     }
                     // Leading space goes; trailing double space stays because it marks a hard break.
@@ -297,11 +313,12 @@ public enum MarkdownParser {
         private mutating func collectReferences(_ lines: inout [String]) {
             var openFence: String?
             for index in lines.indices {
+                let line = expandingTabs(lines[index])
                 if let open = openFence {
-                    if lines[index].trimmed.hasPrefix(open) { openFence = nil }
-                } else if let found = match(lines[index], MarkdownParser.fence) {
+                    if line.trimmed.hasPrefix(open) { openFence = nil }
+                } else if let found = match(line, MarkdownParser.fence) {
                     openFence = found[2]
-                } else if let found = match(lines[index], reference) {
+                } else if let found = match(line, reference) {
                     references[found[1].lowercased()] = (found[2], found[3].isEmpty ? nil : found[3])
                     lines[index] = ""
                 }
@@ -330,32 +347,32 @@ public enum MarkdownParser {
             return nil
         }
 
-        private mutating func list(_ lines: [String], _ i: inout Int, depth: Int) -> MarkdownBlock {
-            let first = match(lines[i], marker)!
+        private mutating func list(_ lines: [String], _ flat: [String], _ i: inout Int, depth: Int) -> MarkdownBlock {
+            let first = match(flat[i], marker)!
             let ordered = first[2].first!.isNumber
             let kind = first[2].last
             var items: [MarkdownListItem] = []
             var tight = true
-            while i < lines.count, let found = match(lines[i], marker), found[2].last == kind, match(lines[i], rule) == nil {
+            while i < lines.count, let found = match(flat[i], marker), found[2].last == kind, match(flat[i], rule) == nil {
                 let width = found[1].count + found[2].count + (found[3].count > 4 || found[3].isEmpty ? 1 : found[3].count)
                 var body = [found[3].count > 4 ? String(found[3].dropFirst()) + found[4] : found[4]]
                 i += 1
                 var blank = false
                 while i < lines.count {
-                    let line = lines[i]
+                    let line = flat[i]
                     if line.trimmed.isEmpty {
                         blank = true
                         body.append("")
                     } else if indent(line) >= width {
                         if blank, indent(line) == width, body.contains(where: { !$0.isEmpty }) { tight = false }
                         blank = false
-                        body.append(String(line.dropFirst(width)))
+                        body.append(dedent(lines[i], width))
                     } else if !blank, !interrupts(line), match(line, marker) == nil {
-                        body.append(line)
+                        body.append(lines[i])
                     } else { break }
                     i += 1
                 }
-                if blank, i < lines.count, let next = match(lines[i], marker), next[2].last == kind { tight = false }
+                if blank, i < lines.count, let next = match(flat[i], marker), next[2].last == kind { tight = false }
                 var task: Bool?
                 if let box = match(body[0], "^\\[([ xX])\\](?:[ ]+(.*))?$") {
                     task = box[1] != " "

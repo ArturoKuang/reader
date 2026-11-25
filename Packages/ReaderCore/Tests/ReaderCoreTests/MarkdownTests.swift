@@ -194,4 +194,70 @@ final class MarkdownTests: XCTestCase {
         let hit = Reanchorer.locate(quote: "target", prefix: "", suffix: "", in: parse("# A\n\n😀 target").textCorpus())
         XCTAssertEqual(hit?.cfi, "mdloc(s=0,a=a,o=5,e=11)")
     }
+
+    func testSoftBreakRendersAsTheSpaceInPlainText() {
+        let model = parse("one\ntwo")
+        XCTAssertEqual(model.sections[0].plainText, "one two")
+        assertContains(html("one\ntwo"), "<p>one two</p>")
+    }
+
+    func testAnchorStopsAtItsOwnParenthesisInCopiedLinks() {
+        let anchor = MarkdownAnchor.make(sectionIndex: 1, anchorID: "setup", start: 3, end: 9)
+        let link = CopyLink.make(path: "/a.md", page: nil, cfi: anchor.rawValue, quote: "call f(x) twice)")
+        let location = ReaderLink.parse(link.url)?.location
+        XCTAssertEqual(location.flatMap { MarkdownAnchor(value: $0) }, anchor)
+    }
+
+    private func codeBlocks(_ blocks: [MarkdownBlock]) -> [String] {
+        blocks.flatMap { block -> [String] in
+            switch block {
+            case .code(_, let text): return [text]
+            case .blockquote(let inner), .callout(_, _, _, let inner): return codeBlocks(inner)
+            case .list(_, _, _, let items): return items.flatMap { codeBlocks($0.blocks) }
+            default: return []
+            }
+        }
+    }
+
+    func testFencedMakefileKeepsTabs() {
+        let source = "```make\nall:\n\tcc -o app\tmain.c\n\t\t@echo done\n```"
+        XCTAssertEqual(codeBlocks(parse(source).sections[0].blocks), ["all:\n\tcc -o app\tmain.c\n\t\t@echo done"])
+    }
+
+    func testNestedAndIndentedCodeKeepsTabs() {
+        func code(_ source: String) -> [String] { codeBlocks(parse(source).sections[0].blocks) }
+        XCTAssertEqual(code("- item\n\n  ```make\n  all:\n  \tcc\n  ```"), ["all:\n\tcc"])
+        XCTAssertEqual(code("> ```make\n> all:\n> \tcc\n> ```"), ["all:\n\tcc"])
+        XCTAssertEqual(code("\tall:\n\t\tcc"), ["all:\n\tcc"])
+    }
+
+    func testLeadingTabsStillIndentStructure() {
+        guard case .list(_, _, _, let items) = parse("- a\n\t- b").sections[0].blocks[0],
+              case .list = items[0].blocks[1] else { return XCTFail("not nested") }
+        XCTAssertEqual(parse("#\tTitle").headings.map(\.title), ["Title"])
+    }
+
+    func testEditedBookKeepsItsNotesWithoutAMismatch() throws {
+        let fs = MemoryFileSystem()
+        try fs.createDirectory("/docs")
+        var index = LibraryIndex()
+        func open(_ source: String) throws -> OpenResult {
+            try SidecarStore.open(bookPath: "/docs/a.md", bookData: Data(source.utf8), title: nil, index: &index, applicationSupport: "/support", fs: fs)
+        }
+        let first = try open("# A\n\ntarget")
+        var package = first.package
+        package.highlights.highlights = [HighlightEntry(id: "h1", color: 1, cfi: "mdloc(s=0,a=a,o=3,e=9)", quote: "target")]
+        try package.write(to: first.directory, fs: fs)
+
+        let edited = "# New\n\nintro\n\n# A\n\ntarget"
+        _ = Reanchorer.apply(package: &package, corpus: parse(edited).textCorpus())
+        let fingerprint = SHA256.fingerprint(Data(edited.utf8))
+        try SidecarStore.adoptEditedBook(package: &package, directory: first.directory, bookPath: "/docs/a.md", fingerprint: fingerprint, index: &index, fs: fs)
+        XCTAssertEqual(index.documents.map(\.fingerprint), [fingerprint])
+
+        let reopened = try open(edited)
+        XCTAssertFalse(reopened.needsReanchor)
+        XCTAssertNil(reopened.notice)
+        XCTAssertTrue(reopened.package.highlights.highlights.first?.cfi?.hasPrefix("mdloc(s=1,a=a,") == true)
+    }
 }

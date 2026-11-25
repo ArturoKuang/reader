@@ -203,8 +203,7 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
     func find(forward: Bool) {
         let query = findBar.stringValue.isEmpty ? session.findQuery : findBar.stringValue
         session.findQuery = query
-        let escaped = query.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
-        webView?.evaluateJavaScript("window.find('\(escaped)', false, \(!forward), true)")
+        webView?.evaluateJavaScript("window.find(\(javaScriptString(query)), false, \(!forward), true)")
     }
 
     func hasActiveSelection(completion: @escaping (Bool) -> Void) {
@@ -455,9 +454,9 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
     }
 
     private func flash(_ quote: String) {
-        let escaped = quote.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+        let literal = javaScriptString(quote)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            self?.webView?.evaluateJavaScript("window.readerFlash && window.readerFlash('\(escaped)')")
+            self?.webView?.evaluateJavaScript("window.readerFlash && window.readerFlash(\(literal))")
         }
     }
 
@@ -612,6 +611,8 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
     func javaScriptString(_ value: String) -> String {
         let data = (try? JSONEncoder().encode(value)) ?? Data("\"\"".utf8)
         return String(decoding: data, as: UTF8.self)
+            .replacingOccurrences(of: "\u{2028}", with: "\\u2028")
+            .replacingOccurrences(of: "\u{2029}", with: "\\u2029")
     }
 
     private func loadSpine() {
@@ -674,26 +675,7 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
 
     /// Selection, highlights, notes, concepts, and scroll reporting for both document kinds.
     private func readerScript() -> String {
-        return WebTTSScript.source + "\n" + """
-        window.readerSelection = function() {
-          const sel = document.getSelection();
-          if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
-          const text = sel.toString();
-          const node = sel.anchorNode ? sel.anchorNode.textContent || "" : "";
-          const start = Math.max(0, node.indexOf(text));
-          const host = sel.anchorNode && (sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement);
-          const section = host && host.closest ? host.closest("section[id^='spine-'], section[data-tts-section]") : null;
-          const index = section ? Number(section.dataset.index || section.dataset.ttsSection || 0) : 0;
-          const box = sel.getRangeAt(0).getBoundingClientRect();
-          let offset = start;
-          if (section && section.dataset.anchor) {
-            const before = document.createRange();
-            before.selectNodeContents(section);
-            before.setEnd(sel.getRangeAt(0).startContainer, sel.getRangeAt(0).startOffset);
-            offset = before.toString().length;
-          }
-          return { text, index, rect: { x: box.left, y: box.top, width: box.width, height: box.height }, prefix: node.slice(Math.max(0, start - 40), start), suffix: node.slice(start + text.length, start + text.length + 40), sentence: node.trim(), cfi: section && section.dataset.anchor ? "mdloc(s=" + index + ",a=" + section.dataset.anchor + ",o=" + offset + ",e=" + (offset + text.length) + ")" : "epubcfi(/6/" + ((index + 1) * 2) + "!/4,/1:" + start + ",/1:" + (start + text.length) + ")" };
-        };
+        return WebTTSScript.source + "\n" + WebAnnotationScript.source + "\n" + """
         const sections = [...document.querySelectorAll("section[id^='spine-']")];
         if (sections.length) {
           const observer = new IntersectionObserver(entries => {
@@ -773,26 +755,6 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
           const value = window.readerSelection();
           if (value && window.webkit && window.webkit.messageHandlers.reader) window.webkit.messageHandlers.reader.postMessage(value);
         });
-        window.readerFlash = function(quote) {
-          if (!quote) return;
-          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-          while (walker.nextNode()) {
-            const node = walker.currentNode;
-            const at = (node.nodeValue || "").indexOf(quote);
-            if (at < 0 || !node.parentNode) continue;
-            const span = document.createElement("span");
-            span.className = "reader-flash";
-            span.textContent = quote;
-            const text = node.nodeValue;
-            node.parentNode.insertBefore(document.createTextNode(text.slice(0, at)), node);
-            node.parentNode.insertBefore(span, node);
-            node.parentNode.insertBefore(document.createTextNode(text.slice(at + quote.length)), node);
-            node.parentNode.removeChild(node);
-            span.scrollIntoView({block: "center"});
-            setTimeout(() => { span.className = ""; }, 1200);
-            break;
-          }
-        };
         function tokenAt(text, at, length) {
           const word = /[0-9A-Za-z'’]/;
           if (at > 0 && word.test(text[at - 1])) return false;
@@ -811,57 +773,7 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
           }
           return -1;
         }
-        window.readerPaint = function(marks) {
-          document.querySelectorAll("span[class^='reader-hl-']").forEach(span => {
-            const parent = span.parentNode;
-            while (span.firstChild) parent.insertBefore(span.firstChild, span);
-            parent.removeChild(span);
-            parent.normalize();
-          });
-          (marks || []).forEach(mark => {
-            if (!mark.quote) return;
-            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-            while (walker.nextNode()) {
-              const node = walker.currentNode;
-              if (!node.nodeValue || !node.parentNode) continue;
-              if (node.parentNode.closest && node.parentNode.closest("[class*='reader-hl']")) continue;
-              const at = node.nodeValue.indexOf(mark.quote);
-              if (at < 0) continue;
-              const span = document.createElement("span");
-              span.className = "reader-hl-" + (mark.color || 1);
-              span.textContent = mark.quote;
-              const text = node.nodeValue;
-              node.parentNode.insertBefore(document.createTextNode(text.slice(0, at)), node);
-              node.parentNode.insertBefore(span, node);
-              node.parentNode.insertBefore(document.createTextNode(text.slice(at + mark.quote.length)), node);
-              node.parentNode.removeChild(node);
-              break;
-            }
-          });
-          if (window.readerTTSInvalidate) window.readerTTSInvalidate();
-        };
         window.readerPaint(\(highlightScript()));
-        window.readerMarginNotes = function(notes) {
-          document.querySelectorAll(".reader-glyph").forEach(node => node.remove());
-          (notes || []).forEach(note => {
-            if (!note.quote) return;
-            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-            while (walker.nextNode()) {
-              const node = walker.currentNode;
-              if (!node.nodeValue || node.nodeValue.indexOf(note.quote) < 0 || !node.parentElement) continue;
-              const section = node.parentElement.closest("section") || document.body;
-              const mark = document.createElement("button");
-              mark.className = "reader-glyph";
-              mark.dataset.id = note.id;
-              mark.textContent = "●";
-              mark.style.color = note.color || "#888";
-              mark.title = (note.body || "").split("\\n")[0];
-              section.appendChild(mark);
-              break;
-            }
-          });
-          if (window.readerTTSInvalidate) window.readerTTSInvalidate();
-        };
         window.readerMarginNotes(\(marginNoteScript()));
         window.readerPaintConcepts = function(concepts) {
           concepts.forEach(concept => {

@@ -236,8 +236,12 @@ enum WebTTSScript {
 
       function apply(args, scroll) {
         const data = dataFor(args.sectionIndex);
-        if (!data) return "missing";
-        if (data.stale) return "stale";
+        if (!data || data.stale) {
+          // The previous sentence is no longer the active one, so it must not stay painted.
+          active = null;
+          paint(null);
+          return data ? "stale" : "missing";
+        }
         active = {
           sentRange: rangeFor(data, args.sentStart, args.sentLen),
           wordRange: args.wordLen > 0 ? rangeFor(data, args.wordStart, args.wordLen) : null

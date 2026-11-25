@@ -103,7 +103,8 @@ final class TTSEngine: NSObject, AVSpeechSynthesizerDelegate {
     func open(from anchor: TTSStartAnchor) {
         if state.isPresented {
             state.autoScrollEnabled = true
-            start(from: anchor)
+            // The reader may have scrolled since the plan was built.
+            start(from: anchor, refreshViewport: true)
             return
         }
         guard let bridge else {
@@ -139,7 +140,7 @@ final class TTSEngine: NSObject, AVSpeechSynthesizerDelegate {
         start(from: anchor)
     }
 
-    private func start(from anchor: TTSStartAnchor) {
+    private func start(from anchor: TTSStartAnchor, refreshViewport: Bool = false) {
         switch anchor {
         case .location(let chapter, let segment, let offset):
             speakFrom(chapterIndex: chapter, segmentIndex: segment, utf16Offset: offset)
@@ -147,11 +148,25 @@ final class TTSEngine: NSObject, AVSpeechSynthesizerDelegate {
             let match = TTSTextPlanner.findStartSegment(
                 matchingQuote: text, prefix: prefix, suffix: suffix, preferredPageOrSection: pageOrSection, in: chapters
             )
-            guard let target = match?.target else { return start(from: .viewport) }
+            guard let target = match?.target else { return start(from: .viewport, refreshViewport: refreshViewport) }
             speakFrom(chapterIndex: target.chapterIndex, segmentIndex: target.segmentIndex, utf16Offset: target.charOffset)
         case .viewport:
-            let top = bridge?.currentTTSViewportStart(in: chapters)
-            speakFrom(chapterIndex: top?.chapterIndex ?? 0, segmentIndex: top?.segmentIndex ?? 0, utf16Offset: top?.utf16Offset ?? 0)
+            guard refreshViewport, let bridge else {
+                let top = bridge?.currentTTSViewportStart(in: chapters)
+                speakFrom(chapterIndex: top?.chapterIndex ?? 0, segmentIndex: top?.segmentIndex ?? 0, utf16Offset: top?.utf16Offset ?? 0)
+                return
+            }
+            // Silence the old position while the page answers. Any later transport
+            // action bumps `generation` again and wins over this request.
+            cancelSpeech()
+            stopTicker()
+            utteranceStarted = false
+            needsReenqueue = true
+            let request = generation
+            bridge.resolveCurrentTTSViewportStart(in: chapters) { [weak self] top in
+                guard let self, self.generation == request, self.state.isPresented else { return }
+                self.speakFrom(chapterIndex: top.chapterIndex, segmentIndex: top.segmentIndex, utf16Offset: top.utf16Offset)
+            }
         }
     }
 
@@ -302,7 +317,8 @@ final class TTSEngine: NSObject, AVSpeechSynthesizerDelegate {
             synthesizer.stopSpeaking(at: .immediate)
             synthesizer = AVSpeechSynthesizer()
             synthesizer.delegate = self
-        } else if synthesizer.isSpeaking {
+        } else {
+            // A just-queued utterance can precede `isSpeaking`, so always stop.
             synthesizer.stopSpeaking(at: .immediate)
         }
     }

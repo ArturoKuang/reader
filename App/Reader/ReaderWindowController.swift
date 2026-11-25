@@ -259,6 +259,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
 
     func windowWillClose(_ notification: Notification) {
         tts.stop()
+        dismissSelectionBar()
         storeWindowFrame()
         pdfController?.capturePositionForSave()
         session.saveViewNow()
