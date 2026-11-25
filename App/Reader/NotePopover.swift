@@ -11,6 +11,7 @@ final class NotePopoverController: NSObject, NSTextViewDelegate, NSPopoverDelega
     private var colorButtons: [NSButton] = []
     private weak var session: ReaderSession?
     private var annotationID: String?
+    private var token: NoteEditToken?
     private var choices: [Concept] = []
     private var choiceIndex = 0
     private var suppressChange = false
@@ -24,10 +25,12 @@ final class NotePopoverController: NSObject, NSTextViewDelegate, NSPopoverDelega
         popover.contentViewController?.view = build()
     }
 
-    func show(id: String, session: ReaderSession, relativeTo rect: NSRect, of view: NSView) {
+    func show(id: String, token: NoteEditToken, session: ReaderSession, relativeTo rect: NSRect, of view: NSView) {
+        closeIfShown()
         self.session = session
         annotationID = id
-        let item = session.annotations.first { $0.id == id || $0.note?.id == id || $0.highlight?.id == id }
+        self.token = token
+        let item = session.annotation(matching: id)
         suppressChange = true
         textView.string = item?.body ?? ""
         textView.placeholder = (item?.hasNote == true) ? "Write a note…" : "Add Note"
@@ -46,7 +49,37 @@ final class NotePopoverController: NSObject, NSTextViewDelegate, NSPopoverDelega
     }
 
     func popoverDidClose(_ notification: Notification) {
-        if let annotationID { session?.endNoteEdit(id: annotationID) }
+        // A late notification from a popover that has since been shown again is not this edit's end.
+        guard !popover.isShown else { return }
+        finishEdit()
+    }
+
+    /// Saves the open note and closes before returning.
+    func closeIfShown() {
+        finishEdit()
+        closeNow()
+    }
+
+    /// Closes without saving when this editor's note was removed or replaced.
+    func dismiss(ifEditing tokens: [NoteEditToken]) {
+        guard let token, tokens.contains(token) else { return }
+        self.token = nil
+        annotationID = nil
+        closeNow()
+    }
+
+    private func finishEdit() {
+        guard let token else { return }
+        self.token = nil
+        annotationID = nil
+        session?.endNoteEdit(token)
+    }
+
+    private func closeNow() {
+        guard popover.isShown else { return }
+        popover.animates = false
+        popover.close()
+        popover.animates = true
     }
 
     private func build() -> NSView {
@@ -136,8 +169,8 @@ final class NotePopoverController: NSObject, NSTextViewDelegate, NSPopoverDelega
     }
 
     func textDidChange(_ notification: Notification) {
-        guard !suppressChange, let id = annotationID else { return }
-        session?.queueNoteBody(id: id, body: textView.string)
+        guard !suppressChange, let token else { return }
+        session?.queueNoteBody(token, body: textView.string)
         saved.isHidden = false
         updateCompletion()
         textView.needsDisplay = true
@@ -192,7 +225,7 @@ final class NotePopoverController: NSObject, NSTextViewDelegate, NSPopoverDelega
     }
 
     @objc private func copyLink() {
-        guard let session, let id = annotationID, let item = session.annotations.first(where: { $0.id == id || $0.highlight?.id == id }) else { return }
+        guard let session, let id = annotationID, let item = session.annotation(matching: id) else { return }
         let link = ReaderLink(path: session.bookURL.path, location: item.cfi ?? item.page.map { "page=\($0)" }, id: item.id)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(link.url, forType: .string)
@@ -201,11 +234,11 @@ final class NotePopoverController: NSObject, NSTextViewDelegate, NSPopoverDelega
     @objc private func reveal() { session?.onRevealInObsidian?(annotationID) }
     @objc private func removeNote() {
         if let id = annotationID { session?.removeNoteOnly(id: id) }
-        popover.performClose(nil)
+        closeIfShown()
     }
     @objc private func removeBoth() {
         if let id = annotationID { session?.removeAnnotationCompletely(id: id) }
-        popover.performClose(nil)
+        closeIfShown()
     }
 
     private func item(_ title: String, _ action: Selector) -> NSMenuItem {

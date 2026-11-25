@@ -89,7 +89,7 @@ final class SelectionBarController: NSObject {
 
     private func currentColor(in session: ReaderSession) -> Int? {
         guard let selection = session.selection else { return nil }
-        return AnnotationIndex.highlight(matchingQuote: selection.text, page: selection.page, cfi: selection.cfi, in: session.highlights)?.color
+        return session.existingHighlight(for: selection)?.color
     }
 
     private func installMonitor() {
@@ -116,7 +116,7 @@ final class SelectionBarController: NSObject {
     @objc func colorClicked(_ sender: NSControl) {
         let color = sender.tag
         guard let session, let selection = session.selection else { dismiss(); return }
-        let existing = AnnotationIndex.highlight(matchingQuote: selection.text, page: selection.page, cfi: selection.cfi, in: session.highlights)
+        let existing = session.existingHighlight(for: selection)
         if color == 0 {
             if let id = existing?.id { session.deleteHighlight(id: id) }
         } else if let id = existing?.id {

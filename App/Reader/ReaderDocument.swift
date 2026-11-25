@@ -32,7 +32,9 @@ final class ReaderDocument: NSDocument {
             Self.pendingVaultNotice = nil
             let hasState = fs.exists(Paths.join(coordinator.location.bookFolder, ".reader-state.json"))
             let identity = FrontMatter(kind: "notes", document: opened.url.lastPathComponent, fingerprint: SHA256.fingerprint(opened.data))
-            let result = OpenResult(package: SidecarPackage.empty(identity: identity), directory: coordinator.location.bookFolder, placement: .sibling, hasSavedViewState: hasState)
+            // Where notes go while saving to the vault is off. Nothing is created until then.
+            let sidecar = SidecarStore.fallbackLocation(bookPath: opened.url.path, bookData: opened.data, applicationSupport: AppPaths.support, fs: fs)
+            let result = OpenResult(package: SidecarPackage.empty(identity: identity), directory: sidecar.directory, placement: sidecar.placement, hasSavedViewState: hasState)
             let session = ReaderSession(bookURL: opened.url, bookData: opened.data, open: result)
             if hasState {
                 session.package.state = VaultBookSettings.load(bookFolder: coordinator.location.bookFolder, fs: fs).view
@@ -40,6 +42,7 @@ final class ReaderDocument: NSDocument {
                 session.zoom = session.package.state.zoom
                 session.page = max(session.package.state.page, 1)
             }
+            wire(session)
             coordinator.attach(session)
             var index = LibraryIndex.load(from: AppPaths.indexFile, fs: fs)
             SidecarStore.noteVaultBook(
@@ -51,7 +54,6 @@ final class ReaderDocument: NSDocument {
                 now: ISO8601DateFormatter().string(from: Date())
             )
             try? index.save(to: AppPaths.indexFile, fs: fs)
-            session.onPageChange = { [weak self] in self?.refreshSubtitle() }
             self.vault = coordinator
             self.session = session
             DispatchQueue.main.async { [weak self] in self?.refreshSubtitle() }
@@ -72,6 +74,12 @@ final class ReaderDocument: NSDocument {
             session.notice = notice
             Self.pendingVaultNotice = nil
         }
+        wire(session)
+        self.session = session
+        DispatchQueue.main.async { [weak self] in self?.refreshSubtitle() }
+    }
+
+    private func wire(_ session: ReaderSession) {
         session.onDirty = { [weak self] in
             // Set the page subtitle first, then mark edited. AppKit appends " — Edited"
             // itself; including it here shows the suffix twice.
@@ -81,8 +89,6 @@ final class ReaderDocument: NSDocument {
         session.onPageChange = { [weak self] in
             self?.refreshSubtitle()
         }
-        self.session = session
-        DispatchQueue.main.async { [weak self] in self?.refreshSubtitle() }
     }
 
     override func makeWindowControllers() {
@@ -94,23 +100,28 @@ final class ReaderDocument: NSDocument {
         refreshSubtitle()
     }
 
-    /// Autosave writes the sidecar only. The book file is never replaced.
+    /// Scrolls to a `reader://` link in this already open book.
     func reveal(_ link: ReaderLink) {
         session?.pendingReaderLink = link
-        session?.onAnnotationsChanged?()
+        for case let controller as ReaderWindowController in windowControllers {
+            controller.consumePendingJump()
+        }
     }
 
-    override func save(to url: URL, ofType typeName: String, for saveOperation: NSDocument.SaveOperationType, completionHandler: @escaping (Error?) -> Void) {
-        if session?.usesVault == true {
-            session?.onVaultFlush?()
-            if saveOperation != .saveToOperation {
-                updateChangeCount(.changeCleared)
-            }
-            completionHandler(nil)
-            return
+    /// Quitting does not always close windows first.
+    func flushForTermination() {
+        let controllers = windowControllers.compactMap { $0 as? ReaderWindowController }
+        if controllers.isEmpty {
+            session?.flushAllPendingEdits()
+        } else {
+            controllers.forEach { $0.flushPendingEdits() }
         }
+    }
+
+    /// Autosave writes the vault or the sidecar. The book file is never replaced.
+    override func save(to url: URL, ofType typeName: String, for saveOperation: NSDocument.SaveOperationType, completionHandler: @escaping (Error?) -> Void) {
         do {
-            try session?.persistSidecar()
+            try session?.saveNow()
             // This override replaces NSDocument's save, which is what normally
             // clears the edited flag. Without this, " — Edited" stays after ⌘S.
             if saveOperation != .saveToOperation {
@@ -123,7 +134,7 @@ final class ReaderDocument: NSDocument {
     }
 
     override func write(to url: URL, ofType typeName: String) throws {
-        try session?.persistSidecar()
+        try session?.saveNow()
     }
 
     override func data(ofType typeName: String) throws -> Data {

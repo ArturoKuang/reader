@@ -29,6 +29,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        for case let document as ReaderDocument in NSDocumentController.shared.documents {
+            document.flushForTermination()
+        }
+    }
+
     func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool { false }
 
     func application(_ application: NSApplication, open urls: [URL]) {

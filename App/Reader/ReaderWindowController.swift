@@ -75,6 +75,9 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         session.onPresentNote = { [weak self] id in
             self?.presentNote(id)
         }
+        session.onDismissNoteEditors = { [weak self] tokens in
+            self?.notePopover.dismiss(ifEditing: tokens)
+        }
         session.onRevealInObsidian = { [weak self] id in
             self?.revealObsidian(id: id)
         }
@@ -261,12 +264,19 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         tts.stop()
         dismissSelectionBar()
         storeWindowFrame()
-        pdfController?.capturePositionForSave()
-        session.saveViewNow()
+        flushPendingEdits()
         webController?.tearDown()
     }
 
+    /// Saves the open note, view state, and anything still scheduled, before returning.
+    func flushPendingEdits() {
+        pdfController?.capturePositionForSave()
+        notePopover.closeIfShown()
+        session.flushAllPendingEdits()
+    }
+
     func consumePendingJump() {
+        pdfController?.consumePendingJump()
         webController?.consumePendingJump()
     }
 
@@ -279,8 +289,6 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         }
         pdfController?.setContactSheet(contact)
         webController?.setContactSheet(contact)
-        sidebarHost.rootView = SidebarView(session: session)
-        panelHost.rootView = RightPanelView(session: session)
         ttsPlayer.bringToFront()
         updateTTSTheme()
     }
@@ -850,8 +858,10 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         guard let host else { return }
         let hostView = pdfController?.noteHostView ?? host
         let rect = pdfController?.noteRect(for: id) ?? NSRect(x: hostView.bounds.midX, y: hostView.bounds.midY, width: 1, height: 1)
-        session.beginNoteEdit(id: id)
-        notePopover.show(id: id, session: session, relativeTo: rect, of: hostView)
+        // Finish the previous note before claiming this one.
+        notePopover.closeIfShown()
+        guard let token = session.beginNoteEdit(id: id) else { return }
+        notePopover.show(id: id, token: token, session: session, relativeTo: rect, of: hostView)
     }
     @objc func slideshow(_ sender: Any?) {
         if slideshowTimer != nil { stopSlideshow(); return }
@@ -1109,6 +1119,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     }
 
     private func mergeSidecarIntoVault(_ location: VaultLocation) {
+        session.flushNoteBodies()
         let fs = LocalFileSystem()
         let directory = VaultPaths.notesDirectory(bookFolder: location.bookFolder, settings: VaultBookSettings.load(bookFolder: location.bookFolder, fs: fs))
         try? fs.createDirectory(directory)

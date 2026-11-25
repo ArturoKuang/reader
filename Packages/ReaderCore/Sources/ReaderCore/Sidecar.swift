@@ -321,6 +321,16 @@ public enum SidecarStore {
         if let directory { try package.write(to: directory, fs: fs) }
     }
 
+    /// Where a vault book keeps its notes while it is not saving to the vault. Creates nothing.
+    public static func fallbackLocation(bookPath: String, bookData: Data, applicationSupport: String, fs: FileSystem) -> (directory: String, placement: Placement) {
+        let parent = Paths.parent(bookPath)
+        let sibling = Paths.join(parent, Paths.stem(bookPath) + ".reader")
+        let support = Paths.join(Paths.join(applicationSupport, "Sidecars"), SHA256.hex(bookData) + ".reader")
+        if fs.isDirectory(sibling) && fs.isWritable(sibling) { return (sibling, .sibling) }
+        if !fs.isDirectory(support) && fs.isWritable(parent) { return (sibling, .sibling) }
+        return (support, .applicationSupport)
+    }
+
     private static func create(_ package: SidecarPackage, sibling: String, digest: String, applicationSupport: String, fs: FileSystem) throws -> (directory: String, placement: Placement, notice: String?) {
         let parent = Paths.parent(sibling)
         do {

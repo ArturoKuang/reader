@@ -10,9 +10,13 @@ final class VaultCoordinator {
     private let fs = LocalFileSystem()
     private var watcher: VaultFolderWatcher?
     private var flushTimer: Timer?
-    private var lastWritten: [String: String] = [:]
+    /// Each vault file as Reader last read or wrote it: the base of the next merge.
+    private var known: [String: String] = [:]
     private var loadedBlockIDs: Set<String> = []
-    private var applyingOwnWrite = false
+    private var needsFlush = false
+    private var needsRelocation = false
+    /// Non-nil while Reader's own write may still be echoing through the watcher.
+    private var ownWrite: UUID?
 
     init(location: VaultLocation, settings: VaultBookSettings) {
         self.location = location
@@ -54,6 +58,18 @@ final class VaultCoordinator {
         if session.tutorAvailable, session.askChoice.isEmpty { session.askChoice = "tutor" }
         session.claudeSessionID = settings.claudeSessionID
         reload(into: session, mergePending: false)
+        session.vaultFallbackState = { [weak self] in
+            PausedVaultState(authoritative: true, baseline: self?.known ?? [:], blockIDs: self?.loadedBlockIDs.sorted() ?? [])
+        }
+        session.onVaultFlushNow = { [weak self, weak session] force in
+            guard let self, let session, force || self.needsFlush else { return }
+            try self.flush(session)
+        }
+        session.onVaultRelocate = { [weak self, weak session] in
+            guard let self, let session else { return }
+            self.needsRelocation = true
+            self.flushReportingErrors(session)
+        }
         session.onVaultFlush = { [weak self, weak session] in
             guard let self, let session, self.settings.enabled else { return }
             self.scheduleFlush(session)
@@ -61,10 +77,13 @@ final class VaultCoordinator {
         session.onSaveVaultState = { [weak self, weak session] in
             guard let self, let session else { return }
             let wasWriting = self.settings.enabled
+            let isWriting = session.vaultEnabled
+            // Anything changed before pausing still belongs in the vault.
+            if wasWriting, !isWriting, self.needsFlush { self.flushReportingErrors(session) }
             self.settings.view = session.package.state
             self.settings.showConceptMarkers = session.showConceptMarkers
             self.settings.claudeSessionID = session.claudeSessionID
-            self.settings.enabled = session.vaultEnabled
+            self.settings.enabled = isWriting
             if Paths.isSafeRelative(session.vaultNotesFolder) {
                 self.settings.notesFolder = session.vaultNotesFolder
             }
@@ -73,10 +92,12 @@ final class VaultCoordinator {
             }
             self.holdOwnWrite()
             try? self.settings.save(bookFolder: self.location.bookFolder, fs: self.fs)
-            if self.settings.enabled {
-                if !wasWriting || self.watcher == nil { self.installWatcher(session) }
-            } else {
-                self.watcher = nil
+            if wasWriting, !isWriting {
+                self.pauseSaving(session)
+            } else if !wasWriting, isWriting {
+                self.resumeSaving(session)
+            } else if isWriting, self.watcher == nil {
+                self.installWatcher(session)
             }
         }
         session.onRelocateNotes = { [weak self, weak session] from, to, move in
@@ -85,7 +106,11 @@ final class VaultCoordinator {
             let newDir = Paths.join(self.location.bookFolder, to)
             if move, FileManager.default.fileExists(atPath: oldDir), !FileManager.default.fileExists(atPath: newDir) {
                 try? FileManager.default.createDirectory(atPath: Paths.parent(newDir), withIntermediateDirectories: true)
-                try? FileManager.default.moveItem(atPath: oldDir, toPath: newDir)
+                if (try? FileManager.default.moveItem(atPath: oldDir, toPath: newDir)) != nil {
+                    for (path, text) in self.known where Paths.parent(path) == oldDir {
+                        self.known[Paths.join(newDir, Paths.name(path))] = text
+                    }
+                }
             }
             session.vaultNotesFolder = to
             self.settings.notesFolder = to
@@ -96,13 +121,65 @@ final class VaultCoordinator {
         session.onInsertConcept = { [weak self] concept in
             self?.ensureConceptStub(concept)
         }
+        restoreFallback(into: session)
+        installWatcher(session)
+    }
+
+    /// Brings back notes that were saved beside the book while the vault was not being written.
+    private func restoreFallback(into session: ReaderSession) {
+        guard fs.isDirectory(session.directory),
+              let sidecar = try? SidecarPackage.read(from: session.directory, fs: fs) else { return }
+        guard let state = PausedVaultState.load(directory: session.directory, fs: fs) else {
+            // A package from before the book was in the vault. Keep its entries before writing over it.
+            if !settings.enabled { session.package.mergeAnnotations(from: sidecar) }
+            return
+        }
+        guard state.authoritative else { return }
+        session.package.notes.notes = sidecar.notes.notes
+        session.package.highlights.highlights = sidecar.highlights.highlights
+        session.package.words.words = sidecar.words.words
+        session.package.marks.marks = sidecar.marks.marks
+        known = state.baseline
+        loadedBlockIDs = Set(state.blockIDs)
+        if settings.enabled { resumeSaving(session) }
+    }
+
+    private func pauseSaving(_ session: ReaderSession) {
+        watcher = nil
+        flushTimer?.invalidate()
+        if PausedVaultState.load(directory: session.directory, fs: fs) == nil,
+           fs.isDirectory(session.directory),
+           let sidecar = try? SidecarPackage.read(from: session.directory, fs: fs) {
+            session.package.mergeAnnotations(from: sidecar)
+        }
+        session.markSidecarChanged()
+        do {
+            try session.persistSidecar()
+        } catch {
+            session.notice = error.localizedDescription
+        }
+    }
+
+    private func resumeSaving(_ session: ReaderSession) {
+        needsFlush = true
+        do {
+            try flush(session)
+            if fs.isDirectory(session.directory) {
+                try PausedVaultState(authoritative: false).save(directory: session.directory, fs: fs)
+            }
+            // Picks up blocks that only the vault has.
+            reload(into: session, mergePending: true)
+        } catch {
+            session.notice = error.localizedDescription
+        }
         installWatcher(session)
     }
 
     private func holdOwnWrite() {
-        applyingOwnWrite = true
+        let token = UUID()
+        ownWrite = token
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
-            self?.applyingOwnWrite = false
+            if self?.ownWrite == token { self?.ownWrite = nil }
         }
     }
 
@@ -112,92 +189,182 @@ final class VaultCoordinator {
         let notes = VaultPaths.notesDirectory(bookFolder: location.bookFolder, settings: settings)
         let vocabulary = VaultPaths.vocabularyFile(bookFolder: location.bookFolder, settings: settings, fs: fs)
         watcher = VaultFolderWatcher(bookFolder: location.bookFolder, notesDirectory: notes, vocabularyFile: vocabulary) { [weak self, weak session] in
-            guard let self, let session, !self.applyingOwnWrite, self.settings.enabled else { return }
+            guard let self, let session, self.settings.enabled else { return }
+            // Reader's own writes match what it already knows.
+            if self.ownWrite != nil, !self.notesChangedOnDisk() { return }
             self.reload(into: session, mergePending: true)
         }
     }
 
-    func reload(into session: ReaderSession, mergePending: Bool) {
-        let concepts = loadConcepts()
-        session.concepts = concepts
-        session.mastery = loadMastery()
-        let notesDir = VaultPaths.notesDirectory(bookFolder: location.bookFolder, settings: settings)
-        let keptRects = Dictionary(session.highlights.map { ($0.id, $0.rects) }, uniquingKeysWith: { first, _ in first })
-        var notes: [NoteEntry] = []
-        var highlights: [HighlightEntry] = []
-        var ids: Set<String> = []
+    private var notesDirectory: String {
+        VaultPaths.notesDirectory(bookFolder: location.bookFolder, settings: settings)
+    }
+
+    private func noteFileNames() -> Set<String> {
+        Set(((try? fs.list(notesDirectory)) ?? []).filter { $0.hasSuffix(".md") })
+    }
+
+    private func notesChangedOnDisk() -> Bool {
+        let directory = notesDirectory
+        let tracked = known.keys.filter { Paths.parent($0) == directory }.map { Paths.name($0) }
+        return noteFileNames().union(tracked).contains { name in
+            let path = Paths.join(directory, name)
+            return ((try? fs.readString(path)) ?? "") != (known[path] ?? "")
+        }
+    }
+
+    /// Reader's annotations by note file. A standalone note that is still empty has no block.
+    private func annotationsByFile(_ session: ReaderSession) -> [String: [Annotation]] {
         let title = session.bookURL.deletingPathExtension().lastPathComponent
-        if let files = try? fs.list(notesDir) {
-            for name in files where name.hasSuffix(".md") {
-                let path = Paths.join(notesDir, name)
-                guard var text = try? fs.readString(path) else { continue }
-                if mergePending, !VaultSync.isOwnWrite(newDisk: text, lastWritten: lastWritten[path]) {
-                    text = mergeExternal(text, path: path, fileName: name, title: title, session: session)
-                }
-                let chapter = ChapterFiles.number(in: name)
-                for block in VaultNoteFile.blocks(text) {
-                    ids.insert(block.id)
-                    let page = block.link.pageNumber
-                    let rects = keptRects[block.id] ?? []
-                    let storedCFI = PassageIdentity.cfi(block.link.location)
-                    let hasBody = !block.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    if let color = block.color {
-                        let sessionNoteID = session.highlights.first { $0.id == block.id }?.noteID
-                        let noteID = sessionNoteID ?? (hasBody ? block.id : nil)
-                        highlights.append(HighlightEntry(id: block.id, color: color, page: page, cfi: storedCFI, quote: block.quote, section: chapter.map { "Chapter \($0)" }, rects: rects, noteID: noteID))
-                        if hasBody {
-                            let noteIdentity = noteID ?? block.id
-                            notes.append(NoteEntry(id: noteIdentity, page: page, cfi: storedCFI, quote: block.quote, section: chapter.map { "Chapter \($0)" }, body: block.body))
-                            ids.insert(noteIdentity)
-                        } else if let noteID, let existing = session.notes.first(where: { $0.id == noteID }) {
-                            var kept = existing
-                            kept.cfi = PassageIdentity.cfi(kept.cfi)
-                            kept.page = kept.page ?? page
-                            notes.append(kept)
-                            ids.insert(noteID)
-                        }
-                    } else if hasBody {
-                        notes.append(NoteEntry(id: block.id, page: page, cfi: storedCFI, quote: block.quote, section: chapter.map { "Chapter \($0)" }, body: block.body))
+        var grouped: [String: [Annotation]] = [:]
+        for item in AnnotationIndex.items(highlights: session.highlights, notes: session.notes) {
+            if item.highlight == nil, AnnotationEdit.isBlankNote(item.body) { continue }
+            let chapter = ChapterFiles.number(in: item.section ?? "")
+            grouped[ChapterFiles.notesFile(chapter: chapter, bookTitle: title), default: []].append(item)
+        }
+        return grouped
+    }
+
+    /// Blocks Reader loaded or wrote that it no longer has.
+    private func removedIDs(in text: String, keeping items: [Annotation]) -> Set<String> {
+        Set(OwnedBlocks.parse(text).compactMap(\.id)).intersection(loadedBlockIDs).subtracting(items.map(\.id))
+    }
+
+    /// Reads the vault into the session. With `mergePending`, Reader's unsaved changes and the changes
+    /// on disk are merged block by block first.
+    func reload(into session: ReaderSession, mergePending: Bool) {
+        if mergePending { session.flushNoteBodies() }
+        session.concepts = loadConcepts()
+        session.mastery = loadMastery()
+        let directory = notesDirectory
+        let mine = mergePending ? annotationsByFile(session) : [:]
+        // A file that does not exist yet still needs the annotations that were never written.
+        let unwritten = mine.filter { _, items in items.contains { !loadedBlockIDs.contains($0.id) } }.keys
+        var files: [(name: String, text: String)] = []
+        var conflicted = false
+        for name in noteFileNames().union(unwritten).sorted() {
+            let path = Paths.join(directory, name)
+            let disk: String
+            if fs.exists(path) {
+                guard let read = try? fs.readString(path) else { continue }
+                disk = read
+            } else {
+                disk = ""
+            }
+            var text = disk
+            known[path] = known[path] ?? (mergePending ? "" : disk)
+            if mergePending {
+                let items = mine[name] ?? []
+                let base = known[path] ?? ""
+                let merged = VaultAnnotationSync.merge(baseline: base, disk: disk, bookPath: session.bookURL.path, annotations: items, removeIDs: removedIDs(in: base, keeping: items))
+                text = merged.text
+                conflicted = conflicted || !merged.conflicts.isEmpty
+                if text != disk {
+                    holdOwnWrite()
+                    do {
+                        try writeIfChanged(path, text)
+                    } catch {
+                        session.notice = error.localizedDescription
                     }
                 }
             }
+            known[path] = text
+            files.append((name, text))
         }
-        if mergePending {
-            for note in session.notes where !ids.contains(note.id) {
-                let alreadyShown = highlights.contains { PassageIdentity.same(quote: $0.quote, page: $0.page, cfi: $0.cfi, otherQuote: note.quote, otherPage: note.page, otherCFI: note.cfi) }
-                    || notes.contains { PassageIdentity.same(quote: $0.quote, page: $0.page, cfi: $0.cfi, otherQuote: note.quote, otherPage: note.page, otherCFI: note.cfi) }
-                if alreadyShown { continue }
-                notes.append(note)
+        if conflicted { session.showToast("Kept both versions of a note") }
+        apply(files, to: session)
+        if mergePending, needsFlush { try? writeWords(session) }
+        session.wordsFromVault(loadVocabulary(title: session.bookURL.deletingPathExtension().lastPathComponent))
+        session.revokeStaleNoteEdits()
+        session.objectWillChange.send()
+        session.onAnnotationsChanged?()
+    }
+
+    private func apply(_ files: [(name: String, text: String)], to session: ReaderSession) {
+        let oldHighlights = Dictionary(session.highlights.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let oldNotes = Dictionary(session.notes.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var notes: [NoteEntry] = []
+        var highlights: [HighlightEntry] = []
+        var ids: Set<String> = []
+        /// The vault stores less than memory does; keep what it does not record.
+        func note(id: String, page: Int?, cfi: String?, quote: String, section: String?, body: String) -> NoteEntry {
+            guard var kept = oldNotes[id] else {
+                return NoteEntry(id: id, page: page, cfi: cfi, quote: quote, section: section, body: body)
+            }
+            if kept.body != body { kept.updated = ISO8601DateFormatter().string(from: Date()) }
+            kept.page = page
+            kept.cfi = cfi
+            kept.quote = quote
+            kept.section = section
+            kept.body = body
+            return kept
+        }
+        for file in files {
+            let section = ChapterFiles.number(in: file.name).map { "Chapter \($0)" }
+            for block in VaultNoteFile.blocks(file.text) {
+                ids.insert(block.id)
+                let page = block.link.pageNumber
+                let cfi = PassageIdentity.cfi(block.link.location)
+                let hasBody = !block.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                if let color = block.color {
+                    let old = oldHighlights[block.id]
+                    let noteID = old?.noteID ?? (hasBody ? block.id : nil)
+                    var linked: String?
+                    if let noteID, hasBody {
+                        notes.append(note(id: noteID, page: page, cfi: cfi, quote: block.quote, section: section, body: block.body))
+                        ids.insert(noteID)
+                        linked = noteID
+                    } else if let noteID, let typing = oldNotes[noteID], AnnotationEdit.isBlankNote(typing.body) {
+                        notes.append(typing)
+                        linked = noteID
+                    }
+                    highlights.append(HighlightEntry(id: block.id, color: color, page: page, cfi: cfi, quote: block.quote, prefix: old?.prefix ?? "", suffix: old?.suffix ?? "", section: section, rects: old?.rects ?? [], noteID: linked))
+                } else if hasBody {
+                    notes.append(note(id: block.id, page: page, cfi: cfi, quote: block.quote, section: section, body: block.body))
+                }
             }
         }
         AnnotationEdit.dropDuplicateNotes(highlights: &highlights, notes: &notes)
         session.package.notes.notes = notes
         session.package.highlights.highlights = highlights
         loadedBlockIDs = ids
-        session.wordsFromVault(loadVocabulary(title: session.bookURL.deletingPathExtension().lastPathComponent))
-        session.objectWillChange.send()
-        session.onAnnotationsChanged?()
     }
 
     func scheduleFlush(_ session: ReaderSession) {
+        needsFlush = true
         flushTimer?.invalidate()
         let timer = Timer(timeInterval: 0.25, repeats: false) { [weak self, weak session] _ in
             guard let self, let session else { return }
-            self.flush(session)
+            self.flushReportingErrors(session)
         }
         RunLoop.main.add(timer, forMode: .common)
         flushTimer = timer
     }
 
-    func flush(_ session: ReaderSession) {
+    private func flushReportingErrors(_ session: ReaderSession) {
+        do {
+            try flush(session)
+        } catch {
+            session.notice = "Couldn't save to the vault. \(error.localizedDescription)"
+        }
+    }
+
+    func flush(_ session: ReaderSession) throws {
         guard settings.enabled else { return }
+        session.flushNoteBodies()
+        // An edit made outside Reader is merged in before anything is written over it.
+        if notesChangedOnDisk() { reload(into: session, mergePending: true) }
+        flushTimer?.invalidate()
+        flushTimer = nil
         holdOwnWrite()
-        writeNotes(session)
-        writeWords(session)
+        try writeNotes(session)
+        try writeWords(session)
         settings.view = session.package.state
         settings.claudeSessionID = session.claudeSessionID
         settings.showConceptMarkers = session.showConceptMarkers
-        try? settings.save(bookFolder: location.bookFolder, fs: fs)
+        try settings.save(bookFolder: location.bookFolder, fs: fs)
+        needsFlush = false
+        needsRelocation = false
     }
 
     func reveal(id: String, chapter: Int?) {
@@ -225,59 +392,24 @@ final class VaultCoordinator {
         try? settings.save(bookFolder: location.bookFolder, fs: fs)
     }
 
-    private func mergeExternal(_ disk: String, path: String, fileName: String, title: String, session: ReaderSession) -> String {
-        let baseline = lastWritten[path] ?? disk
-        var pending: [String: String] = [:]
-        var written: [String: String] = [:]
-        func consider(id: String, body: String) {
-            pending[id] = body
-            if let previous = OwnedBlocks.body(id: id, in: baseline) { written[id] = previous }
-        }
-        for note in session.notes where ChapterFiles.notesFile(chapter: ChapterFiles.number(in: note.section ?? ""), bookTitle: title) == fileName {
-            consider(id: note.id, body: block(id: note.id, quote: note.quote, body: note.body, color: nil, path: session.bookURL.path, location: anchor(cfi: note.cfi, page: note.page), chapter: ChapterFiles.number(in: note.section ?? "")).markdown())
-        }
-        for highlight in session.highlights where ChapterFiles.notesFile(chapter: ChapterFiles.number(in: highlight.section ?? ""), bookTitle: title) == fileName {
-            let note = highlight.noteID.flatMap { id in session.notes.first { $0.id == id }?.body } ?? ""
-            consider(id: highlight.id, body: block(id: highlight.id, quote: highlight.quote, body: note, color: highlight.color, path: session.bookURL.path, location: anchor(cfi: highlight.cfi, page: highlight.page), chapter: ChapterFiles.number(in: highlight.section ?? "")).markdown())
-        }
-        let applied = VaultSync.applyExternal(VaultSyncState(disk: baseline, pending: pending, written: written), disk: disk)
-        if !applied.conflicts.isEmpty {
-            session.showToast("Kept both versions of a note")
-            writeIfChanged(path, applied.state.disk)
-        }
-        return applied.state.disk
-    }
-
-    private func writeNotes(_ session: ReaderSession) {
-        let directory = VaultPaths.notesDirectory(bookFolder: location.bookFolder, settings: settings)
-        try? fs.createDirectory(directory)
-        let title = session.bookURL.deletingPathExtension().lastPathComponent
-        var grouped: [String: [Annotation]] = [:]
-        for item in AnnotationIndex.items(highlights: session.highlights, notes: session.notes) {
-            let chapter = ChapterFiles.number(in: item.section ?? "")
-            let name = ChapterFiles.notesFile(chapter: chapter, bookTitle: title)
-            grouped[name, default: []].append(item)
-        }
-        var names = Set(grouped.keys)
-        if let existing = try? fs.list(directory) {
-            for name in existing where name.hasSuffix(".md") { names.insert(name) }
-        }
-        for name in names {
+    private func writeNotes(_ session: ReaderSession) throws {
+        let directory = notesDirectory
+        try fs.createDirectory(directory)
+        let grouped = annotationsByFile(session)
+        for name in Set(grouped.keys).union(noteFileNames()) {
             let path = Paths.join(directory, name)
-            let text = (try? fs.readString(path)) ?? ""
+            let text = fs.exists(path) ? try fs.readString(path) : ""
             let items = grouped[name] ?? []
-            let keep = Set(items.map(\.id))
-            let present = Set(OwnedBlocks.parse(text).compactMap(\.id))
-            let remove = present.intersection(loadedBlockIDs).subtracting(keep)
+            let remove = removedIDs(in: text, keeping: items)
             if items.isEmpty, remove.isEmpty { continue }
-            let written = VaultAnnotationSync.render(existing: text, bookPath: session.bookURL.path, annotations: items, removeIDs: remove)
+            let written = VaultAnnotationSync.render(existing: text, bookPath: session.bookURL.path, annotations: items, removeIDs: remove, updatingLocations: needsRelocation)
+            try writeIfChanged(path, written)
             loadedBlockIDs.subtract(remove)
             for item in items { loadedBlockIDs.insert(item.id) }
-            writeIfChanged(path, written)
         }
     }
 
-    private func writeWords(_ session: ReaderSession) {
+    private func writeWords(_ session: ReaderSession) throws {
         let path = VaultPaths.vocabularyFile(bookFolder: location.bookFolder, settings: settings, fs: fs)
         var text = (try? fs.readString(path)) ?? ""
         let title = session.bookURL.deletingPathExtension().lastPathComponent
@@ -296,29 +428,16 @@ final class VaultCoordinator {
             )
             text = VocabularyFile.upsert(text, title: title, entry: entry)
         }
-        try? fs.createDirectory(Paths.parent(path))
-        writeIfChanged(path, text)
+        if text.isEmpty, !fs.exists(path) { return }
+        try fs.createDirectory(Paths.parent(path))
+        try writeIfChanged(path, text)
     }
 
-    private func writeIfChanged(_ path: String, _ text: String) {
+    private func writeIfChanged(_ path: String, _ text: String) throws {
         // An open Markdown file inside the vault is never a place for Reader's blocks.
         if let openBook, URL(fileURLWithPath: path).resolvingSymlinksInPath() == openBook.resolvingSymlinksInPath() { return }
-        if lastWritten[path] == text { return }
-        if (try? fs.readString(path)) == text { lastWritten[path] = text; return }
-        applyingOwnWrite = true
-        try? fs.writeString(path, text)
-        lastWritten[path] = text
-        applyingOwnWrite = false
-    }
-
-    private func anchor(cfi: String?, page: Int?) -> String? {
-        if let cfi, !cfi.isEmpty { return cfi }
-        if let page { return "page=\(page)" }
-        return nil
-    }
-
-    private func block(id: String, quote: String, body: String, color: Int?, path: String, location: String?, chapter: Int?) -> VaultNoteBlock {
-        VaultNoteBlock(id: id, quote: quote, body: body, color: color, link: ReaderLink(path: path, location: location, id: id), chapter: chapter)
+        if (try? fs.readString(path)) != text { try fs.writeString(path, text) }
+        known[path] = text
     }
 
     private func loadVocabulary(title: String) -> [VocabEntry] {
