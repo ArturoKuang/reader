@@ -61,6 +61,7 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
         let webView = ReaderWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = self
         webView.onReadAloudFromHere = { [weak self] point in self?.readAloudFromContextMenu(at: point) }
+        webView.session = session
         webView.translatesAutoresizingMaskIntoConstraints = false
         self.webView = webView
         view.addSubview(webView)
@@ -394,9 +395,13 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
             session.showToast("Copied")
             return
         }
-        if body["kind"] as? String == "note", let id = body["id"] as? String {
+        if let kind = body["kind"] as? String, kind == "note" || kind == "open-highlight", let id = body["id"] as? String {
             session.lastAnnotationHit = id
             session.openAnnotation(id)
+            return
+        }
+        if body["kind"] as? String == "context-highlight" {
+            webView?.contextHighlightID = body["id"] as? String
             return
         }
         if body["kind"] as? String == "spine" {
@@ -497,6 +502,24 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
         return NSRect(x: x, y: webView.bounds.height - y - height, width: width, height: height)
     }
 
+    var noteHostView: NSView { webView ?? view }
+
+    /// Where the highlight for `id` is, in the web view's own coordinates. Scrolls it into view when
+    /// it is off screen. Nil when the page does not show it.
+    func noteRect(for id: String, completion: @escaping (NSRect?) -> Void) {
+        guard let webView, spineLoaded else { return completion(nil) }
+        let key = session.annotation(matching: id)?.id ?? id
+        webView.callAsyncJavaScript(
+            "return window.readerHighlightRect ? window.readerHighlightRect(id) : null;",
+            arguments: ["id": key], in: nil, in: .page
+        ) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self, let webView = self.webView, case .success(let value) = result else { return completion(nil) }
+                completion(self.cssSelectionRect(value, in: webView))
+            }
+        }
+    }
+
     func integer(_ value: Any?) -> Int? {
         if let number = value as? Int { return number }
         if let number = value as? NSNumber { return number.intValue }
@@ -511,8 +534,16 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
         })
     }
 
+    /// Each highlight with the text around it, so a quote that repeats paints the right occurrence.
     private func highlightScript() -> String {
-        json(session.highlights.filter { !$0.quote.isEmpty }.map { ["quote": $0.quote, "color": $0.color] as [String: Any] })
+        let bodies = Dictionary(session.notes.map { ($0.id, $0.body) }, uniquingKeysWith: { first, _ in first })
+        return json(session.highlights.filter { !$0.quote.isEmpty }.map { highlight -> [String: Any] in
+            [
+                "id": highlight.id, "quote": highlight.quote, "color": highlight.color,
+                "prefix": highlight.prefix, "suffix": highlight.suffix, "hasNote": highlight.noteID != nil,
+                "body": highlight.noteID.flatMap { bodies[$0] } ?? "",
+            ]
+        })
     }
 
     /// A JSON array literal; JSONSerialization escapes newlines and `</script>` slashes.
@@ -674,7 +705,7 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
         }
         h2 { overflow-wrap: anywhere; }
         .reader-word { border-bottom: 1.5px dotted #666; }
-        .reader-glyph { float: right; clear: right; border: 0; background: transparent; font-size: 14px; cursor: pointer; width: 16px; }
+        \(WebAnnotationScript.css)
         .reader-concept { border-bottom: 1px solid #8e8e93; cursor: pointer; }
         .reader-badge { font: 10px -apple-system, sans-serif; margin-left: 3px; color: #8e8e93; cursor: pointer; }
         .reader-flash { background: #ffe08a; transition: background 1s; }
@@ -744,7 +775,7 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
             style.id = "reader-app-style";
             document.head.appendChild(style);
           }
-          const nextCSS = highlightCSS + " .reader-glyph { float: right; clear: right; border: 0; background: transparent; cursor: pointer; } .reader-concept { border-bottom: 1px solid #8e8e93; cursor: pointer; } .reader-badge { font: 10px -apple-system, sans-serif; margin-left: 3px; color: #8e8e93; cursor: pointer; } .reader-flash { background: #ffe08a; transition: background 1s; } pre { position: relative; } .reader-copy { position: absolute; right: 8px; bottom: 8px; font: 11px -apple-system, sans-serif; opacity: 0; cursor: pointer; } pre:hover .reader-copy, .reader-copy:focus { opacity: 1; }";
+          const nextCSS = highlightCSS + " " + \(javaScriptString(WebAnnotationScript.css)) + " .reader-concept { border-bottom: 1px solid #8e8e93; cursor: pointer; } .reader-badge { font: 10px -apple-system, sans-serif; margin-left: 3px; color: #8e8e93; cursor: pointer; } .reader-flash { background: #ffe08a; transition: background 1s; } pre { position: relative; } .reader-copy { position: absolute; right: 8px; bottom: 8px; font: 11px -apple-system, sans-serif; opacity: 0; cursor: pointer; } pre:hover .reader-copy, .reader-copy:focus { opacity: 1; }";
           // Reassigning identical CSS would re-parse the sheet and restyle the whole page.
           if (style.textContent !== nextCSS) style.textContent = nextCSS;
         };
@@ -839,10 +870,21 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
         };
         window.readerPaintConcepts(\(conceptScript()));
         window.readerTTSSetTheme(\(javaScriptString(session.package.state.epubTheme)));
+        document.addEventListener("contextmenu", event => {
+          const painted = event.target.closest && event.target.closest("span[data-annotation-id]");
+          if (window.webkit) window.webkit.messageHandlers.reader.postMessage({kind: "context-highlight", id: painted ? painted.dataset.annotationId : null});
+        }, true);
         document.addEventListener("click", event => {
           const glyph = event.target.closest && event.target.closest(".reader-glyph");
           if (glyph && glyph.dataset.id && window.webkit) {
             window.webkit.messageHandlers.reader.postMessage({kind: "note", id: glyph.dataset.id});
+            return;
+          }
+          // A click on a highlight opens its note; a drag that ends on one is a selection.
+          const painted = event.target.closest && event.target.closest("span[data-annotation-id]");
+          const selection = window.getSelection && window.getSelection();
+          if (painted && painted.dataset.annotationId && (!selection || selection.isCollapsed) && window.webkit) {
+            window.webkit.messageHandlers.reader.postMessage({kind: "open-highlight", id: painted.dataset.annotationId});
             return;
           }
           const el = event.target.closest && event.target.closest(".reader-concept, .reader-badge");

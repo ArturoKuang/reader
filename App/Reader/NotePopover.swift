@@ -8,7 +8,9 @@ final class NotePopoverController: NSObject, NSTextViewDelegate, NSPopoverDelega
     private let saved = NSTextField(labelWithString: "Saved")
     private let location = NSTextField(labelWithString: "")
     private let completion = NSStackView()
-    private var colorButtons: [NSButton] = []
+    private let colors = NSStackView()
+    private var swatches: [SwatchControl] = []
+    private var savedTimer: Timer?
     private weak var session: ReaderSession?
     private var annotationID: String?
     private var token: NoteEditToken?
@@ -20,12 +22,13 @@ final class NotePopoverController: NSObject, NSTextViewDelegate, NSPopoverDelega
         super.init()
         popover.behavior = .transient
         popover.delegate = self
-        popover.contentSize = NSSize(width: 320, height: 180)
+        popover.contentSize = NSSize(width: 320, height: 196)
         popover.contentViewController = NSViewController()
         popover.contentViewController?.view = build()
     }
 
     func show(id: String, token: NoteEditToken, session: ReaderSession, relativeTo rect: NSRect, of view: NSView) {
+        // Finish the note that is open before this one claims the popover.
         closeIfShown()
         self.session = session
         annotationID = id
@@ -33,19 +36,47 @@ final class NotePopoverController: NSObject, NSTextViewDelegate, NSPopoverDelega
         let item = session.annotation(matching: id)
         suppressChange = true
         textView.string = item?.body ?? ""
-        textView.placeholder = (item?.hasNote == true) ? "Write a note…" : "Add Note"
+        textView.placeholder = "Write a note…"
         location.stringValue = item?.page.map { "p. \($0)" } ?? item?.section ?? ""
-        let color = item?.color ?? session.package.state.lastHighlightColor
-        for button in colorButtons {
-            button.state = button.tag == color ? .on : .off
-        }
+        // A standalone note has no highlight, so there is no color to pick.
+        colors.isHidden = item?.highlight == nil
+        updateSwatches(selected: item?.color ?? session.package.state.lastHighlightColor)
         suppressChange = false
+        savedTimer?.invalidate()
         saved.isHidden = true
         hideCompletion()
-        popover.show(relativeTo: rect, of: view, preferredEdge: .maxY)
+        popover.appearance = view.window?.effectiveAppearance
+        popover.show(relativeTo: anchor(for: rect, in: view), of: view, preferredEdge: edge(for: rect, in: view))
         DispatchQueue.main.async { [weak self] in
             self?.textView.window?.makeFirstResponder(self?.textView)
         }
+    }
+
+    /// The part of the highlight that is on screen, so a partly scrolled-off passage still anchors.
+    private func anchor(for rect: NSRect, in view: NSView) -> NSRect {
+        let visible = view.visibleRect.insetBy(dx: 4, dy: 4)
+        guard rect.intersects(visible) else { return rect }
+        let clipped = rect.intersection(visible)
+        return clipped.width > 0 && clipped.height > 0 ? clipped : rect
+    }
+
+    /// Opens on the side with room, so the popover never covers the highlighted text.
+    private func edge(for rect: NSRect, in view: NSView) -> NSRectEdge {
+        let visible = view.visibleRect.insetBy(dx: 4, dy: 4)
+        let anchor = anchor(for: rect, in: view)
+        let needed = popover.contentSize.height + 18
+        if view.isFlipped {
+            let below = visible.maxY - anchor.maxY
+            let above = anchor.minY - visible.minY
+            return (below >= needed || below >= above) ? .maxY : .minY
+        }
+        let below = anchor.minY - visible.minY
+        let above = visible.maxY - anchor.maxY
+        return (below >= needed || below >= above) ? .minY : .maxY
+    }
+
+    private func updateSwatches(selected color: Int) {
+        for swatch in swatches { swatch.checked = swatch.tag == color }
     }
 
     func popoverDidClose(_ notification: Notification) {
@@ -69,6 +100,7 @@ final class NotePopoverController: NSObject, NSTextViewDelegate, NSPopoverDelega
     }
 
     private func finishEdit() {
+        savedTimer?.invalidate()
         guard let token else { return }
         self.token = nil
         annotationID = nil
@@ -83,36 +115,41 @@ final class NotePopoverController: NSObject, NSTextViewDelegate, NSPopoverDelega
     }
 
     private func build() -> NSView {
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
-        let colors = NSStackView()
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 196))
         colors.orientation = .horizontal
-        colors.spacing = 6
+        colors.spacing = 4
         colors.translatesAutoresizingMaskIntoConstraints = false
+        colors.setContentCompressionResistancePriority(.required, for: .horizontal)
+        colors.setContentHuggingPriority(.required, for: .horizontal)
         for index in 1...6 {
-            let button = NSButton()
-            button.setButtonType(.radio)
-            button.title = ""
-            button.bezelStyle = .circular
-            button.tag = index
-            button.target = self
-            button.action = #selector(recolor(_:))
+            let swatch = SwatchControl(side: 22, dot: 15)
+            swatch.translatesAutoresizingMaskIntoConstraints = false
+            swatch.tag = index
             if let rgb = HighlightPalette.rgb(index) {
-                button.contentTintColor = NSColor(calibratedRed: rgb.r, green: rgb.g, blue: rgb.b, alpha: 1)
+                swatch.fill = NSColor(srgbRed: rgb.r, green: rgb.g, blue: rgb.b, alpha: 1)
             }
             let name = HighlightCallout.name(for: index).capitalized
-            button.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: name)
-            button.toolTip = name
-            button.setAccessibilityLabel(name)
-            colorButtons.append(button)
-            colors.addArrangedSubview(button)
+            swatch.toolTip = name
+            swatch.setAccessibilityLabel(name)
+            swatch.target = self
+            swatch.action = #selector(recolor(_:))
+            swatches.append(swatch)
+            colors.addArrangedSubview(swatch)
         }
-        location.font = .systemFont(ofSize: 11)
+        location.font = .systemFont(ofSize: 11, weight: .regular)
         location.textColor = .secondaryLabelColor
+        location.lineBreakMode = .byTruncatingTail
+        location.maximumNumberOfLines = 1
+        location.alignment = .right
+        location.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        location.setContentHuggingPriority(.defaultLow, for: .horizontal)
         location.translatesAutoresizingMaskIntoConstraints = false
         textView.isRichText = false
         textView.font = .systemFont(ofSize: 13)
         textView.drawsBackground = false
-        textView.textContainerInset = NSSize(width: 2, height: 4)
+        textView.textColor = .labelColor
+        textView.insertionPointColor = .controlAccentColor
+        textView.textContainerInset = NSSize(width: 4, height: 6)
         textView.delegate = self
         textView.minSize = .zero
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -139,6 +176,8 @@ final class NotePopoverController: NSObject, NSTextViewDelegate, NSPopoverDelega
         more.image = NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: "Note actions")
         more.bezelStyle = .inline
         more.isBordered = false
+        more.contentTintColor = .secondaryLabelColor
+        more.toolTip = "Note Actions"
         more.target = self
         more.action = #selector(showMenu(_:))
         more.translatesAutoresizingMaskIntoConstraints = false
@@ -152,6 +191,7 @@ final class NotePopoverController: NSObject, NSTextViewDelegate, NSPopoverDelega
             colors.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
             colors.topAnchor.constraint(equalTo: root.topAnchor, constant: 10),
             location.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+            location.leadingAnchor.constraint(greaterThanOrEqualTo: colors.trailingAnchor, constant: 12),
             location.centerYAnchor.constraint(equalTo: colors.centerYAnchor),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
@@ -164,6 +204,8 @@ final class NotePopoverController: NSObject, NSTextViewDelegate, NSPopoverDelega
             saved.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -8),
             more.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
             more.centerYAnchor.constraint(equalTo: saved.centerYAnchor),
+            more.widthAnchor.constraint(equalToConstant: 22),
+            more.heightAnchor.constraint(equalToConstant: 22),
         ])
         return root
     }
@@ -171,9 +213,21 @@ final class NotePopoverController: NSObject, NSTextViewDelegate, NSPopoverDelega
     func textDidChange(_ notification: Notification) {
         guard !suppressChange, let token else { return }
         session?.queueNoteBody(token, body: textView.string)
-        saved.isHidden = false
+        markSaving()
         updateCompletion()
         textView.needsDisplay = true
+    }
+
+    /// "Saving…" while typing is pending, then "Saved" once the session has flushed it.
+    private func markSaving() {
+        saved.stringValue = "Saving…"
+        saved.isHidden = false
+        savedTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.35, repeats: false) { [weak self] _ in
+            self?.saved.stringValue = "Saved"
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        savedTimer = timer
     }
 
     func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
@@ -208,9 +262,11 @@ final class NotePopoverController: NSObject, NSTextViewDelegate, NSPopoverDelega
         return false
     }
 
-    @objc private func recolor(_ sender: NSButton) {
-        guard let id = annotationID else { return }
-        session?.recolorAnnotation(id: id, color: sender.tag)
+    @objc private func recolor(_ sender: SwatchControl) {
+        guard let id = annotationID, let session, session.annotation(matching: id)?.highlight != nil else { return }
+        // Recoloring changes only the highlight, so the open note keeps its typing.
+        session.recolorAnnotation(id: id, color: sender.tag)
+        updateSwatches(selected: sender.tag)
     }
 
     @objc private func showMenu(_ sender: NSButton) {
@@ -219,8 +275,18 @@ final class NotePopoverController: NSObject, NSTextViewDelegate, NSPopoverDelega
         if session?.usesVault == true {
             menu.addItem(item("Reveal in Obsidian", #selector(reveal)))
         }
-        menu.addItem(item("Remove Note", #selector(removeNote)))
-        menu.addItem(item("Remove Highlight & Note", #selector(removeBoth)))
+        let annotation = session.flatMap { annotationID.flatMap($0.annotation(matching:)) }
+        if annotation?.highlight == nil {
+            // A standalone note: removing it is the only removal.
+            if annotation?.hasNote == true { menu.addItem(item("Remove Note", #selector(removeBoth))) }
+        } else {
+            if annotation?.hasNote == true {
+                menu.addItem(item("Remove Note", #selector(removeNote)))
+                menu.addItem(item("Remove Highlight & Note", #selector(removeBoth)))
+            } else {
+                menu.addItem(item("Remove Highlight", #selector(removeBoth)))
+            }
+        }
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height), in: sender)
     }
 
@@ -302,6 +368,8 @@ private final class PlaceholderTextView: NSTextView {
             .foregroundColor: NSColor.placeholderTextColor,
             .font: font ?? NSFont.systemFont(ofSize: 13),
         ]
-        placeholder.draw(at: NSPoint(x: textContainerInset.width + 4, y: bounds.height - 20), withAttributes: attributes)
+        // The view is flipped, so the text container origin is the top-left caret position.
+        let padding = textContainer?.lineFragmentPadding ?? 5
+        placeholder.draw(at: NSPoint(x: textContainerOrigin.x + padding, y: textContainerOrigin.y), withAttributes: attributes)
     }
 }

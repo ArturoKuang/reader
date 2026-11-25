@@ -854,15 +854,31 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     func dismissSelectionBar() { selectionBar.dismiss() }
 
     func presentNote(_ id: String) {
-        let host = (pdfController?.view ?? webController?.view) ?? window?.contentView
-        guard let host else { return }
-        let hostView = pdfController?.noteHostView ?? host
-        let rect = pdfController?.noteRect(for: id) ?? NSRect(x: hostView.bounds.midX, y: hostView.bounds.midY, width: 1, height: 1)
         // Finish the previous note before claiming this one.
         notePopover.closeIfShown()
-        guard let token = session.beginNoteEdit(id: id) else { return }
-        notePopover.show(id: id, token: token, session: session, relativeTo: rect, of: hostView)
+        if let pdf = pdfController {
+            let host = pdf.noteHostView
+            showNote(id, relativeTo: pdf.noteRect(for: id), of: host)
+        } else if let web = webController {
+            // The page owns where a highlight is, so it is asked, then the popover opens beside it.
+            let host = web.noteHostView
+            web.noteRect(for: id) { [weak self] rect in
+                self?.showNote(id, relativeTo: rect, of: host)
+            }
+        } else if let host = window?.contentView {
+            showNote(id, relativeTo: nil, of: host)
+        }
     }
+
+    /// Opens the note editor at `rect`. Without one, the passage is not on this page, so the popover
+    /// opens at the middle of the view.
+    private func showNote(_ id: String, relativeTo rect: NSRect?, of host: NSView) {
+        let anchor = rect ?? NSRect(x: host.bounds.midX, y: host.bounds.midY, width: 1, height: 1)
+        notePopover.closeIfShown()
+        guard let token = session.beginNoteEdit(id: id) else { return }
+        notePopover.show(id: id, token: token, session: session, relativeTo: anchor, of: host)
+    }
+
     @objc func slideshow(_ sender: Any?) {
         if slideshowTimer != nil { stopSlideshow(); return }
         window?.toggleFullScreen(nil)

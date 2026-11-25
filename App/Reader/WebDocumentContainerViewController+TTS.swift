@@ -6,8 +6,20 @@ import WebKit
 final class ReaderWebView: WKWebView {
     /// Gets the click point in CSS pixels.
     var onReadAloudFromHere: ((CGPoint) -> Void)?
+    weak var session: ReaderSession? {
+        didSet { highlightMenu.session = session }
+    }
+    /// The highlight under the last right-click, reported by the page's `contextmenu` event.
+    var contextHighlightID: String?
+    private let highlightMenu = HighlightContextMenuBuilder()
     private var contextPoint = CGPoint.zero
     static let readAloudTitle = "Read Aloud from Here"
+
+    override func rightMouseDown(with event: NSEvent) {
+        // The page reports the target again; an old answer must not outlive its click.
+        contextHighlightID = nil
+        super.rightMouseDown(with: event)
+    }
 
     override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
         super.willOpenMenu(menu, with: event)
@@ -17,6 +29,18 @@ final class ReaderWebView: WKWebView {
         let item = NSMenuItem(title: Self.readAloudTitle, action: #selector(readAloudFromHere(_:)), keyEquivalent: "r")
         item.keyEquivalentModifierMask = [.command, .option]
         item.target = self
+        if let id = contextHighlightID, session?.annotation(matching: id) != nil {
+            // The same menu as a PDF highlight, with reading aloud below it.
+            menu.removeAllItems()
+            let source = highlightMenu.menu(for: id)
+            for entry in source.items {
+                source.removeItem(entry)
+                menu.addItem(entry)
+            }
+            menu.addItem(.separator())
+            menu.addItem(item)
+            return
+        }
         // Below Copy and Look Up when WebKit offers them, otherwise first.
         let anchor = menu.items.lastIndex { item in
             let identifier = item.identifier?.rawValue ?? ""

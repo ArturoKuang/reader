@@ -7,7 +7,7 @@ enum WebAnnotationScript {
     static let source = #"""
     (function () {
       // Text Reader injects into the article; never part of a quote.
-      const SKIP = "script, style, noscript, template, .reader-glyph, .reader-badge, .reader-copy";
+      const SKIP = "script, style, noscript, template, .reader-glyph, .reader-note-pill, .reader-badge, .reader-copy, [data-tts-exclude=\"true\"]";
       const BLOCKS = new Set(["address", "article", "aside", "blockquote", "body", "caption", "dd", "details", "div", "dl", "dt", "figcaption", "figure", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "li", "main", "nav", "ol", "p", "pre", "section", "summary", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul"]);
       // A span around the formatting whitespace inside these would be a stray child.
       const CONTAINERS = "article, blockquote, body, details, div, dl, ol, section, table, tbody, tfoot, thead, tr, ul";
@@ -54,8 +54,9 @@ enum WebAnnotationScript {
         return { node: run.node, offset: run.offset + position - run.at };
       }
 
-      // The text node slices of each occurrence of `quote`, in document order.
-      function* occurrences(index, quote) {
+      // Each occurrence of `quote` in document order: where it starts in the page text, and the
+      // text node slices it covers.
+      function* occurrenceRuns(index, quote) {
         const needle = normalize(quote);
         if (!needle) return;
         for (let at = index.text.indexOf(needle); at >= 0; at = index.text.indexOf(needle, at + 1)) {
@@ -66,8 +67,41 @@ enum WebAnnotationScript {
             const to = node === last.node ? last.offset + 1 : index.nodes[node].nodeValue.length;
             if (to > from) slices.push({ node, from, to });
           }
-          yield slices;
+          yield { at, end: at + needle.length, slices };
         }
+      }
+
+      function* occurrences(index, quote) {
+        for (const run of occurrenceRuns(index, quote)) yield run.slices;
+      }
+
+      function commonSuffix(a, b) {
+        let n = 0;
+        while (n < a.length && n < b.length && a[a.length - 1 - n] === b[b.length - 1 - n]) n++;
+        return n;
+      }
+
+      function commonPrefix(a, b) {
+        let n = 0;
+        while (n < a.length && n < b.length && a[n] === b[n]) n++;
+        return n;
+      }
+
+      // Repeated quotes are told apart by the text around them: the more of the stored prefix and
+      // suffix an occurrence shares, the likelier it is the one that was selected. Equal scores
+      // (including no context at all) keep document order.
+      function rankedOccurrences(index, mark) {
+        const prefix = normalize(mark.prefix), suffix = normalize(mark.suffix);
+        const runs = [...occurrenceRuns(index, mark.quote)];
+        if (runs.length < 2 || (!prefix && !suffix)) return runs;
+        const score = run => {
+          const before = index.text.slice(Math.max(0, run.at - prefix.length - 1), run.at).trimEnd();
+          const after = index.text.slice(run.end, run.end + suffix.length + 1).trimStart();
+          return commonSuffix(before, prefix) + commonPrefix(after, suffix);
+        };
+        return runs.map((run, order) => ({ run, order, score: score(run) }))
+          .sort((a, b) => b.score - a.score || a.order - b.order)
+          .map(entry => entry.run);
       }
 
       function wrappable(node, from, to) {
@@ -84,6 +118,7 @@ enum WebAnnotationScript {
           const target = piece.from > 0 ? node.splitText(piece.from) : node;
           const span = document.createElement("span");
           span.className = piece.className;
+          if (piece.id) span.dataset.annotationId = piece.id;
           target.parentNode.insertBefore(span, target);
           span.appendChild(target);
           spans.unshift(span);
@@ -105,7 +140,7 @@ enum WebAnnotationScript {
         const claimed = new Map(); // node position -> pieces already taken
         (marks || []).forEach(mark => {
           // The first occurrence that still has unpainted text gets this mark.
-          for (const slices of occurrences(index, mark.quote)) {
+          for (const { slices } of rankedOccurrences(index, mark)) {
             const fresh = [];
             slices.forEach(slice => {
               let free = [[slice.from, slice.to]];
@@ -113,7 +148,7 @@ enum WebAnnotationScript {
                 free = free.flatMap(([from, to]) => [[from, Math.min(to, taken.from)], [Math.max(from, taken.to), to]].filter(([a, b]) => b > a));
               });
               free.forEach(([from, to]) => {
-                if (wrappable(index.nodes[slice.node], from, to)) fresh.push({ node: slice.node, from, to, className: "reader-hl-" + (mark.color || 1) });
+                if (wrappable(index.nodes[slice.node], from, to)) fresh.push({ node: slice.node, from, to, id: mark.id, className: "reader-hl-" + (mark.color || 1) });
               });
             });
             if (!fresh.some(piece => index.nodes[piece.node].nodeValue.slice(piece.from, piece.to).trim())) continue;
@@ -128,22 +163,63 @@ enum WebAnnotationScript {
         if (window.readerTTSInvalidate) window.readerTTSInvalidate();
       };
 
+      const NOTE_ICON = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 1.5h8a1 1 0 0 1 1 1v5.5a1 1 0 0 1-1 1H5.6L3 10.8V9H2a1 1 0 0 1-1-1V2.5a1 1 0 0 1 1-1z"/></svg>';
+
+      // A compact pill right after the last painted span of the note's highlight, so it reads as
+      // part of the passage. A note without a painted highlight falls back to its first occurrence.
       window.readerMarginNotes = function (notes) {
         document.querySelectorAll(".reader-glyph").forEach(node => node.remove());
         const index = pageIndex();
         (notes || []).forEach(note => {
-          const found = occurrences(index, note.quote).next().value;
-          if (!found) return;
-          const section = index.nodes[found[0].node].parentElement.closest("section") || document.body;
+          const spans = document.querySelectorAll("span[data-annotation-id=\"" + CSS.escape(note.id) + "\"]");
+          let anchor = spans[spans.length - 1];
+          if (!anchor) {
+            const found = occurrences(index, note.quote).next().value;
+            if (!found) return;
+            anchor = index.nodes[found[found.length - 1].node];
+          }
           const mark = document.createElement("button");
+          mark.type = "button";
           mark.className = "reader-glyph";
           mark.dataset.id = note.id;
-          mark.textContent = "●";
-          mark.style.color = note.color || "#888";
+          mark.dataset.ttsExclude = "true";
+          mark.setAttribute("aria-label", "Open note");
+          mark.style.setProperty("--hl-color", note.color || "#888");
+          mark.innerHTML = NOTE_ICON;
           mark.title = (note.body || "").split("\n")[0];
-          section.appendChild(mark);
+          anchor.after(mark);
         });
         if (window.readerTTSInvalidate) window.readerTTSInvalidate();
+      };
+
+      // The on-screen box of a highlight in viewport CSS pixels, or of its note pill when the
+      // highlight is not painted. A highlight that is scrolled out of view is brought to the middle.
+      window.readerHighlightRect = function (id) {
+        const key = CSS.escape(id);
+        const parts = () => {
+          let nodes = [...document.querySelectorAll("span[data-annotation-id=\"" + key + "\"]")];
+          if (!nodes.length) nodes = [...document.querySelectorAll(".reader-glyph[data-id=\"" + key + "\"]")];
+          return nodes;
+        };
+        let nodes = parts();
+        if (!nodes.length) return null;
+        const onScreen = rect => rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < window.innerHeight && rect.right > 0 && rect.left < window.innerWidth;
+        const lines = () => nodes.flatMap(node => [...node.getClientRects()]).filter(onScreen);
+        let visible = lines();
+        if (!visible.length) {
+          nodes[0].scrollIntoView({ block: "center", behavior: "instant" });
+          nodes = parts();
+          visible = lines();
+          if (!visible.length) return null;
+        }
+        const left = Math.min(...visible.map(r => r.left)), top = Math.min(...visible.map(r => r.top));
+        const right = Math.max(...visible.map(r => r.right)), bottom = Math.max(...visible.map(r => r.bottom));
+        // A passage that fills the page is anchored by its first visible line.
+        if (bottom - top > window.innerHeight * 0.5) {
+          const first = visible[0];
+          return { x: first.left, y: first.top, width: first.width, height: first.height };
+        }
+        return { x: left, y: top, width: right - left, height: bottom - top };
       };
 
       window.readerFlash = function (quote) {
@@ -215,13 +291,13 @@ enum WebAnnotationScript {
         const sel = document.getSelection();
         if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
         const text = sel.toString();
-        const node = sel.anchorNode ? sel.anchorNode.textContent || "" : "";
-        const start = Math.max(0, node.indexOf(text));
-        const host = sel.anchorNode && (sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement);
+        const range = sel.getRangeAt(0);
+        // The offset is the range's own, so two equal words in one text node get different locations.
+        const start = range.startContainer.nodeType === 3 ? range.startOffset : 0;
+        const host = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
         const selector = "section[id^='spine-'], section[data-tts-section]";
         const section = host && host.closest ? host.closest(selector) : null;
         const index = section ? Number(section.dataset.index || section.dataset.ttsSection || 0) : 0;
-        const range = sel.getRangeAt(0);
         const box = range.getBoundingClientRect();
         let offset = start;
         if (section && section.dataset.anchor) {
@@ -244,5 +320,23 @@ enum WebAnnotationScript {
         return { text, index, rect: { x: box.left, y: box.top, width: box.width, height: box.height }, prefix, suffix, sentence, cfi: section && section.dataset.anchor ? "mdloc(s=" + index + ",a=" + section.dataset.anchor + ",o=" + offset + ",e=" + (offset + text.length) + ")" : "epubcfi(/6/" + ((index + 1) * 2) + "!/4,/1:" + start + ",/1:" + (start + text.length) + ")" };
       };
     })();
+    """#
+
+    /// Highlight hover and the inline note pill. Shared by the EPUB page and the Markdown page.
+    static let css = #"""
+    span[class^="reader-hl-"] { cursor: pointer; border-radius: 2px; transition: filter 0.12s ease; }
+    span[class^="reader-hl-"]:hover { filter: brightness(0.94); }
+    @media (prefers-color-scheme: dark) { span[class^="reader-hl-"]:hover { filter: brightness(1.12); } }
+    .reader-glyph {
+      display: inline-flex; align-items: center; justify-content: center; float: none;
+      width: 15px; height: 15px; margin: 0 0 0 3px; padding: 0; box-sizing: border-box;
+      vertical-align: super; line-height: 1; border-radius: 999px; cursor: pointer;
+      border: 1px solid color-mix(in srgb, var(--hl-color, #888) 70%, transparent);
+      background: color-mix(in srgb, var(--hl-color, #888) 26%, transparent);
+      color: var(--hl-color, #888);
+      transition: transform 0.12s ease, background 0.12s ease;
+    }
+    .reader-glyph:hover { transform: scale(1.16); background: color-mix(in srgb, var(--hl-color, #888) 40%, transparent); }
+    .reader-glyph svg { width: 9px; height: 9px; fill: currentColor; }
     """#
 }

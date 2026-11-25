@@ -39,7 +39,7 @@ enum WebTTSScript {
     (function () {
       if (window.readerTTSExtractSections) return;
 
-      const EXCLUDE = '[data-tts-exclude="true"], .reader-glyph, .reader-badge, .reader-copy-btn, .reader-copy, script, style, noscript, template, title';
+      const EXCLUDE = '[data-tts-exclude="true"], .reader-glyph, .reader-note-pill, .reader-badge, .reader-copy-btn, .reader-copy, script, style, noscript, template, title';
       const BLOCKS = new Set(["address", "article", "aside", "blockquote", "dd", "details", "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "li", "main", "nav", "ol", "p", "pre", "section", "summary", "table", "td", "th", "tr", "ul"]);
       const SECTIONS = "section[data-tts-section], section[id^='spine-']";
       const hasHighlights = !!(window.CSS && CSS.highlights && typeof Highlight !== "undefined");

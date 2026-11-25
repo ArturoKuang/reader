@@ -332,15 +332,19 @@ private final class DividerLine: NSView {
     }
 }
 
-private final class SwatchControl: NSControl {
-    var fill: NSColor = .systemYellow
-    var checked = false
-    var removeStyle = false
+/// A round palette swatch. Shared by the selection bar and the note popover so a color
+/// always draws in its palette hue, with a checkmark and ring when it is the active one.
+final class SwatchControl: NSControl {
+    var fill: NSColor = .systemYellow { didSet { needsDisplay = true } }
+    var checked = false { didSet { needsDisplay = true } }
+    var removeStyle = false { didSet { needsDisplay = true } }
     private var hovered = false
     private let dot: CGFloat
+    private let side: CGFloat
 
     init(side: CGFloat, dot: CGFloat) {
         self.dot = dot
+        self.side = side
         super.init(frame: NSRect(x: 0, y: 0, width: side, height: side))
     }
 
@@ -348,9 +352,11 @@ private final class SwatchControl: NSControl {
     required init?(coder: NSCoder) { nil }
 
     override var fittingSize: NSSize { frame.size }
+    override var intrinsicContentSize: NSSize { NSSize(width: side, height: side) }
     override func isAccessibilityElement() -> Bool { true }
     override func accessibilityRole() -> NSAccessibility.Role? { .button }
     override func accessibilityLabel() -> String? { toolTip }
+    override func accessibilityValue() -> Any? { checked ? 1 : 0 }
     override var acceptsFirstResponder: Bool { true }
     override var canBecomeKeyView: Bool { true }
     override var focusRingMaskBounds: NSRect { bounds }
