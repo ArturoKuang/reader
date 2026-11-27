@@ -15,12 +15,13 @@ export interface ViewerHighlight {
 }
 
 export type HostToViewer =
-  | { type: "open-pdf"; base64: string; workerSource: string }
-  | { type: "open-epub"; base64: string }
+  | { type: "open-pdf"; base64: string; workerSource: string; page?: number }
+  | { type: "open-epub"; base64: string; cfi?: string }
   | { type: "restore"; highlights: ViewerHighlight[] }
   | { type: "paint"; highlight: ViewerHighlight }
   | { type: "remove"; id: string }
-  | { type: "locate"; id: string; quote: string; prefix: string; suffix: string };
+  | { type: "locate"; id: string; quote: string; prefix: string; suffix: string }
+  | { type: "goto"; page?: number; cfi?: string };
 
 export type ViewerToHost =
   | { type: "ready"; format: "pdf" | "epub" }
@@ -48,10 +49,19 @@ export type ViewerToHost =
       reason?: "restore" | "request";
     }
   | { type: "open-highlight"; id: string }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | {
+      type: "location";
+      format: "pdf" | "epub";
+      page?: number;
+      pageCount?: number;
+      cfi?: string;
+      section?: string;
+      progression?: number;
+    };
 
-const hostTypes = new Set(["open-pdf", "open-epub", "restore", "paint", "remove", "locate"]);
-const viewerTypes = new Set(["ready", "selection", "corpus", "located", "open-highlight", "error"]);
+const hostTypes = new Set(["open-pdf", "open-epub", "restore", "paint", "remove", "locate", "goto"]);
+const viewerTypes = new Set(["ready", "selection", "corpus", "located", "open-highlight", "error", "location"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;

@@ -579,3 +579,41 @@ describe("blobs", () => {
     await expect(downloadBookBlob(transport, book)).rejects.toMatchObject({ code: "hash_mismatch" });
   });
 });
+
+describe("unpair and library download", () => {
+  it("clears credentials and reports unpaired, then can pair again", async () => {
+    const env = harness();
+    await pair(env);
+    await track(env);
+    expect(env.engine.isPaired()).toBe(true);
+    await env.engine.unpair();
+    expect(env.engine.isPaired()).toBe(false);
+    expect(env.engine.listedBooks()).toEqual([]);
+    expect(await env.credentials.get("readersync.credential")).toBeNull();
+    const storage = await env.storage.load();
+    expect(storage?.baseUrl).toBeNull();
+    expect(storage?.books).toEqual([]);
+    env.server.issueToken("tok2");
+    await env.engine.pair(qr(BASE, "tok2", env.server.serverId));
+    expect(env.engine.isPaired()).toBe(true);
+  });
+
+  it("downloads a book file by SHA-256 after listing it", async () => {
+    const env = harness();
+    const bytes = new TextEncoder().encode("abc");
+    env.server.putBlob(SHA, bytes);
+    await pair(env);
+    await env.transport.registerBook({
+      sha256: SHA,
+      size: bytes.length,
+      format: "pdf",
+      title: "Book A",
+      filename: "a.pdf",
+      docId: "doc-a",
+    });
+    await env.engine.refreshLibrary();
+    const downloaded = await env.engine.downloadBookBytes(BOOK);
+    expect(downloaded.sha256).toBe(SHA);
+    expect(new TextDecoder().decode(downloaded.bytes)).toBe("abc");
+  });
+});

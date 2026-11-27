@@ -31,5 +31,6 @@ export type { SyncController } from "./SyncProvider";
 export { SyncChrome } from "./SyncStatusChip";
 export { presentStatus, unpairedStatus, sha256OfFingerprint, bookIdOf } from "./controller";
 export { mergeSyncRecords } from "./mergeShelf";
-export { highlightFromPayload, noteFromPayload } from "./payload";
+export { highlightFromPayload, noteFromPayload, wordFromPayload } from "./payload";
+export type { BookListItem } from "./wire";
 

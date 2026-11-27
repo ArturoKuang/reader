@@ -3,6 +3,7 @@ import { clone } from "./canonical";
 import type { Clock, TimerHandle } from "./clock";
 import { CREDENTIAL_KEY, type CredentialStore } from "./credentials";
 import { bookIdForSha, positionId } from "./ids";
+import { chooseBlobFile, downloadBookBlob } from "./blobs";
 import { parsePairingUrl } from "./pairing";
 import { highlightToPayload, lookupToPayload, noteToPayload, positionToPayload, wordToPayload } from "./payload";
 import {
@@ -30,6 +31,7 @@ import type {
   Envelope,
   JsonObject,
   Locator,
+  BookListItem,
   OpenConflict,
   PullResponse,
   PushResponse,
@@ -132,6 +134,7 @@ export class SyncEngine {
   private flushing: Promise<void> | null = null;
   private positionWait: { bookId: string; locator: Locator } | null = null;
   private readonly opened = new Map<string, ResumeOffer>();
+  private listed: BookListItem[] = [];
   private readonly listeners = new Set<(status: SyncStatus) => void>();
   private pullTimer: TimerHandle | null = null;
   private backoffTimer: TimerHandle | null = null;
@@ -411,6 +414,80 @@ export class SyncEngine {
     return offer;
   }
 
+
+  listedBooks(): BookListItem[] {
+    if (this.listed.length > 0) return clone(this.listed);
+    return this.state.books.map((book) => localBookToListItem(book));
+  }
+
+  latestPosition(bookId: string): StoredPosition | null {
+    const positions = this.state.positions.filter((position) => position.bookId === bookId && !position.deleted);
+    if (positions.length === 0) return null;
+    return positions.reduce((left, right) => (left.seq >= right.seq ? left : right));
+  }
+
+  async refreshLibrary(): Promise<BookListItem[]> {
+    if (!this.isPaired()) return this.listedBooks();
+    const response = await this.deps.transport.books();
+    this.listed = response.books;
+    for (const item of response.books) this.upsertListedBook(item);
+    await this.persist();
+    this.emit();
+    return this.listedBooks();
+  }
+
+  async downloadBookBytes(bookId: string): Promise<{ sha256: string; bytes: Uint8Array; format: string; size: number }> {
+    if (this.listed.length === 0 && this.isPaired()) {
+      try {
+        await this.refreshLibrary();
+      } catch {
+        // Fall through and try the cached list / local book.
+      }
+    }
+    const listed = this.listed.find((item) => item.bookId === bookId);
+    const local = this.state.books.find((item) => item.bookId === bookId);
+    const book = listed ?? (local ? localBookToListItem(local) : null);
+    if (!book) throw new SyncApiError(404, "not_found", `no book ${bookId}`);
+    const bytes = await downloadBookBlob(this.deps.transport, book);
+    const chosen = chooseBlobFile(book);
+    return {
+      sha256: chosen?.sha256 ?? book.sha256,
+      bytes,
+      format: book.format,
+      size: bytes.byteLength,
+    };
+  }
+
+  /**
+   * Drop credentials and remote sync state. Local highlight shelves in
+   * AsyncStorage are left alone. The engine stays started so a new pair works.
+   */
+  async unpair(): Promise<void> {
+    this.pullTimer?.cancel();
+    this.backoffTimer?.cancel();
+    this.flushTimer?.cancel();
+    this.positionTimer?.cancel();
+    this.errorTimer?.cancel();
+    this.pullTimer = null;
+    this.backoffTimer = null;
+    this.flushTimer = null;
+    this.positionTimer = null;
+    this.errorTimer = null;
+    this.positionWait = null;
+    this.flushing = null;
+    this.listed = [];
+    this.opened.clear();
+    this.pausedBytes.clear();
+    this.attempts = 0;
+    this.flight = 0;
+    this.deps.session.baseUrl = null;
+    this.deps.session.credential = null;
+    await this.deps.credentials.delete(CREDENTIAL_KEY);
+    this.state = emptyPersisted();
+    await this.persist();
+    this.emit();
+  }
+
   exportState(): PersistedSync {
     return clone(this.state);
   }
@@ -449,6 +526,7 @@ export class SyncEngine {
         if (!page.hasMore) break;
       }
       this.clearFailure();
+      await this.refreshLibraryQuiet();
     } catch (error) {
       this.noteFailure(error);
     } finally {
@@ -850,6 +928,40 @@ export class SyncEngine {
     if (this.state.pausedBookIds.length === 0) this.state.storageFull = false;
   }
 
+
+  private async refreshLibraryQuiet(): Promise<void> {
+    try {
+      await this.refreshLibrary();
+    } catch {
+      // A book-list failure must not fail an otherwise successful pull.
+    }
+  }
+
+  private upsertListedBook(item: BookListItem): void {
+    let book = this.state.books.find((entry) => entry.bookId === item.bookId);
+    if (!book) {
+      book = {
+        bookId: item.bookId,
+        sha256: item.sha256,
+        size: item.size,
+        format: item.format,
+        docId: item.docId,
+        title: item.title,
+        filename: item.filename,
+        registeredForServerId: this.state.serverId,
+      };
+      this.state.books.push(book);
+      return;
+    }
+    if (item.sha256) book.sha256 = item.sha256;
+    if (item.size) book.size = item.size;
+    if (item.format) book.format = item.format;
+    if (item.docId !== undefined) book.docId = item.docId;
+    if (item.title) book.title = item.title;
+    if (item.filename) book.filename = item.filename;
+    book.registeredForServerId = this.state.serverId;
+  }
+
   private findRecord(bookId: string, kind: ClientKind, id: string): LocalRecord | undefined {
     return this.state.records.find((record) => record.bookId === bookId && record.kind === kind && record.id === id);
   }
@@ -929,5 +1041,21 @@ function toChangeInput(change: OutboxChange): ChangeInput {
     deleted: change.deleted,
     clientTime: change.clientTime,
     payload: change.payload,
+  };
+}
+
+function localBookToListItem(book: { bookId: string; sha256: string; size: number; format: string; docId?: string; title: string; filename: string }): BookListItem {
+  return {
+    bookId: book.bookId,
+    title: book.title,
+    filename: book.filename,
+    format: book.format,
+    docId: book.docId,
+    sha256: book.sha256,
+    size: book.size,
+    hasBlob: false,
+    files: book.sha256 ? [{ sha256: book.sha256, size: book.size, hasBlob: false }] : [],
+    version: 0,
+    seq: 0,
   };
 }

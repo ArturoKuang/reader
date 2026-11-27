@@ -15,7 +15,7 @@
 #     synced       Synced
 #     syncing      Syncing…
 #     offline      Offline, changes saved
-#     conflict     2 versions to review
+#     conflict     1 version to review / N versions to review
 #     error        Can't reach Mac mini
 #     storageFull  Mac mini is full
 # A fresh install is unpaired. Tapping the chip opens the pairing sheet.

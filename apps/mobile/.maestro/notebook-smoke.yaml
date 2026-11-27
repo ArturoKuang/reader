@@ -1,0 +1,36 @@
+# Notebook smoke for Reader QA.
+# Android application id: com.reader
+#
+# Opens the per-book notebook from the Reader top bar.
+# Selectors: library-pdf, reader-surface, reader-notebook, notebook-screen,
+# notebook-tab-highlights, notebook-back, reader-library.
+appId: com.reader
+---
+- launchApp
+- assertVisible:
+    id: library-pdf
+- tapOn:
+    id: library-pdf
+- extendedWaitUntil:
+    visible:
+      id: reader-surface
+    timeout: 30000
+- tapOn:
+    id: reader-notebook
+- extendedWaitUntil:
+    visible:
+      id: notebook-screen
+    timeout: 10000
+- assertVisible:
+    id: notebook-tab-highlights
+- assertVisible: "Long-press text to highlight it."
+- tapOn:
+    id: notebook-back
+- extendedWaitUntil:
+    visible:
+      id: reader-surface
+    timeout: 10000
+- tapOn:
+    id: reader-library
+- assertVisible:
+    id: library-pdf

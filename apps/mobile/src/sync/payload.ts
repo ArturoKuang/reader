@@ -175,3 +175,28 @@ export function noteFromPayload(id: string, payload: JsonObject): NoteRecord | n
   if (provider !== undefined) record.provider = provider;
   return record;
 }
+
+/** Rebuild a saved word from a pulled or persisted payload. Lookups are attached by the caller. */
+export function wordFromPayload(id: string, payload: JsonObject): WordRecord | null {
+  const word = asString(payload.word);
+  const definition = asString(payload.definition);
+  if (word === undefined || definition === undefined) return null;
+  const record: WordRecord = {
+    id,
+    word,
+    definition,
+    learned: payload.learned === true,
+    lookups: [],
+    extras: extrasOf(payload),
+  };
+  const explanation = asString(payload.explanation);
+  const explanationProvider = asString(payload.explanationProvider);
+  const pronunciation = asString(payload.pronunciation);
+  const partOfSpeech = asString(payload.partOfSpeech);
+  if (explanation !== undefined) record.explanation = explanation;
+  if (explanationProvider !== undefined) record.explanationProvider = explanationProvider;
+  if (pronunciation !== undefined) record.pronunciation = pronunciation;
+  if (partOfSpeech !== undefined) record.partOfSpeech = partOfSpeech;
+  return record;
+}
+
