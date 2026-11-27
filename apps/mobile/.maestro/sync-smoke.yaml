@@ -1,0 +1,37 @@
+# Sync smoke for Reader QA.
+# Android application id: com.reader
+# Emulator sync base: http://10.0.2.2:8789/v1/reader
+# Pairing QR v2 (host and port come only from this url):
+#   readersync://pair?v=2&url=http://10.0.2.2:8789/v1/reader&token=<t>&server=<serverId>
+# Debug cleartext is limited to 10.0.2.2, localhost, and 127.0.0.1.
+# Release builds stay HTTPS.
+#
+# Library header chip:
+#   testID: sync-status-chip
+#   accessibility label: sync <state>
+#   state is one of: unpaired, synced, syncing, offline, conflict, error, storageFull
+#   visible text:
+#     unpaired     Not paired
+#     synced       Synced
+#     syncing      Syncing…
+#     offline      Offline, changes saved
+#     conflict     2 versions to review
+#     error        Can't reach Mac mini
+#     storageFull  Mac mini is full
+# A fresh install is unpaired. Tapping the chip opens the pairing sheet.
+# Other library testIDs: library-pdf, library-epub.
+appId: com.reader
+---
+- launchApp
+- assertVisible:
+    id: sync-status-chip
+- assertVisible: "Not paired"
+- assertVisible:
+    id: library-pdf
+- assertVisible:
+    id: library-epub
+- tapOn:
+    id: sync-status-chip
+- assertVisible:
+    id: sync-sheet
+- assertVisible: Pair
