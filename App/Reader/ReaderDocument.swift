@@ -41,7 +41,7 @@ final class ReaderDocument: NSDocument {
             if !storedMarks.isEmpty {
                 session.package.marks.marks = storedMarks
             }
-            if let pending = MarkOpenQueue.take(opened.url.path) {
+            if let pending = MarkOpenQueue.take(path: opened.url.path) {
                 session.pendingMarkReveal = pending
                 if let page = pending.page {
                     session.page = max(page, 1)
@@ -76,7 +76,7 @@ final class ReaderDocument: NSDocument {
         )
         try index.save(to: AppPaths.indexFile, fs: fs)
         let session = ReaderSession(bookURL: opened.url, bookData: opened.data, open: result)
-        if let pending = MarkOpenQueue.take(opened.url.path) {
+        if let pending = MarkOpenQueue.take(path: opened.url.path) {
             session.pendingMarkReveal = pending
             if let page = pending.page {
                 session.page = max(page, 1)
