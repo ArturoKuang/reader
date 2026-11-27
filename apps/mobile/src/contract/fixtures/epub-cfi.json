@@ -1,0 +1,20 @@
+{
+  "quote": "natural selection",
+  "prefix": "abcdef ",
+  "suffix": " ghij",
+  "corpus": [
+    {
+      "spineIndex": 0,
+      "section": "Chapter 1",
+      "text": "abcdef natural selection ghij"
+    }
+  ],
+  "hit": {
+    "spineIndex": 0,
+    "section": "Chapter 1",
+    "prefix": "abcdef ",
+    "suffix": " ghij",
+    "cfi": "epubcfi(/6/2!/4,/1:7,/1:24)",
+    "confidence": "exactContext"
+  }
+}

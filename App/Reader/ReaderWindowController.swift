@@ -4,7 +4,24 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWindowDelegate, NSSearchFieldDelegate {
-    let session: ReaderSession
+    private struct ReadingPane {
+        var document: ReaderDocument?
+        let session: ReaderSession
+        let pdf: PDFContainerViewController?
+        let epub: EPUBContainerViewController?
+        var viewController: NSViewController {
+            if let pdf { return pdf }
+            return epub!
+        }
+    }
+
+    private var readingPanes: [ReadingPane] = []
+    private var boundSessions = Set<ObjectIdentifier>()
+    /// The book of the pane that currently has the accent border.
+    var session: ReaderSession {
+        let index = min(max(paneHost.activeIndex, 0), max(readingPanes.count - 1, 0))
+        return readingPanes[index].session
+    }
     private let split = NSSplitViewController()
     private var searchItem: NSSearchToolbarItem?
     private let findCountLabel: NSTextField = {
@@ -19,13 +36,22 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     private var inspectorObservation: NSKeyValueObservation?
     private let sidebarHost: NSHostingController<SidebarView>
     private let panelHost: NSHostingController<RightPanelView>
-    private let center: NSViewController
-    private var pdfController: PDFContainerViewController?
-    private var epubController: EPUBContainerViewController?
+    private let paneHost = PaneHostController()
+    private var paneChord = false
+    private var pdfController: PDFContainerViewController? {
+        guard readingPanes.indices.contains(paneHost.activeIndex) else { return nil }
+        return readingPanes[paneHost.activeIndex].pdf
+    }
+    private var epubController: EPUBContainerViewController? {
+        guard readingPanes.indices.contains(paneHost.activeIndex) else { return nil }
+        return readingPanes[paneHost.activeIndex].epub
+    }
     private var keyMonitor: Any?
     private var sidebarItem: NSSplitViewItem?
     private var panelItem: NSSplitViewItem?
     private var slideshowTimer: Timer?
+    private var markPause: Timer?
+    private var markOverlay: NSHostingController<MarkJumpOverlay>?
     private var reappliedSavedFrame = false
     private let notePopover = NotePopoverController()
     private let selectionBar = SelectionBarController()
@@ -34,18 +60,10 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     private let toastLabel = NSTextField(labelWithString: "")
 
     init(session: ReaderSession) {
-        self.session = session
+        let pane = Self.makePane(session: session, document: nil, publishes: true)
+        readingPanes = [pane]
         sidebarHost = NSHostingController(rootView: SidebarView(session: session))
         panelHost = NSHostingController(rootView: RightPanelView(session: session))
-        if session.isPDF {
-            let pdf = PDFContainerViewController(session: session)
-            pdfController = pdf
-            center = pdf
-        } else {
-            let epub = EPUBContainerViewController(session: session)
-            epubController = epub
-            center = epub
-        }
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 840),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -57,37 +75,34 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         window.toolbarStyle = .unified
         window.titlebarSeparatorStyle = .automatic
         super.init(window: window)
+        paneHost.adopt(readingPanes[0].viewController)
         window.delegate = self
         window.minSize = NSSize(width: 720, height: 480)
         restoreWindowFrame(window)
         configureSplit()
         configureToolbar()
         installToast()
-        session.onToast = { [weak self] text in
-            self?.presentToast(text)
-        }
-        session.onPresentNote = { [weak self] id in
-            self?.presentNote(id)
-        }
-        session.onRevealInObsidian = { [weak self] id in
-            self?.revealObsidian(id: id)
-        }
-        session.onCaptureSelection = { [weak self] done in
-            guard let self else { done(); return }
-            if let epub = self.epubController {
-                epub.captureSelection(completion: done)
-            } else {
-                self.pdfController?.captureSelection()
-                done()
-            }
-        }
         installMonitor()
-        session.onPageChange = { [weak self] in
-            self?.document.map { ($0 as? ReaderDocument)?.refreshSubtitle() }
-            self?.pdfController?.consumePendingJump()
-            self?.epubController?.consumePendingJump()
-        }
         applyChrome()
+    }
+
+    /// Called once the document has adopted this window.
+    func attachHostDocument() {
+        guard let doc = document as? ReaderDocument, !readingPanes.isEmpty else { return }
+        readingPanes[0].document = doc
+        bind(doc.session ?? session)
+    }
+
+    func shows(_ session: ReaderSession) -> Bool {
+        readingPanes.contains { $0.session === session }
+    }
+
+    /// Lands a `reader://` link once the PDF or EPUB view can move.
+    func applyPendingLink() {
+        for pane in readingPanes {
+            pane.pdf?.consumePendingJump()
+            pane.epub?.consumePendingJump()
+        }
     }
 
     @available(*, unavailable)
@@ -101,7 +116,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         // Full-height sidebar draws under the title bar, beside the traffic lights.
         sidebar.allowsFullHeightLayout = true
         sidebarHost.view.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let content = NSSplitViewItem(viewController: center)
+        let content = NSSplitViewItem(viewController: paneHost)
         content.minimumThickness = 320
         content.allowsFullHeightLayout = true
         let inspector = NSSplitViewItem(inspectorWithViewController: panelHost)
@@ -129,6 +144,12 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         toolbar.allowsUserCustomization = false
         toolbar.displayMode = .iconOnly
         window?.toolbar = toolbar
+        let indexes = toolbar.items.enumerated().compactMap { index, item in
+            item.itemIdentifier == .search || item.itemIdentifier == .findCount ? index : nil
+        }.reversed()
+        for index in indexes {
+            toolbar.removeItem(at: index)
+        }
     }
 
     private func installToast() {
@@ -169,8 +190,13 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     }
 
     private func installMonitor() {
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown]) { [weak self] event in
             guard let self, event.window === self.window else { return event }
+            if event.type == .leftMouseDown {
+                self.focusPane(at: event.locationInWindow)
+                return event
+            }
+            if self.handlePaneChord(event) { return nil }
             if event.keyCode == 53 {
                 self.dismissSelectionBar()
                 if self.session.sidebar == .searchResults {
@@ -186,6 +212,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             }
             let position = self.pdfController?.currentPosition() ?? self.epubController?.currentPosition() ?? ReadingPosition(page: self.session.page, zoom: self.session.zoom)
             let handled = self.session.handleMarkEvent(event, documentFocused: true, position: position)
+            if let url = handled.otherBook {
+                self.openBookInOtherPane(url: url, position: handled.jump)
+                return nil
+            }
+            self.noteMarkChord(event, consumed: handled.consumed, jumped: handled.jump != nil)
             if handled.consumed {
                 if let jump = handled.jump {
                     self.reveal(jump)
@@ -194,6 +225,57 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             }
             return event
         }
+    }
+
+    private func noteMarkChord(_ event: NSEvent, consumed: Bool, jumped: Bool) {
+        let character = event.characters ?? ""
+        if jumped || event.keyCode == 53 {
+            hideMarkOverlay()
+            return
+        }
+        guard consumed, character == "`" || character == "'" else {
+            if consumed { hideMarkOverlay() }
+            return
+        }
+        markPause?.invalidate()
+        markPause = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { [weak self] _ in
+            self?.showMarkOverlay()
+        }
+    }
+
+    private func showMarkOverlay() {
+        guard markOverlay == nil, let content = window?.contentView else { return }
+        let host = NSHostingController(rootView: MarkJumpOverlay(session: session, jump: { [weak self] mark in
+            self?.jumpFromOverlay(mark)
+        }, close: { [weak self] in
+            self?.hideMarkOverlay()
+        }))
+        host.view.translatesAutoresizingMaskIntoConstraints = false
+        host.view.wantsLayer = true
+        host.view.layer?.cornerRadius = 10
+        content.addSubview(host.view)
+        NSLayoutConstraint.activate([
+            host.view.centerXAnchor.constraint(equalTo: content.centerXAnchor),
+            host.view.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            host.view.widthAnchor.constraint(equalToConstant: 320),
+        ])
+        markOverlay = host
+    }
+
+    private func jumpFromOverlay(_ mark: MarkEntry) {
+        hideMarkOverlay()
+        if mark.scope == .global, mark.bookFingerprint != session.fingerprint, let path = mark.bookPath {
+            openBookInOtherPane(url: URL(fileURLWithPath: path), position: mark.position)
+            return
+        }
+        reveal(mark.position)
+    }
+
+    private func hideMarkOverlay() {
+        markPause?.invalidate()
+        markPause = nil
+        markOverlay?.view.removeFromSuperview()
+        markOverlay = nil
     }
 
     private func restoreWindowFrame(_ window: NSWindow) {
@@ -209,16 +291,28 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
-        guard !reappliedSavedFrame else { return }
-        reappliedSavedFrame = true
-        guard let window else { return }
-        restoreWindowFrame(window)
-        offerVaultSave()
-        showTipStrip()
+        if !reappliedSavedFrame {
+            reappliedSavedFrame = true
+            if let window { restoreWindowFrame(window) }
+            offerVaultSave()
+            showTipStrip()
+        }
+        if otherWindowShows(session) { activateCurrentPane() }
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        guard otherWindowShows(session) else { return }
+        for pane in readingPanes {
+            pane.pdf?.publishesPosition = false
+            pane.epub?.publishesPosition = false
+        }
     }
 
     func windowDidResize(_ notification: Notification) {
         pdfController?.applyFittingScale()
+        if let width = window?.frame.width {
+            paneHost.stackForWindowWidth(width)
+        }
         storeWindowFrame()
     }
 
@@ -236,14 +330,27 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         storeWindowFrame()
         pdfController?.capturePositionForSave()
         session.saveViewNow()
+        let host = document
+        var closing = Set<ObjectIdentifier>()
+        for pane in readingPanes {
+            guard let doc = pane.document, doc !== host else { continue }
+            let id = ObjectIdentifier(doc)
+            guard closing.insert(id).inserted, !otherWindowShows(pane.session) else { continue }
+            doc.saveForPaneClose()
+        }
     }
 
     func applyChrome() {
         let contact = session.sidebar == .contactSheet
         sidebarItem?.isCollapsed = session.sidebar == .hidden || contact
         panelItem?.isCollapsed = !session.panelVisible
-        if session.isPDF, let toolbar = window?.toolbar, let index = toolbar.items.firstIndex(where: { $0.itemIdentifier == .appearance }) {
-            toolbar.removeItem(at: index)
+        if let toolbar = window?.toolbar {
+            if session.isPDF, let index = toolbar.items.firstIndex(where: { $0.itemIdentifier == .appearance }) {
+                toolbar.removeItem(at: index)
+            } else if !session.isPDF, !toolbar.items.contains(where: { $0.itemIdentifier == .appearance }) {
+                let zoom = toolbar.items.firstIndex(where: { $0.itemIdentifier == .zoomIn }) ?? toolbar.items.count - 1
+                toolbar.insertItem(withItemIdentifier: .appearance, at: min(zoom + 1, toolbar.items.count))
+            }
         }
         pdfController?.setContactSheet(contact)
         epubController?.setContactSheet(contact)
@@ -267,11 +374,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     // MARK: Toolbar
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .findCount, .syncStatus, .vault, .inspectorTrackingSeparator, .toggleInspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .syncStatus, .vault, .inspectorTrackingSeparator, .toggleInspector]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .findCount, .syncStatus, .vault, .inspectorTrackingSeparator, .toggleInspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .syncStatus, .vault, .inspectorTrackingSeparator, .toggleInspector]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
@@ -330,6 +437,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             item.searchField.target = self
             item.searchField.action = #selector(submitSearch(_:))
             item.searchField.delegate = self
+            (item.searchField.cell as? NSActionCell)?.sendsActionOnEndEditing = false
             searchItem = item
             item.label = "Find"
             return item
@@ -464,6 +572,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             ("Table of Contents", #selector(showContents(_:)), .tableOfContents),
             ("Highlights and Notes", #selector(showHighlightsAndNotes(_:)), .highlightsAndNotes),
             ("Bookmarks", #selector(showBookmarks(_:)), .bookmarks),
+            ("Marks", #selector(showMarks(_:)), .marks),
         ]
         for entry in entries {
             let item = NSMenuItem(title: entry.0, action: entry.1, keyEquivalent: "")
@@ -488,6 +597,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     @objc func showContents(_ sender: Any?) { session.setSidebar(.tableOfContents); applyChrome() }
     @objc func showHighlightsAndNotes(_ sender: Any?) { session.setSidebar(.highlightsAndNotes); applyChrome() }
     @objc func showBookmarks(_ sender: Any?) { session.setSidebar(.bookmarks); applyChrome() }
+    @objc func showMarks(_ sender: Any?) { session.setSidebar(.marks); applyChrome() }
     @objc func showContactSheet(_ sender: Any?) {
         if session.sidebar != .contactSheet { previousSidebar = session.sidebar }
         session.setSidebar(.contactSheet)
@@ -724,24 +834,294 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     }
 
     @objc func find(_ sender: Any?) {
-        searchItem?.beginSearchInteraction()
+        pdfController?.focusFind()
+        epubController?.focusFind()
     }
 
     @objc func submitSearch(_ sender: Any?) {
         let query = searchItem?.searchField.stringValue ?? ""
         session.findQuery = query
-        pdfController?.search(query)
-        epubController?.search(query)
+        for pane in readingPanes {
+            pane.pdf?.ownsFindSession = false
+            pane.epub?.ownsFindSession = false
+        }
+        let advance = FindCommit.isExplicitAdvance()
+        pdfController?.search(query, explicitAdvance: advance)
+        epubController?.search(query, explicitAdvance: advance)
+    }
+
+    @objc func openInOtherPane(_ sender: Any?) {
+        guard let window else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        var types: [UTType] = [.pdf]
+        if let epub = UTType(filenameExtension: "epub") { types.append(epub) }
+        panel.allowedContentTypes = types
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            self?.openBookInOtherPane(url: url, position: nil)
+        }
+    }
+
+    func openBookInOtherPane(url: URL, position: ReadingPosition?) {
+        if let existing = NSDocumentController.shared.document(for: url) as? ReaderDocument, let book = existing.session {
+            place(session: book, document: existing, position: position)
+            return
+        }
+        if let position {
+            MarkOpenQueue.store(path: url.path, position: position)
+        }
+        ReaderDocument.openingIntoPane = true
+        NSDocumentController.shared.openDocument(withContentsOf: url, display: false) { [weak self] document, _, _ in
+            ReaderDocument.openingIntoPane = false
+            guard let self, let reader = document as? ReaderDocument, let book = reader.session else { return }
+            self.place(session: book, document: reader, position: position)
+        }
+    }
+
+    @objc func splitSideBySide(_ sender: Any?) { splitPane(sideBySide: true) }
+    @objc func splitStacked(_ sender: Any?) { splitPane(sideBySide: false) }
+    @objc func focusNextPane(_ sender: Any?) { focusRelativePane(backward: false) }
+    @objc func focusPreviousPane(_ sender: Any?) { focusRelativePane(backward: true) }
+
+    @objc func closePaneOrWindow(_ sender: Any?) {
+        guard readingPanes.count > 1 else {
+            window?.performClose(sender)
+            return
+        }
+        let index = paneHost.activeIndex
+        let closing = readingPanes[index]
+        guard paneHost.closeActive() else { return }
+        readingPanes.remove(at: index)
+        releaseIfUnused(closing)
+        activateCurrentPane()
+    }
+
+    private func splitPane(sideBySide: Bool) {
+        guard readingPanes.indices.contains(paneHost.activeIndex) else { return }
+        let current = readingPanes[paneHost.activeIndex]
+        let wide = (window?.frame.width ?? 1000) >= 900
+        let pane = Self.makePane(session: current.session, document: current.document, publishes: false)
+        readingPanes.append(pane)
+        paneHost.addPane(pane.viewController, sideBySide: sideBySide && wide)
+        if let pdf = pane.pdf, let active = current.pdf {
+            let position = active.currentPosition()
+            DispatchQueue.main.async {
+                pdf.reveal(position)
+                pdf.freezeLayout()
+            }
+        }
+        for other in readingPanes where other.viewController !== current.viewController && other.viewController !== pane.viewController {
+            other.pdf?.freezeLayout()
+            other.pdf?.publishesPosition = false
+            other.epub?.publishesPosition = false
+        }
+    }
+
+    private func focusRelativePane(backward: Bool) {
+        paneHost.focusNext(backward: backward)
+        activateCurrentPane()
+    }
+
+    private func focusPane(at windowPoint: NSPoint) {
+        guard let index = paneHost.index(at: windowPoint), index != paneHost.activeIndex else { return }
+        paneHost.focus(at: index)
+        activateCurrentPane()
+    }
+
+    private func activateCurrentPane() {
+        guard readingPanes.indices.contains(paneHost.activeIndex) else { return }
+        for (index, pane) in readingPanes.enumerated() {
+            let active = index == paneHost.activeIndex
+            if !active { pane.pdf?.freezeLayout() }
+            pane.pdf?.publishesPosition = active
+            pane.epub?.publishesPosition = active
+            pane.pdf?.ownsFindSession = false
+            pane.epub?.ownsFindSession = false
+        }
+        adoptActiveDocument()
+        for (index, pane) in readingPanes.enumerated() {
+            let active = index == paneHost.activeIndex
+            pane.pdf?.setPaneActive(active)
+            pane.epub?.setPaneActive(active)
+        }
+        applyChrome()
+        pdfController?.publishCurrentPosition()
+        epubController?.publishCurrentPosition()
+    }
+
+    private func place(session book: ReaderSession, document: ReaderDocument, position: ReadingPosition?) {
+        bind(book)
+        if let index = readingPanes.firstIndex(where: { $0.session === book && $0.viewController !== readingPanes[paneHost.activeIndex].viewController }) {
+            show(position, in: readingPanes[index])
+            return
+        }
+        if readingPanes.count > 1, let index = readingPanes.indices.first(where: { $0 != paneHost.activeIndex }) {
+            let old = readingPanes[index]
+            if old.session !== book {
+                let pane = Self.makePane(session: book, document: document, publishes: false)
+                readingPanes[index] = pane
+                paneHost.replace(at: index, with: pane.viewController)
+                releaseIfUnused(old)
+            }
+            show(position, in: readingPanes[index])
+            return
+        }
+        let pane = Self.makePane(session: book, document: document, publishes: false)
+        readingPanes.append(pane)
+        let wide = (window?.frame.width ?? 1000) >= 900
+        paneHost.addPane(pane.viewController, sideBySide: wide)
+        show(position, in: pane)
+    }
+
+    private func show(_ position: ReadingPosition?, in pane: ReadingPane) {
+        let fallback = ReadingPosition(page: pane.session.page, zoom: pane.session.zoom)
+        let target = position ?? fallback
+        DispatchQueue.main.async {
+            if let pdf = pane.pdf { pdf.showInPane(target) }
+            if let epub = pane.epub { epub.showInPane(target) }
+        }
+    }
+
+    private func releaseIfUnused(_ pane: ReadingPane) {
+        guard let document = pane.document else { return }
+        guard !shows(pane.session), !otherWindowShows(pane.session) else { return }
+        if self.document === document, let replacement = readingPanes.compactMap(\.document).first(where: { $0 !== document }) {
+            adopt(replacement)
+        }
+        if self.document === document {
+            document.removeWindowController(self)
+        }
+        document.saveForPaneClose()
+    }
+
+    private func adoptActiveDocument() {
+        guard let doc = readingPanes[paneHost.activeIndex].document else { return }
+        adopt(doc)
+    }
+
+    private func adopt(_ document: ReaderDocument) {
+        guard self.document !== document else {
+            session.undoManager = document.undoManager
+            document.refreshSubtitle()
+            return
+        }
+        self.document?.removeWindowController(self)
+        document.addWindowController(self)
+        window?.isDocumentEdited = document.isDocumentEdited
+        session.undoManager = document.undoManager
+        document.refreshSubtitle()
+    }
+
+    private func otherWindowShows(_ session: ReaderSession) -> Bool {
+        for case let reader as ReaderDocument in NSDocumentController.shared.documents {
+            for controller in reader.windowControllers {
+                guard let window = controller as? ReaderWindowController, window !== self else { continue }
+                if window.shows(session) { return true }
+            }
+        }
+        return false
+    }
+
+    private func bind(_ session: ReaderSession) {
+        guard boundSessions.insert(ObjectIdentifier(session)).inserted else { return }
+        let previousPage = session.onPageChange
+        session.onPageChange = { [weak self] in
+            previousPage?()
+            guard let self, self.session === session else { return }
+            self.pdfController?.consumePendingJump()
+            self.epubController?.consumePendingJump()
+        }
+        let previousToast = session.onToast
+        session.onToast = { [weak self] text in
+            guard let self, self.session === session else {
+                previousToast?(text)
+                return
+            }
+            self.presentToast(text)
+        }
+        let previousNote = session.onPresentNote
+        session.onPresentNote = { [weak self] id in
+            guard let self, self.session === session else {
+                previousNote?(id)
+                return
+            }
+            self.presentNote(id)
+        }
+        let previousReveal = session.onRevealInObsidian
+        session.onRevealInObsidian = { [weak self] id in
+            guard let self, self.session === session else {
+                previousReveal?(id)
+                return
+            }
+            self.revealObsidian(id: id)
+        }
+        let previousCapture = session.onCaptureSelection
+        session.onCaptureSelection = { [weak self] done in
+            guard let self, self.session === session else {
+                if let previousCapture { previousCapture(done) } else { done() }
+                return
+            }
+            if let epub = self.epubController {
+                epub.captureSelection(completion: done)
+            } else {
+                self.pdfController?.captureSelection()
+                done()
+            }
+        }
+    }
+
+    private static func makePane(session: ReaderSession, document: ReaderDocument?, publishes: Bool) -> ReadingPane {
+        if session.isPDF {
+            let pdf = PDFContainerViewController(session: session)
+            pdf.publishesPosition = publishes
+            pdf.ownsFindSession = false
+            return ReadingPane(document: document, session: session, pdf: pdf, epub: nil)
+        }
+        let epub = EPUBContainerViewController(session: session)
+        epub.publishesPosition = publishes
+        epub.ownsFindSession = false
+        return ReadingPane(document: document, session: session, pdf: nil, epub: epub)
+    }
+
+    private func handlePaneChord(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if event.keyCode == 48, flags.contains(.control), !flags.contains(.command) {
+            focusRelativePane(backward: flags.contains(.shift))
+            paneChord = false
+            return true
+        }
+        let key = event.charactersIgnoringModifiers ?? ""
+        if flags.contains(.control), !flags.contains(.command), key.lowercased() == "w" {
+            paneChord = true
+            return true
+        }
+        guard paneChord else { return false }
+        paneChord = false
+        switch key {
+        case "v": splitPane(sideBySide: true)
+        case "s": splitPane(sideBySide: false)
+        case "w": focusRelativePane(backward: false)
+        case "W": focusRelativePane(backward: true)
+        case "q": closePaneOrWindow(nil)
+        default: break
+        }
+        return true
+    }
+
+    func claimFindSession(from controller: NSViewController) {
+        for pane in readingPanes {
+            pane.pdf?.ownsFindSession = (pane.pdf === controller)
+            pane.epub?.ownsFindSession = (pane.epub === controller)
+        }
     }
 
     func showFindCount(_ index: Int, of total: Int) {
         let text = total > 0 ? "\(index) of \(total)" : ""
-        if #available(macOS 26, *) {
-            searchItem?.badge = text.isEmpty ? nil : NSItemBadge.text(text)
-            findCountLabel.stringValue = ""
-        } else {
-            findCountLabel.stringValue = text
-        }
+        pdfController?.setFindCount(text)
+        epubController?.setFindCount(text)
     }
 
     func searchFieldDidEndSearching(_ sender: NSSearchField) {
@@ -749,10 +1129,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             session.setSidebar(previous)
             session.sidebarBeforeSearch = nil
         }
-        if #available(macOS 26, *) {
-            searchItem?.badge = nil
-        }
-        findCountLabel.stringValue = ""
+        pdfController?.setFindCount("")
+        epubController?.setFindCount("")
     }
     @objc func findNext(_ sender: Any?) { pdfController?.findNext(); epubController?.find(forward: true) }
     @objc func findPrevious(_ sender: Any?) { pdfController?.findPrevious(); epubController?.find(forward: false) }
@@ -837,7 +1215,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     }
     @objc func toggleConceptMarkers(_ sender: Any?) {
         session.showConceptMarkers.toggle()
-        session.onAnnotationsChanged?()
+        session.publishAnnotationsChanged()
         session.onSaveVaultState?()
     }
     @objc func copyCitation(_ sender: Any?) {
@@ -855,6 +1233,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         case #selector(showContents(_:)): menuItem.state = session.sidebar == .tableOfContents ? .on : .off
         case #selector(showHighlightsAndNotes(_:)): menuItem.state = session.sidebar == .highlightsAndNotes ? .on : .off
         case #selector(showBookmarks(_:)): menuItem.state = session.sidebar == .bookmarks ? .on : .off
+        case #selector(showMarks(_:)): menuItem.state = session.sidebar == .marks ? .on : .off
         case #selector(toggleContinuous(_:)): menuItem.state = readingLayout == .continuous ? .on : .off
         case #selector(singlePage(_:)): menuItem.state = readingLayout == .single ? .on : .off
         case #selector(twoPages(_:)): menuItem.state = readingLayout == .twoPages ? .on : .off
@@ -962,14 +1341,26 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         let key = "reader.vaultOffer." + session.bookURL.path
         guard !UserDefaults.standard.bool(forKey: key) else { return }
         UserDefaults.standard.set(true, forKey: key)
+        // Never run a modal event loop from windowDidBecomeKey. That can leave
+        // NSDocument's open activity unfinished; a later ⌘S then waits forever
+        // on the serialization semaphore.
+        DispatchQueue.main.async { [weak self] in
+            self?.presentVaultSaveOffer()
+        }
+    }
+
+    private func presentVaultSaveOffer() {
+        guard session.usesVault, session.vaultLoose, !session.vaultEnabled else { return }
+        guard let window else { return }
         let alert = NSAlert()
         alert.messageText = "This file is in your Obsidian vault"
         alert.informativeText = "Save notes into \(session.bookFolder ?? "the book folder")?"
         alert.addButton(withTitle: "Save to Vault")
         alert.addButton(withTitle: "Not Now")
-        if alert.runModal() == .alertFirstButtonReturn {
-            session.vaultEnabled = true
-            session.onSaveVaultState?()
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.session.vaultEnabled = true
+            self?.session.onSaveVaultState?()
         }
     }
 

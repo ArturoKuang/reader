@@ -9,14 +9,24 @@ import WebKit
 /// zoom changes the font size. Two-page mode uses CSS columns, which is an approximation.
 final class EPUBContainerViewController: NSViewController, WKScriptMessageHandler, WKNavigationDelegate {
     let session: ReaderSession
+    var publishesPosition = true
+    var ownsFindSession = false
     private var webView: WKWebView?
-    private let findBar = NSSearchField()
-    private var findTop: NSLayoutConstraint?
+    private let titleStrip = PaneTitleStrip()
+    private var findBar: NSSearchField { titleStrip.findField }
+    private var stripTop: NSLayoutConstraint?
     private var fontScale: Double = 1
     private var contactHost: NSHostingController<EPUBContactSheet>?
     private var spineLoaded = false
+    private var displayedSpineIndex = 0
     private var acceptSpineReports = false
+    private var chapterIndex = 0
+    private var chapterScroll: Double = 0
+    private var pendingChapterScroll: Double?
     private var pendingFlash: String?
+    private var lastFindQuery = ""
+    private var findCommitted = false
+    private var didFindQuery = false
 
     init(session: ReaderSession) {
         self.session = session
@@ -25,6 +35,10 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
+
+    deinit {
+        session.unwatchAnnotations(self)
+    }
 
     override func loadView() {
         view = NSView()
@@ -35,28 +49,37 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         webView.translatesAutoresizingMaskIntoConstraints = false
         self.webView = webView
         view.addSubview(webView)
-        findBar.translatesAutoresizingMaskIntoConstraints = false
-        findBar.placeholderString = "Find"
         findBar.target = self
         findBar.action = #selector(submitFind)
-        findBar.isHidden = true
-        view.addSubview(findBar)
-        let findConstraint = findBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: -40)
-        findTop = findConstraint
+        (findBar.cell as? NSActionCell)?.sendsActionOnEndEditing = false
+        view.addSubview(titleStrip)
+        let stripConstraint = titleStrip.topAnchor.constraint(equalTo: view.topAnchor)
+        stripTop = stripConstraint
         NSLayoutConstraint.activate([
+            titleStrip.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            titleStrip.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            stripConstraint,
             webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            webView.topAnchor.constraint(equalTo: findBar.bottomAnchor),
-            findBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            findBar.widthAnchor.constraint(equalToConstant: 240),
-            findConstraint,
+            webView.topAnchor.constraint(equalTo: titleStrip.bottomAnchor),
+        ])
+        let ring = PaneFocusRing()
+        ring.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(ring)
+        NSLayoutConstraint.activate([
+            ring.topAnchor.constraint(equalTo: titleStrip.topAnchor),
+            ring.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            ring.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            ring.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
         fontScale = session.zoom
-        session.onAnnotationsChanged = { [weak self] in
+        chapterIndex = max(session.page - 1, 0)
+        session.watchAnnotations(self) { [weak self] in
             guard let self else { return }
             self.webView?.evaluateJavaScript("window.readerPaint && window.readerPaint(\(self.highlightScript()))")
         }
+        setPaneActive(publishesPosition)
         loadSpine()
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, event.window == self.view.window, self.view.window?.firstResponder is WKWebView else { return event }
@@ -94,7 +117,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         webView?.isHidden = visible
         guard visible else { return }
         let host = NSHostingController(rootView: EPUBContactSheet(session: session) { [weak self] index in
-            self?.session.page = index + 1
+            if self?.publishesPosition == true { self?.session.page = index + 1 }
             self?.session.setSidebar(.thumbnails)
             self?.loadSpine()
             (self?.view.window?.windowController as? ReaderWindowController)?.applyChrome()
@@ -110,13 +133,18 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         contactHost = host
     }
 
-    func actualSize() { fontScale = 1; session.rememberZoom(1, fit: .actual); applyLiveStyle() }
-    func zoomToFit() { fontScale = 1.15; session.rememberZoom(fontScale, fit: .fitPage); applyLiveStyle() }
-    func fitWidth() { fontScale = 1.15; session.rememberZoom(fontScale, fit: .fitWidth); applyLiveStyle() }
+    func actualSize() { fontScale = 1; storeZoom(1, fit: .actual); applyLiveStyle() }
+    func zoomToFit() { fontScale = 1.15; storeZoom(fontScale, fit: .fitPage); applyLiveStyle() }
+    func fitWidth() { fontScale = 1.15; storeZoom(fontScale, fit: .fitWidth); applyLiveStyle() }
     func zoom(by factor: Double) {
         fontScale = min(max(fontScale * factor, 0.6), 2.4)
-        session.rememberZoom(fontScale, fit: .custom)
+        storeZoom(fontScale, fit: .custom)
         applyLiveStyle()
+    }
+
+    private func storeZoom(_ scale: Double, fit: FitMode) {
+        guard publishesPosition else { return }
+        session.rememberZoom(scale, fit: fit)
     }
 
     func applyLiveStyle() {
@@ -136,9 +164,25 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     }
     func nextPage() { showSpine(index: min(session.page, max(session.pageCount - 1, 0))) }
     func previousPage() { showSpine(index: max(session.page - 2, 0)) }
-    func toggleFind() {
-        findBar.isHidden = false
-        findTop?.constant = 8
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        guard let window = view.window, let constraint = stripTop else { return }
+        let topInWindow = view.convert(view.bounds, to: nil).maxY
+        let overlap = topInWindow - window.contentLayoutRect.maxY
+        let constant = overlap > 0.5 ? overlap : 0
+        if abs(constraint.constant - constant) > 0.5 {
+            constraint.constant = constant
+        }
+        refreshPaneTitle()
+    }
+
+    func setPaneActive(_ active: Bool) {
+        titleStrip.setActive(active)
+        refreshPaneTitle()
+    }
+
+    func focusFind() {
+        setPaneActive(true)
         if findBar.stringValue.isEmpty { findBar.stringValue = session.findQuery }
         view.layoutSubtreeIfNeeded()
         DispatchQueue.main.async { [weak self] in
@@ -147,18 +191,60 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             self.findBar.currentEditor()?.selectAll(nil)
         }
     }
-    func search(_ query: String) {
-        findBar.stringValue = query
-        session.findQuery = query
-        find(forward: true)
+
+    func toggleFind() {
+        focusFind()
     }
 
-    @objc private func submitFind() { find(forward: true) }
+    func setFindCount(_ text: String) {
+        titleStrip.setCount(text)
+    }
+
+    private func refreshPaneTitle() {
+        let title = session.bookURL.deletingPathExtension().lastPathComponent
+        titleStrip.show(title: title, page: "p. \(displayedSpineIndex + 1)")
+    }
+    func search(_ query: String, explicitAdvance: Bool = true) {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let hasMatches = didFindQuery && trimmed == lastFindQuery
+        let command = FindQuery.command(query: trimmed, previous: lastFindQuery, hasMatches: hasMatches, committed: findCommitted, explicitAdvance: explicitAdvance)
+        findBar.stringValue = trimmed
+        session.findQuery = trimmed
+        switch command {
+        case .begin:
+            lastFindQuery = trimmed
+            findCommitted = false
+            didFindQuery = true
+            runFind(forward: true, fresh: true)
+        case .stay:
+            findCommitted = true
+        case .step:
+            runFind(forward: true, fresh: false)
+        }
+    }
+
+    @objc private func submitFind() {
+        search(findBar.stringValue.isEmpty ? session.findQuery : findBar.stringValue, explicitAdvance: FindCommit.isExplicitAdvance())
+    }
+
     func find(forward: Bool) {
+        runFind(forward: forward, fresh: false)
+    }
+
+    /// `fresh` selects the first match at or after the caret. Find Next passes false so the current hit is not chosen again.
+    private func runFind(forward: Bool, fresh: Bool) {
         let query = findBar.stringValue.isEmpty ? session.findQuery : findBar.stringValue
         session.findQuery = query
-        let escaped = query.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
-        webView?.evaluateJavaScript("window.find('\(escaped)', false, \(!forward), true)")
+        ownsFindSession = true
+        (view.window?.windowController as? ReaderWindowController)?.claimFindSession(from: self)
+        guard !query.isEmpty else { return }
+        let escaped = query
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+        webView?.evaluateJavaScript("window.readerFind && window.readerFind('\(escaped)', \(forward), \(fresh))")
     }
 
     func captureSelection() {
@@ -193,12 +279,26 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     }
 
     func reveal(_ position: ReadingPosition) {
-        if let cfi = position.cfi, let parsed = EPUBCFI(value: cfi), let index = parsed.spineIndex {
-            showSpine(index: index)
+        let index: Int
+        if let cfi = position.cfi, let parsed = EPUBCFI(value: cfi), let spine = parsed.spineIndex {
+            index = spine
         } else if let page = position.page {
-            showSpine(index: page - 1)
+            index = page - 1
+        } else {
+            return
         }
+        pendingChapterScroll = position.scrollY
+        showSpine(index: index)
         if let quote = position.quote, !quote.isEmpty { flash(quote) }
+    }
+
+    func showInPane(_ position: ReadingPosition) {
+        reveal(position)
+    }
+
+    func publishCurrentPosition() {
+        guard publishesPosition, let epub = session.epub else { return }
+        applySpine(displayedSpineIndex, count: epub.spine.count)
     }
 
     func consumePendingJump() {
@@ -216,10 +316,21 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         spineLoaded = true
-        if session.pendingReaderLink != nil {
+        if let pending = session.pendingMarkReveal {
+            session.pendingMarkReveal = nil
+            pendingChapterScroll = pending.scrollY
+            if let cfi = pending.cfi, let parsed = EPUBCFI(value: cfi), let spine = parsed.spineIndex {
+                chapterIndex = spine
+            } else if let page = pending.page {
+                chapterIndex = max(page - 1, 0)
+            }
+        } else if session.pendingReaderLink != nil {
             consumePendingJump()
-        } else {
+        } else if pendingChapterScroll == nil {
             scrollToCurrentSpine()
+        }
+        if pendingChapterScroll != nil, let epub = session.epub, epub.spine.indices.contains(chapterIndex) {
+            scrollToSpine(epub.spine[chapterIndex].id)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
             self?.acceptSpineReports = true
@@ -228,8 +339,10 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     }
 
     func currentPosition() -> ReadingPosition {
-        let index = min(max(session.page - 1, 0), max((session.epub?.spine.count ?? 1) - 1, 0))
+        let index = chapterIndex
         return ReadingPosition(
+            page: index + 1,
+            scrollY: chapterScroll,
             zoom: fontScale,
             cfi: EPUBCFI.make(spineIndex: index, start: 0, end: 0).value,
             section: session.sectionTitle,
@@ -246,6 +359,11 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         if body["kind"] as? String == "note", let id = body["id"] as? String {
             session.lastAnnotationHit = id
             session.openAnnotation(id)
+            return
+        }
+        if body["kind"] as? String == "scroll" {
+            if let fraction = body["scrollY"] as? Double { chapterScroll = fraction }
+            if let index = integer(body["index"]) { chapterIndex = index }
             return
         }
         if body["kind"] as? String == "spine" {
@@ -305,7 +423,19 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     private func scrollToSpine(_ id: String) {
         acceptSpineReports = false
         let escaped = id.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
-        webView?.evaluateJavaScript("document.getElementById('spine-\(escaped)')?.scrollIntoView({block:'start'})")
+        if let fraction = pendingChapterScroll {
+            pendingChapterScroll = nil
+            let script = """
+            (function() {
+              const el = document.getElementById('spine-\(escaped)');
+              const y = el ? el.offsetTop + el.offsetHeight * \(fraction) : document.body.scrollHeight * \(fraction);
+              window.scrollTo(0, y);
+            })();
+            """
+            webView?.evaluateJavaScript(script)
+        } else {
+            webView?.evaluateJavaScript("document.getElementById('spine-\(escaped)')?.scrollIntoView({block:'start'})")
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
             self?.acceptSpineReports = true
         }
@@ -316,6 +446,10 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         let placements = SpineChapters.placements(spine: epub.spine, toc: epub.toc)
         let placement = placements[index]
         let title = placement.title.isEmpty ? epub.spine[index].title : placement.title
+        displayedSpineIndex = index
+        chapterIndex = index
+        refreshPaneTitle()
+        guard publishesPosition else { return }
         session.updatePage(index + 1, count: count, section: title)
     }
 
@@ -356,12 +490,21 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     }
 
     private func highlightScript() -> String {
-        let items = session.highlights.compactMap { highlight -> String? in
-            let quote = highlight.quote.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-            guard !quote.isEmpty else { return nil }
-            return "{\"quote\":\"\(quote)\",\"color\":\(highlight.color)}"
+        let objects: [[String: Any]] = HighlightPaint.marks(for: session.highlights).map { mark in
+            var object: [String: Any] = [
+                "quote": mark.quote,
+                "color": mark.color,
+                "prefix": mark.prefix,
+                "suffix": mark.suffix,
+            ]
+            if let chapter = mark.chapter { object["chapter"] = chapter }
+            if let spine = mark.spineIndex { object["spine"] = spine }
+            return object
         }
-        return "[\(items.joined(separator: ","))]"
+        guard JSONSerialization.isValidJSONObject(objects),
+              let data = try? JSONSerialization.data(withJSONObject: objects),
+              let json = String(data: data, encoding: .utf8) else { return "[]" }
+        return json.replacingOccurrences(of: "<", with: "\\u003c")
     }
 
     private func epubAppearance() -> (font: String, line: String, margin: Int, background: String, foreground: String, align: String) {
@@ -414,6 +557,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
 
     private func loadSpine() {
         guard let epub = session.epub, let webView else { return }
+        displayedSpineIndex = min(max(session.page - 1, 0), max(epub.spine.count - 1, 0))
         let items: [EPUBSpineItem]
         if session.continuous {
             items = epub.spine
@@ -423,8 +567,11 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         } else {
             let index = min(max(session.page - 1, 0), max(epub.spine.count - 1, 0))
             items = [epub.spine[index]]
-            session.sectionTitle = epub.spine[index].title
-            session.updatePage(index + 1, count: epub.spine.count, section: epub.spine[index].title)
+            displayedSpineIndex = index
+            if publishesPosition {
+                session.sectionTitle = epub.spine[index].title
+                session.updatePage(index + 1, count: epub.spine.count, section: epub.spine[index].title)
+            }
         }
         let columns = session.twoPages && !session.continuous ? "column-count: 2; column-gap: 32px; height: 100vh;" : ""
         acceptSpineReports = false
@@ -480,8 +627,27 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
           }, { root: null, threshold: [0.2, 0.5] });
           sections.forEach(section => observer.observe(section));
         }
+        let reportScroll = () => {
+          const sections = [...document.querySelectorAll("section[id^='spine-']")];
+          const y = window.scrollY || 0;
+          let index = 0;
+          let scrollY = 0;
+          for (const section of sections) {
+            const top = section.offsetTop;
+            const height = section.offsetHeight || 1;
+            if (y + 8 >= top && y < top + height) {
+              index = Number(section.dataset.index || 0);
+              scrollY = Math.min(1, Math.max(0, (y - top) / height));
+              break;
+            }
+          }
+          if (window.webkit && window.webkit.messageHandlers.reader) {
+            window.webkit.messageHandlers.reader.postMessage({kind: "scroll", index, scrollY});
+          }
+        };
         document.addEventListener("scroll", () => {
           if (window.webkit && window.webkit.messageHandlers.reader) window.webkit.messageHandlers.reader.postMessage({kind: "dismiss-bar"});
+          reportScroll();
         }, true);
         document.addEventListener("mouseup", () => {
           const value = window.readerSelection();
@@ -525,25 +691,104 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
           }
           return -1;
         }
+        window.readerFind = function(query, forward, fresh) {
+          if (!query) return false;
+          const needle = query.toLowerCase();
+          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+          const hits = [];
+          while (walker.nextNode()) {
+            const node = walker.currentNode;
+            const hay = (node.nodeValue || "").toLowerCase();
+            let from = 0;
+            while (from < hay.length) {
+              const at = hay.indexOf(needle, from);
+              if (at < 0) break;
+              hits.push({node: node, at: at, end: at + needle.length});
+              from = at + needle.length;
+            }
+          }
+          if (!hits.length) return false;
+          const selection = window.getSelection();
+          const atStart = window.scrollY <= 8 && (!selection || !selection.rangeCount || selection.isCollapsed);
+          let index = forward ? 0 : hits.length - 1;
+          if (!(fresh && atStart) && selection && selection.rangeCount && selection.focusNode) {
+            const cursorNode = selection.focusNode;
+            const backEdge = Math.min(selection.anchorOffset || 0, selection.focusOffset || 0);
+            const forwardEdge = Math.max(selection.anchorOffset || 0, selection.focusOffset || 0);
+            const cursorOffset = fresh ? backEdge : (forward ? forwardEdge : backEdge);
+            const step = forward ? 1 : -1;
+            let found = -1;
+            for (let i = forward ? 0 : hits.length - 1; i >= 0 && i < hits.length; i += step) {
+              const hit = hits[i];
+              let take = false;
+              if (hit.node === cursorNode) {
+                take = forward ? hit.at >= cursorOffset : hit.end <= cursorOffset;
+              } else if (cursorNode.compareDocumentPosition) {
+                const position = cursorNode.compareDocumentPosition(hit.node);
+                take = forward
+                  ? (position & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+                  : (position & Node.DOCUMENT_POSITION_PRECEDING) !== 0;
+              }
+              if (take) { found = i; break; }
+            }
+            if (found >= 0) index = found;
+          }
+          const hit = hits[index];
+          const range = document.createRange();
+          range.setStart(hit.node, hit.at);
+          range.setEnd(hit.node, Math.min(hit.end, (hit.node.nodeValue || "").length));
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+          const holder = hit.node.parentElement;
+          if (holder && holder.scrollIntoView) holder.scrollIntoView({block: "center"});
+          return true;
+        };
         window.readerPaint = function(marks) {
+          document.querySelectorAll("span[class^='reader-hl-']").forEach(span => {
+            if (!span.parentNode) return;
+            span.parentNode.insertBefore(document.createTextNode(span.textContent || ""), span);
+            span.parentNode.removeChild(span);
+          });
+          if (document.body.normalize) document.body.normalize();
           (marks || []).forEach(mark => {
             if (!mark.quote) return;
             const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
             while (walker.nextNode()) {
               const node = walker.currentNode;
-              if (!node.nodeValue || !node.parentNode) continue;
-              if (node.parentNode.closest && node.parentNode.closest("[class*='reader-hl']")) continue;
-              const at = node.nodeValue.indexOf(mark.quote);
-              if (at < 0) continue;
-              const span = document.createElement("span");
-              span.className = "reader-hl-" + (mark.color || 1);
-              span.textContent = mark.quote;
-              const text = node.nodeValue;
-              node.parentNode.insertBefore(document.createTextNode(text.slice(0, at)), node);
-              node.parentNode.insertBefore(span, node);
-              node.parentNode.insertBefore(document.createTextNode(text.slice(at + mark.quote.length)), node);
-              node.parentNode.removeChild(node);
-              break;
+              const value = node.nodeValue;
+              if (!value || !node.parentNode) continue;
+              const section = node.parentElement && node.parentElement.closest && node.parentElement.closest("section[data-index]");
+              const spine = section && section.dataset.index !== "" ? Number(section.dataset.index) : null;
+              const chapterText = section ? (section.dataset.chapter || "") : "";
+              const chapter = chapterText === "" ? null : Number(chapterText);
+              const hasSpine = Object.prototype.hasOwnProperty.call(mark, "spine");
+              const hasChapter = Object.prototype.hasOwnProperty.call(mark, "chapter");
+              if (hasSpine && spine !== mark.spine) continue;
+              if (!hasSpine && hasChapter && chapter !== mark.chapter) continue;
+              let from = 0;
+              let painted = false;
+              while (from < value.length) {
+                const at = value.indexOf(mark.quote, from);
+                if (at < 0) break;
+                const before = value.slice(0, at);
+                const after = value.slice(at + mark.quote.length);
+                const prefixOK = !mark.prefix || before.endsWith(mark.prefix);
+                const suffixOK = !mark.suffix || after.startsWith(mark.suffix);
+                if (prefixOK && suffixOK) {
+                  const span = document.createElement("span");
+                  span.className = "reader-hl-" + (mark.color || 1);
+                  span.textContent = value.slice(at, at + mark.quote.length);
+                  node.parentNode.insertBefore(document.createTextNode(value.slice(0, at)), node);
+                  node.parentNode.insertBefore(span, node);
+                  node.parentNode.insertBefore(document.createTextNode(after), node);
+                  node.parentNode.removeChild(node);
+                  painted = true;
+                  break;
+                }
+                from = at + mark.quote.length;
+              }
+              if (painted) break;
             }
           });
         };

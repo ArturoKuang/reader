@@ -27,6 +27,8 @@ final class ReaderSession: ObservableObject {
     var tutorAvailable = false
     var claudeSessionID: String?
     var onVaultFlush: (() -> Void)?
+    /// Writes vault notes immediately (⌘S). `onVaultFlush` only schedules a short debounce.
+    var onVaultSave: (() -> Void)?
     /// AppKit/WebKit refresh the current passage, then run the action. PDF is synchronous.
     var onCaptureSelection: ((@escaping () -> Void) -> Void)?
     var onSaveVaultState: (() -> Void)?
@@ -90,7 +92,9 @@ final class ReaderSession: ObservableObject {
     var onPageChange: (() -> Void)?
     var onAnnotationsChanged: (() -> Void)?
     var onSyncNeeded: (() -> Void)?
+    private var annotationObservers: [ObjectIdentifier: () -> Void] = [:]
     var onToast: ((String?) -> Void)?
+    var pendingMarkReveal: ReadingPosition?
     weak var undoManager: UndoManager?
     /// True when `state.json` already existed. A first open fits the page width.
     let hasSavedViewState: Bool
@@ -102,8 +106,26 @@ final class ReaderSession: ObservableObject {
     private var runner = ProcessCommandRunner()
     private var toastTimer: Timer?
     private var viewStateTimer: Timer?
+    private let globalObserver = UUID()
+    private let globalHub = GlobalMarkHub.shared
 
     var isPDF: Bool { bookURL.pathExtension.lowercased() == "pdf" }
+
+    /// Each pane registers itself. A new highlight then repaints every view of this book.
+    func watchAnnotations(_ owner: AnyObject, perform update: @escaping () -> Void) {
+        annotationObservers[ObjectIdentifier(owner)] = update
+    }
+
+    func unwatchAnnotations(_ owner: AnyObject) {
+        annotationObservers.removeValue(forKey: ObjectIdentifier(owner))
+    }
+
+    func publishAnnotationsChanged() {
+        onAnnotationsChanged?()
+        for update in annotationObservers.values {
+            update()
+        }
+    }
     var notes: [NoteEntry] { package.notes.notes }
     var words: [WordEntry] { package.words.words }
     var highlights: [HighlightEntry] { package.highlights.highlights }
@@ -137,13 +159,24 @@ final class ReaderSession: ObservableObject {
         self.outline = []
         self.settings = SettingsStore.load()
         self.provider = SettingsStore.load().defaultProvider
-        self.globalMarks = GlobalMarks.load(applicationSupport: AppPaths.support, fs: LocalFileSystem())
+        let fs = LocalFileSystem()
+        globalHub.ensureLoaded(applicationSupport: AppPaths.support, fs: fs)
+        self.globalMarks = globalHub.marks
+        globalHub.observe(globalObserver) { [weak self] marks in
+            guard let self else { return }
+            self.globalMarks = marks
+            self.objectWillChange.send()
+        }
         if isPDF {
             loadPDF()
         } else {
             loadEPUB()
         }
         prepareBookText()
+    }
+
+    deinit {
+        globalHub.unobserve(globalObserver)
     }
 
     func dismissNotice() {
@@ -188,7 +221,20 @@ final class ReaderSession: ObservableObject {
         package.marks.frontMatter = package.notes.frontMatter.withKind("marks")
         let fs = LocalFileSystem()
         try package.write(to: directory, fs: fs)
-        try GlobalMarks.save(globalMarks, applicationSupport: AppPaths.support, fs: fs)
+        globalHub.publish(globalMarks, source: globalObserver, applicationSupport: AppPaths.support, fs: fs)
+    }
+
+    /// Vault books have no sidecar. Local marks live under Application Support, next to the global file.
+    func persistVaultMarks() {
+        let fs = LocalFileSystem()
+        try? BookMarks.save(
+            package.marks.marks,
+            applicationSupport: AppPaths.support,
+            fingerprint: fingerprint,
+            document: bookURL.lastPathComponent,
+            fs: fs
+        )
+        globalHub.publish(globalMarks, source: globalObserver, applicationSupport: AppPaths.support, fs: fs)
     }
 
     func finishViewRestore() {
@@ -316,7 +362,7 @@ final class ReaderSession: ObservableObject {
             session.deleteHighlight(id: entry.id)
         }
         undoManager?.setActionName("Remove Highlight")
-        onAnnotationsChanged?()
+        publishAnnotationsChanged()
         dirty()
     }
 
@@ -444,6 +490,7 @@ final class ReaderSession: ObservableObject {
         pdfPage.rotation = next
         package.state.rotations[String(page)] = next
         dirty()
+        publishAnnotationsChanged()
     }
 
     func applyRotations() {
@@ -684,8 +731,10 @@ final class ReaderSession: ObservableObject {
     private func dirty() {
         captureState()
         if usesVault {
+            persistVaultMarks()
             onVaultFlush?()
         } else {
+            globalHub.publish(globalMarks, source: globalObserver, applicationSupport: AppPaths.support, fs: LocalFileSystem())
             onDirty?()
         }
         onSyncNeeded?()
@@ -844,7 +893,7 @@ final class ReaderSession: ObservableObject {
         }
         undoManager?.setActionName(name)
         annotationRevision += 1
-        onAnnotationsChanged?()
+        publishAnnotationsChanged()
         dirty()
     }
 
@@ -905,7 +954,7 @@ final class ReaderSession: ObservableObject {
         let previous = notes.first(where: { $0.id == id })?.body
         applyPendingNote(id: id, body: body)
         annotationRevision += 1
-        onAnnotationsChanged?()
+        publishAnnotationsChanged()
         dirty()
         undoManager?.registerUndo(withTarget: self) { session in
             if let previous {
@@ -913,7 +962,7 @@ final class ReaderSession: ObservableObject {
             } else {
                 session.applyPendingNote(id: id, body: "")
                 session.annotationRevision += 1
-                session.onAnnotationsChanged?()
+                session.publishAnnotationsChanged()
                 session.dirty()
             }
         }
@@ -939,7 +988,7 @@ final class ReaderSession: ObservableObject {
         if coalesced {
             for (id, body) in pending { applyPendingNote(id: id, body: body) }
             annotationRevision += 1
-            onAnnotationsChanged?()
+            publishAnnotationsChanged()
             dirty()
         } else {
             editAnnotations("Edit Note") {
@@ -1038,7 +1087,7 @@ final class ReaderSession: ObservableObject {
     func toggleMarginNotes() {
         showMarginNotes.toggle()
         package.state.showMarginNotes = showMarginNotes
-        onAnnotationsChanged?()
+        publishAnnotationsChanged()
         saveViewQuietly()
     }
 
@@ -1148,7 +1197,7 @@ final class ReaderSession: ObservableObject {
 // The mark store is mutated through a local copy. MarkController.handle takes inout MarkStore,
 // so the session method below replaces the broken pair above.
 extension ReaderSession {
-    func handleMarkEvent(_ event: NSEvent, documentFocused: Bool, position: ReadingPosition) -> (consumed: Bool, jump: ReadingPosition?) {
+    func handleMarkEvent(_ event: NSEvent, documentFocused: Bool, position: ReadingPosition) -> (consumed: Bool, jump: ReadingPosition?, otherBook: URL?) {
         let character = event.characters
         let textInput = event.window?.firstResponder is NSTextView
         let key = MarkKey(
@@ -1175,11 +1224,37 @@ extension ReaderSession {
         package.marks.marks = store.local
         globalMarks = store.global
         if changed { dirty() }
-        if let toast = result.toast { showToast(toast) }
+        if result.effect == .showList { setSidebar(.marks) }
+        if let toast = result.toast, result.effect != .showList { showToast(toast) }
         if let jump = result.jump, jump.openOtherBook, let path = jump.bookPath {
-            NSDocumentController.shared.openDocument(withContentsOf: URL(fileURLWithPath: path), display: true) { _, _, _ in }
-            return (!result.passThrough && result.effect != .none, nil)
+            return (!result.passThrough && result.effect != .none, jump.position, URL(fileURLWithPath: path))
         }
-        return (!result.passThrough && result.effect != .none, result.jump?.position)
+        return (!result.passThrough && result.effect != .none, result.jump?.position, nil)
+    }
+
+    func removeMark(id: String) {
+        var store = MarkStore(local: package.marks.marks, global: globalMarks)
+        let previousLocal = package.marks.marks
+        let previousGlobal = globalMarks
+        guard store.remove(id: id) else { return }
+        package.marks.marks = store.local
+        globalMarks = store.global
+        undoManager?.registerUndo(withTarget: self) { session in
+            session.restoreMarks(local: previousLocal, global: previousGlobal)
+        }
+        undoManager?.setActionName("Delete Mark")
+        dirty()
+    }
+
+    private func restoreMarks(local: [MarkEntry], global: [MarkEntry]) {
+        let previousLocal = package.marks.marks
+        let previousGlobal = globalMarks
+        package.marks.marks = local
+        globalMarks = global
+        undoManager?.registerUndo(withTarget: self) { session in
+            session.restoreMarks(local: previousLocal, global: previousGlobal)
+        }
+        undoManager?.setActionName("Delete Mark")
+        dirty()
     }
 }
