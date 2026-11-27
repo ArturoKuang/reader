@@ -480,7 +480,7 @@ export function BookReader({
           <ActivityIndicator style={styles.spinner} />
         )}
         {notice ? <Text style={styles.notice}>{notice}</Text> : null}
-        <Text style={styles.pageLabel} testID="reader-position">
+        <Text style={[styles.pageLabel, { bottom: insets.bottom + 8 }]} testID="reader-position">
           {pageLabel}
         </Text>
         {toast ? (
@@ -603,7 +603,6 @@ const styles = StyleSheet.create({
     position: "absolute",
     left: 0,
     right: 0,
-    bottom: 14,
     textAlign: "center",
     fontSize: 12,
     color: "#8E8E93",
