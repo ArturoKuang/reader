@@ -267,11 +267,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     // MARK: Toolbar
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .findCount, .vault, .inspectorTrackingSeparator, .toggleInspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .findCount, .syncStatus, .vault, .inspectorTrackingSeparator, .toggleInspector]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .findCount, .vault, .inspectorTrackingSeparator, .toggleInspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .search, .findCount, .syncStatus, .vault, .inspectorTrackingSeparator, .toggleInspector]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
@@ -337,6 +337,12 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.view = findCountLabel
             item.label = "Matches"
+            return item
+        case .syncStatus:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.view = NSHostingView(rootView: SyncStatusChipView())
+            item.label = "Sync"
+            item.paletteLabel = "Sync"
             return item
         case .vault:
             let item = NSMenuToolbarItem(itemIdentifier: itemIdentifier)
@@ -1029,5 +1035,6 @@ private extension NSToolbarItem.Identifier {
     static let zoomOut = NSToolbarItem.Identifier("zoomOut")
     static let appearance = NSToolbarItem.Identifier("appearance")
     static let inspector = NSToolbarItem.Identifier("inspector")
+    static let syncStatus = NSToolbarItem.Identifier("syncStatus")
     static let vault = NSToolbarItem.Identifier("vault")
 }

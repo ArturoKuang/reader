@@ -88,6 +88,19 @@ final class ReaderDocument: NSDocument {
         addWindowController(controller)
         session.undoManager = undoManager
         refreshSubtitle()
+        Task { @MainActor in
+            SyncController.shared.register(session)
+            SyncController.shared.applyOpeningPosition(to: session)
+        }
+    }
+
+    override func close() {
+        if let session {
+            Task { @MainActor in
+                SyncController.shared.unregister(session)
+            }
+        }
+        super.close()
     }
 
     /// Autosave writes the sidecar only. The book file is never replaced.

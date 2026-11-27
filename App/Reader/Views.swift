@@ -791,6 +791,8 @@ struct SettingsView: View {
         .tabItem { Text("AI") }
         VaultLibrarySettings()
             .tabItem { Text("Vault") }
+        PhoneSettingsView()
+            .tabItem { Text("Phone") }
         ShortcutList()
             .tabItem { Text("Shortcuts") }
         }
@@ -806,7 +808,7 @@ struct SettingsView: View {
             storeKey(account: "anthropic", value: anthropicKey)
         }
         .padding()
-        .frame(width: 500, height: 560)
+        .frame(width: 520, height: 600)
     }
 
     private var aiReady: Bool {

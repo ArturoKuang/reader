@@ -89,6 +89,7 @@ final class ReaderSession: ObservableObject {
     var onDirty: (() -> Void)?
     var onPageChange: (() -> Void)?
     var onAnnotationsChanged: (() -> Void)?
+    var onSyncNeeded: (() -> Void)?
     var onToast: ((String?) -> Void)?
     weak var undoManager: UndoManager?
     /// True when `state.json` already existed. A first open fits the page width.
@@ -347,7 +348,8 @@ final class ReaderSession: ObservableObject {
         let anchor = AnnotationAnchor(text: selection.text, page: selection.page, cfi: selection.cfi, section: selection.section ?? sectionTitle, prefix: selection.prefix, suffix: selection.suffix, rects: selection.rects)
         var opened: String?
         editAnnotations("Add Note") {
-            let created = AnnotationEdit.addNote(toSelection: anchor, color: package.state.lastHighlightColor, highlightID: IDs.make("h"), noteID: IDs.make("n"), now: ISO8601DateFormatter().string(from: Date()), package: &package)
+            let highlightID = IDs.make("h")
+            let created = AnnotationEdit.addNote(toSelection: anchor, color: package.state.lastHighlightColor, highlightID: highlightID, noteID: highlightID, now: ISO8601DateFormatter().string(from: Date()), package: &package)
             if let noteID = created.note?.id, !text.isEmpty {
                 AnnotationEdit.updateNoteBody(id: noteID, body: text, now: ISO8601DateFormatter().string(from: Date()), package: &package)
                 if let index = package.notes.notes.firstIndex(where: { $0.id == noteID }) {
@@ -368,7 +370,8 @@ final class ReaderSession: ObservableObject {
     func addNote(to selection: SelectionContext, body: String, ai: Bool, provider: String?) {
         let anchor = AnnotationAnchor(text: selection.text, page: selection.page, cfi: selection.cfi, section: selection.section ?? sectionTitle, prefix: selection.prefix, suffix: selection.suffix, rects: selection.rects)
         editAnnotations("Add Note") {
-            let created = AnnotationEdit.addNote(toSelection: anchor, color: package.state.lastHighlightColor, highlightID: IDs.make("h"), noteID: IDs.make("n"), now: ISO8601DateFormatter().string(from: Date()), package: &package)
+            let highlightID = IDs.make("h")
+            let created = AnnotationEdit.addNote(toSelection: anchor, color: package.state.lastHighlightColor, highlightID: highlightID, noteID: highlightID, now: ISO8601DateFormatter().string(from: Date()), package: &package)
             if let noteID = created.note?.id {
                 AnnotationEdit.updateNoteBody(id: noteID, body: body, now: ISO8601DateFormatter().string(from: Date()), package: &package)
                 if let index = package.notes.notes.firstIndex(where: { $0.id == noteID }) {
@@ -636,7 +639,7 @@ final class ReaderSession: ObservableObject {
                 toSelection: AnnotationAnchor(text: sectionTitle.isEmpty ? "Page note" : sectionTitle, page: page, section: sectionTitle),
                 color: package.state.lastHighlightColor,
                 highlightID: nil,
-                noteID: IDs.make("n"),
+                noteID: IDs.make("h"),
                 now: ISO8601DateFormatter().string(from: Date()),
                 package: &package
             )
@@ -685,6 +688,7 @@ final class ReaderSession: ObservableObject {
         } else {
             onDirty?()
         }
+        onSyncNeeded?()
         objectWillChange.send()
     }
 
@@ -850,7 +854,8 @@ final class ReaderSession: ObservableObject {
         let anchor = AnnotationAnchor(text: selection.text, page: selection.page, cfi: selection.cfi, section: selection.section ?? sectionTitle, prefix: selection.prefix, suffix: selection.suffix, rects: selection.rects)
         var opened: String?
         editAnnotations("Add Note") {
-            let created = AnnotationEdit.addNote(toSelection: anchor, color: package.state.lastHighlightColor, highlightID: IDs.make("h"), noteID: IDs.make("n"), now: ISO8601DateFormatter().string(from: Date()), package: &package)
+            let highlightID = IDs.make("h")
+            let created = AnnotationEdit.addNote(toSelection: anchor, color: package.state.lastHighlightColor, highlightID: highlightID, noteID: highlightID, now: ISO8601DateFormatter().string(from: Date()), package: &package)
             opened = created.highlight?.id ?? created.note?.id
         }
         if let opened { onPresentNote?(opened) }
@@ -1047,7 +1052,7 @@ final class ReaderSession: ObservableObject {
         return sectionTitle
     }
 
-    private func currentEPUBCFI() -> String? {
+    func currentEPUBCFI() -> String? {
         guard let epub else { return nil }
         let index = min(max(page - 1, 0), max(epub.spine.count - 1, 0))
         return EPUBCFI.make(spineIndex: index, start: 0, end: 0).value

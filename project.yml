@@ -11,6 +11,8 @@ settings:
 packages:
   ReaderCore:
     path: Packages/ReaderCore
+  ReaderSync:
+    path: Packages/ReaderSync
 targets:
   Reader:
     type: application
@@ -23,6 +25,8 @@ targets:
     dependencies:
       - package: ReaderCore
         product: ReaderCore
+      - package: ReaderSync
+        product: ReaderSync
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.reader.Reader
       PRODUCT_NAME: Reader
