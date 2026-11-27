@@ -12,9 +12,10 @@ import {
 import WebView, { type WebViewMessageEvent, type WebViewProps } from "react-native-webview";
 import type { HighlightRecord } from "../contract/types";
 import { captureAnchor } from "../highlight/selection";
-import { addHighlight, removeHighlight, saveNote } from "../highlight/store";
-import { applyLocated } from "../reader/applyLocated";
+import { normalizeEpubSection } from "../highlight/epubSection";
+import { addHighlight, persistReanchoredHighlight, removeHighlight, saveNote } from "../highlight/store";
 import { parseViewerMessage } from "../reader/bridge";
+import { SHOW_HIGHLIGHT_HARNESS } from "./devFlags";
 import type { HostToViewer, ViewerHighlight } from "../reader/bridge";
 import { File } from "expo-file-system";
 import { readAssetBase64, viewerRoot } from "../reader/installViewer";
@@ -36,6 +37,13 @@ const idleSync: SyncStatus = {
 };
 
 type Format = "pdf" | "epub";
+
+function sectionIndex(section: string | undefined): number {
+  if (!section) return 0;
+  const match = /chapter\s+(\d+)/i.exec(section);
+  if (match) return Math.max(0, Number(match[1]) - 1);
+  return 0;
+}
 
 function hexFor(color: number): string {
   return tokens.highlight.palette.find((swatch) => swatch.id === color)?.hex ?? "#F2C94C";
@@ -69,14 +77,6 @@ export function ReaderHome({
   onRetry?: () => void;
 } = {}) {
   const [format, setFormat] = useState<Format | null>(null);
-  useEffect(() => {
-    if (!format) return;
-    const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
-      setFormat(null);
-      return true;
-    });
-    return () => subscription.remove();
-  }, [format]);
   if (!format) {
     return (
       <View style={styles.home}>
@@ -164,6 +164,23 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
     setDraft(notes.find((note) => note.id === id)?.body ?? "");
   }
 
+  function dismissSheet() {
+    setActiveId(null);
+    setDraft("");
+  }
+
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
+      if (activeId) {
+        dismissSheet();
+        return true;
+      }
+      onBack();
+      return true;
+    });
+    return () => subscription.remove();
+  }, [activeId, onBack]);
+
   function onViewerMessage(raw: string) {
     const message = parseViewerMessage(raw);
     if (!message) return;
@@ -191,7 +208,7 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
         message.before.length,
         message.before.length + message.quote.length,
         message.page,
-        message.section,
+        format === "epub" ? normalizeEpubSection(message.section, sectionIndex(message.section)) : message.section,
       );
       if (!anchor.quote.trim()) return;
       const color = shelfRef.current.lastColor;
@@ -210,20 +227,30 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
       }
       return;
     }
+    if (message.type === "open-highlight") {
+      if (shelfRef.current.highlights.some((highlight) => highlight.id === message.id)) {
+        openSheet(message.id);
+        setNotice(null);
+      }
+      return;
+    }
     if (message.type === "located") {
-      const current = shelfRef.current.highlights.find((highlight) => highlight.id === message.id);
-      if (!current) return;
+      const persisted = persistReanchoredHighlight(
+        shelfRef.current.highlights,
+        shelfRef.current.notes,
+        message,
+      );
+      if (!persisted) return;
       if (!message.found) {
         setNotice("The quote was not found.");
         return;
       }
-      const updated = applyLocated(current, message);
-      const highlights = shelfRef.current.highlights.map((highlight) =>
-        highlight.id === updated.id ? updated : highlight,
-      );
-      void commit({ ...shelfRef.current, highlights });
-      send({ type: "paint", highlight: toViewer(updated) });
-      setNotice(format === "pdf" ? `Re-anchored on page ${updated.page ?? "?"}` : "Re-anchored by quote");
+      const updated = persisted.highlights.find((highlight) => highlight.id === message.id);
+      void commit({ ...shelfRef.current, highlights: persisted.highlights, notes: persisted.notes });
+      if (updated) send({ type: "paint", highlight: toViewer(updated) });
+      if (message.reason !== "restore") {
+        setNotice(format === "pdf" ? `Re-anchored on page ${updated?.page ?? "?"}` : "Re-anchored by quote");
+      }
     }
   }
 
@@ -291,74 +318,86 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
       </View>
       <Text style={styles.caption}>Long-press a word. Color {shelf.lastColor} is applied at once.</Text>
       {error ? <Text style={styles.error}>{error}</Text> : null}
-      {uri && base64 && (format === "epub" || workerSource) ? (
-        <ReaderWeb
-          testID="reader-surface"
-          style={styles.web}
-          originWhitelist={["*"]}
-          source={{ uri }}
-          allowFileAccess
-          allowFileAccessFromFileURLs
-          allowUniversalAccessFromFileURLs
-          allowingReadAccessToURL={uri.slice(0, uri.lastIndexOf("/") + 1)}
-          onMessage={(event: WebViewMessageEvent) => onViewerMessage(event.nativeEvent.data)}
-          ref={webRef}
-        />
-      ) : (
-        <ActivityIndicator style={styles.spinner} />
-      )}
-      {notice ? <Text style={styles.caption}>{notice}</Text> : null}
-      {active ? (
-        <View testID="highlight-sheet" style={styles.sheet}>
-          <Text style={styles.cardHeading}>Highlight</Text>
-          <Text style={styles.quote}>“{active.quote}”</Text>
-          <Text style={styles.caption}>
-            {active.page ? `Page ${active.page}` : active.cfi ? "EPUB CFI" : "No location hint"}
-            {activeNote ? " · note attached" : ""}
-          </Text>
-          <View style={styles.swatches}>
-            {tokens.highlight.palette.map((swatch) => (
-              <Pressable
-                key={swatch.id}
-                accessibilityLabel={`Highlight color ${swatch.id}`}
-                testID={`highlight-color-${swatch.id}`}
-                onPress={() => chooseColor(swatch.id)}
-                style={[
-                  styles.swatch,
-                  { backgroundColor: swatch.hex },
-                  active.color === swatch.id ? styles.swatchOn : null,
-                ]}
-              />
-            ))}
-          </View>
-          <TextInput
-            multiline
-            onChangeText={setDraft}
-            placeholder="Write a note…"
-            style={styles.input}
-            value={draft}
+      <View style={styles.surface}>
+        {uri && base64 && (format === "epub" || workerSource) ? (
+          <ReaderWeb
+            testID="reader-surface"
+            style={styles.web}
+            originWhitelist={["*"]}
+            source={{ uri }}
+            allowFileAccess
+            allowFileAccessFromFileURLs
+            allowUniversalAccessFromFileURLs
+            allowingReadAccessToURL={uri.slice(0, uri.lastIndexOf("/") + 1)}
+            onMessage={(event: WebViewMessageEvent) => onViewerMessage(event.nativeEvent.data)}
+            ref={webRef}
           />
-          <View style={styles.actions}>
-            <Pressable onPress={saveActiveNote} style={styles.button}>
-              <Text style={styles.buttonLabel}>
-                {draft.trim().length === 0 && activeNote ? "Remove note" : "Save note"}
+        ) : (
+          <ActivityIndicator style={styles.spinner} />
+        )}
+        {notice ? <Text style={styles.notice}>{notice}</Text> : null}
+        {active ? (
+          <View style={styles.sheetOverlay} pointerEvents="box-none">
+            <Pressable
+              testID="highlight-sheet-backdrop"
+              accessibilityLabel="Dismiss highlight sheet"
+              onPress={dismissSheet}
+              style={styles.backdrop}
+            />
+            <View testID="highlight-sheet" style={styles.sheet}>
+              <View style={styles.handle} accessibilityLabel="Dismiss handle" />
+              <Text style={styles.cardHeading}>Highlight</Text>
+              <Text style={styles.quote}>“{active.quote}”</Text>
+              <Text style={styles.sheetCaption}>
+                {active.page ? `Page ${active.page}` : active.section ? active.section : "No location hint"}
+                {activeNote ? " · note attached" : ""}
               </Text>
-            </Pressable>
-            <Pressable testID="remove-highlight" onPress={removeActive} style={styles.buttonSecondary}>
-              <Text style={styles.buttonLabelDark}>Remove highlight</Text>
-            </Pressable>
-            <Pressable onPress={scramble} style={styles.buttonSecondary}>
-              <Text style={styles.buttonLabelDark}>Scramble hint</Text>
-            </Pressable>
-            <Pressable onPress={reanchor} style={styles.buttonSecondary}>
-              <Text style={styles.buttonLabelDark}>Re-anchor by quote</Text>
-            </Pressable>
-            <Pressable onPress={() => setActiveId(null)} style={styles.buttonSecondary}>
-              <Text style={styles.buttonLabelDark}>Close</Text>
-            </Pressable>
+              <View style={styles.swatches}>
+                {tokens.highlight.palette.map((swatch) => (
+                  <Pressable
+                    key={swatch.id}
+                    accessibilityLabel={`Highlight color ${swatch.id}`}
+                    testID={`highlight-color-${swatch.id}`}
+                    onPress={() => chooseColor(swatch.id)}
+                    style={[
+                      styles.swatch,
+                      { backgroundColor: swatch.hex },
+                      active.color === swatch.id ? styles.swatchOn : null,
+                    ]}
+                  />
+                ))}
+              </View>
+              <TextInput
+                multiline
+                onChangeText={setDraft}
+                placeholder="Write a note…"
+                style={styles.input}
+                value={draft}
+              />
+              <View style={styles.actions}>
+                <Pressable onPress={saveActiveNote} style={styles.button}>
+                  <Text style={styles.buttonLabel}>
+                    {draft.trim().length === 0 && activeNote ? "Remove note" : "Save note"}
+                  </Text>
+                </Pressable>
+                <Pressable testID="remove-highlight" onPress={removeActive} style={styles.buttonSecondary}>
+                  <Text style={styles.buttonLabelDark}>Remove highlight</Text>
+                </Pressable>
+                {SHOW_HIGHLIGHT_HARNESS ? (
+                  <>
+                    <Pressable onPress={scramble} style={styles.buttonSecondary}>
+                      <Text style={styles.buttonLabelDark}>Scramble hint</Text>
+                    </Pressable>
+                    <Pressable onPress={reanchor} style={styles.buttonSecondary}>
+                      <Text style={styles.buttonLabelDark}>Re-anchor by quote</Text>
+                    </Pressable>
+                  </>
+                ) : null}
+              </View>
+            </View>
           </View>
-        </View>
-      ) : null}
+        ) : null}
+      </View>
     </View>
   );
 }
@@ -427,12 +466,38 @@ const styles = StyleSheet.create({
   web: { flex: 1, backgroundColor: tokens.canvas },
   spinner: { marginTop: tokens.space[5] },
   error: { color: "#EB5757", paddingHorizontal: tokens.space[3] },
+  surface: { flex: 1 },
+  notice: {
+    color: "#636366",
+    fontSize: tokens.type.caption.size,
+    lineHeight: tokens.type.caption.lineHeight,
+    paddingHorizontal: tokens.space[3],
+  },
+  sheetOverlay: {
+    ...StyleSheet.absoluteFill,
+    justifyContent: "flex-end",
+  },
+  backdrop: { flex: 1, backgroundColor: "rgba(0, 0, 0, 0.2)" },
   sheet: {
     backgroundColor: tokens.paper,
     borderTopLeftRadius: tokens.radius.sheet,
     borderTopRightRadius: tokens.radius.sheet,
     padding: tokens.space[3],
     gap: tokens.space[2],
+  },
+  handle: {
+    alignSelf: "center",
+    width: 36,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: tokens.line,
+    marginBottom: tokens.space[1],
+  },
+  sheetCaption: {
+    color: "#636366",
+    fontSize: tokens.type.caption.size,
+    lineHeight: tokens.type.caption.lineHeight,
+    textAlign: "left",
   },
   swatches: { flexDirection: "row", flexWrap: "wrap", gap: tokens.space[2] },
   swatch: { width: tokens.touchTarget, height: tokens.touchTarget, borderRadius: tokens.touchTarget / 2 },

@@ -157,21 +157,41 @@ function suppressNativeSelection(doc) {
   doc.addEventListener("contextmenu", (event) => event.preventDefault());
   doc.addEventListener("selectstart", (event) => event.preventDefault());
 }
-function watchLongPress(doc, onRange) {
+function highlightIdAtPoint(x, y) {
+  const marks = document.querySelectorAll(".mark[data-id]");
+  for (const mark of marks) {
+    const box = mark.getBoundingClientRect();
+    if (x >= box.left && x <= box.right && y >= box.top && y <= box.bottom) return mark.dataset.id;
+  }
+  return null;
+}
+function looksLikePath(value) {
+  return /\/|\.(x?html?|xml)$/i.test(value);
+}
+function epubSectionLabel(raw, index, doc) {
+  const heading = doc && (doc.querySelector("h1") && (doc.querySelector("h1").textContent || "").trim() || (doc.title || "").trim());
+  const candidate = (heading || raw || "").trim();
+  if (candidate && !looksLikePath(candidate)) return candidate;
+  return "Chapter " + (index + 1);
+}
+function watchLongPress(doc, onRange, onTapHighlight) {
   suppressNativeSelection(doc);
   let timer = 0;
   let x = 0;
   let y = 0;
   let active = false;
-  function clear() {
-    active = false;
+  function clearTimer() {
     if (timer) {
       clearTimeout(timer);
       timer = 0;
     }
   }
+  function cancel() {
+    active = false;
+    clearTimer();
+  }
   function start(clientX, clientY) {
-    clear();
+    cancel();
     x = clientX;
     y = clientY;
     active = true;
@@ -184,7 +204,16 @@ function watchLongPress(doc, onRange) {
   }
   function move(clientX, clientY) {
     if (!active) return;
-    if (Math.abs(clientX - x) > 10 || Math.abs(clientY - y) > 10) clear();
+    if (Math.abs(clientX - x) > 10 || Math.abs(clientY - y) > 10) cancel();
+  }
+  function end(clientX, clientY) {
+    const awaiting = active && timer;
+    const startX = x;
+    const startY = y;
+    cancel();
+    if (!awaiting) return;
+    if (Math.abs(clientX - startX) > 10 || Math.abs(clientY - startY) > 10) return;
+    if (typeof onTapHighlight === "function") onTapHighlight(startX, startY);
   }
   doc.addEventListener("touchstart", (event) => {
     const touch = event.touches && event.touches[0];
@@ -196,8 +225,11 @@ function watchLongPress(doc, onRange) {
     if (!touch) return;
     move(touch.clientX, touch.clientY);
   }, { passive: true });
-  doc.addEventListener("touchend", clear);
-  doc.addEventListener("touchcancel", clear);
+  doc.addEventListener("touchend", (event) => {
+    const touch = event.changedTouches && event.changedTouches[0];
+    end(touch ? touch.clientX : x, touch ? touch.clientY : y);
+  });
+  doc.addEventListener("touchcancel", cancel);
   doc.addEventListener("pointerdown", (event) => {
     if (event.pointerType === "touch") return;
     start(event.clientX, event.clientY);
@@ -208,11 +240,11 @@ function watchLongPress(doc, onRange) {
   });
   doc.addEventListener("pointerup", (event) => {
     if (event.pointerType === "touch") return;
-    clear();
+    end(event.clientX, event.clientY);
   });
   doc.addEventListener("pointercancel", (event) => {
     if (event.pointerType === "touch") return;
-    clear();
+    cancel();
   });
 }
 function rgba(hex) {
@@ -263,12 +295,13 @@ const highlights = new Map();
 function pageRecord(element) {
   return pages.find((page) => page.element === element);
 }
-function paint(highlight) {
+function paint(highlight, ignorePageHint) {
   highlights.set(highlight.id, highlight);
+  let painted = 0;
   for (const page of pages) {
     const marks = page.element.querySelector(".marks");
     marks.querySelectorAll('[data-id="' + highlight.id + '"]').forEach((node) => node.remove());
-    if (highlight.page && page.pageNumber !== highlight.page) continue;
+    if (!ignorePageHint && highlight.page && page.pageNumber !== highlight.page) continue;
     const index = findQuote(page.text, highlight.quote, highlight.prefix, highlight.suffix);
     if (index === null) continue;
     const layer = page.textLayer;
@@ -285,7 +318,32 @@ function paint(highlight) {
       mark.style.height = rect.height + "px";
       mark.style.background = rgba(highlight.hex);
       marks.append(mark);
+      painted += 1;
     }
+  }
+  return painted > 0;
+}
+function pdfHintResolves(highlight) {
+  if (!highlight.page) return false;
+  const page = pages.find((item) => item.pageNumber === highlight.page);
+  if (!page) return false;
+  return findQuote(page.text, highlight.quote, highlight.prefix, highlight.suffix) !== null;
+}
+function restoreHighlight(highlight) {
+  if (pdfHintResolves(highlight) && paint(highlight)) return;
+  const located = locate(highlight, "restore");
+  if (located.found) {
+    const updated = Object.assign({}, highlight, {
+      page: located.page,
+      section: located.section,
+      prefix: located.prefix,
+      suffix: located.suffix,
+      rects: located.rects && located.rects.length ? located.rects : highlight.rects,
+    });
+    paint(updated, true);
+    emit(located);
+  } else {
+    paint(highlight, true);
   }
 }
 function removeHighlight(id) {
@@ -317,9 +375,10 @@ function locate(request) {
       prefix: lastGraphemes(before, 80),
       suffix: firstGraphemes(after, 80),
       rects,
+      reason: request.reason || "request",
     };
   }
-  return { type: "located", id: request.id, found: false, prefix: request.prefix, suffix: request.suffix, rects: [] };
+  return { type: "located", id: request.id, found: false, prefix: request.prefix, suffix: request.suffix, rects: [], reason: request.reason || "request" };
 }
 function selectionFrom(range) {
   const pageElement = (range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement).closest(".page");
@@ -393,16 +452,19 @@ async function openPdf(base64, workerSource) {
     slices.push({ page: number, section: "Page " + number, text });
   }
   emit({ type: "corpus", slices });
-  watchLongPress(document, (range) => selectionFrom(range));
+  watchLongPress(document, (range) => selectionFrom(range), (clientX, clientY) => {
+    const id = highlightIdAtPoint(clientX, clientY);
+    if (id) emit({ type: "open-highlight", id });
+  });
 }
 window.__hostMessage = async (raw) => {
   const message = JSON.parse(raw);
   try {
     if (message.type === "open-pdf") await openPdf(message.base64, message.workerSource);
-    else if (message.type === "restore") message.highlights.forEach(paint);
+    else if (message.type === "restore") message.highlights.forEach(restoreHighlight);
     else if (message.type === "paint") paint(message.highlight);
     else if (message.type === "remove") removeHighlight(message.id);
-    else if (message.type === "locate") emit(locate(message));
+    else if (message.type === "locate") emit(locate(Object.assign({ reason: "request" }, message)));
   } catch (error) {
     emit({ type: "error", message: String(error && error.message || error) });
   }
@@ -433,14 +495,37 @@ const view = document.createElement("foliate-view");
 document.body.append(view);
 const highlights = new Map();
 let sections = [];
-function paint(highlight) {
+async function paint(highlight) {
   const previous = highlights.get(highlight.id);
   if (previous && previous.cfi && previous.cfi !== highlight.cfi) {
     view.deleteAnnotation({ value: previous.cfi }).catch(() => {});
   }
   highlights.set(highlight.id, highlight);
-  if (!highlight.cfi) return;
-  view.addAnnotation({ value: highlight.cfi, color: highlight.hex }).catch(() => {});
+  if (!highlight.cfi) return false;
+  try {
+    const result = await view.addAnnotation({ value: highlight.cfi, color: highlight.hex });
+    return !!result;
+  } catch (error) {
+    return false;
+  }
+}
+async function restoreHighlight(highlight) {
+  let painted = false;
+  if (highlight.cfi) painted = await paint(highlight);
+  if (painted) return;
+  const located = await locate(Object.assign({ reason: "restore" }, highlight));
+  if (located.found && located.cfi) {
+    const updated = Object.assign({}, highlight, {
+      cfi: located.cfi,
+      section: located.section,
+      prefix: located.prefix,
+      suffix: located.suffix,
+    });
+    await paint(updated);
+    emit(located);
+  } else if (highlight.cfi) {
+    await paint(highlight);
+  }
 }
 view.addEventListener("draw-annotation", (event) => {
   event.detail.draw(Overlayer.highlight, { color: event.detail.annotation.color });
@@ -455,7 +540,7 @@ async function sectionDocs() {
     if (section.linear === "no") continue;
     const doc = await section.createDocument();
     const text = plainText(doc.body);
-    docs.push({ index, doc, text, section: section.id || ("Chapter " + (index + 1)) });
+    docs.push({ index, doc, text, section: epubSectionLabel(section.id, index, doc) });
   }
   return docs;
 }
@@ -477,9 +562,10 @@ async function locate(request) {
       prefix: lastGraphemes(before, 80),
       suffix: firstGraphemes(after, 80),
       rects: [],
+      reason: request.reason || "request",
     };
   }
-  return { type: "located", id: request.id, found: false, prefix: request.prefix, suffix: request.suffix, rects: [] };
+  return { type: "located", id: request.id, found: false, prefix: request.prefix, suffix: request.suffix, rects: [], reason: request.reason || "request" };
 }
 view.addEventListener("load", (event) => {
   const { doc, index } = event.detail;
@@ -496,10 +582,20 @@ view.addEventListener("load", (event) => {
       before: text.slice(0, Math.min(start, end)),
       after: text.slice(Math.max(start, end)),
       cfi: view.getCFI(index, range),
-      section: known ? known.section : "Chapter " + (index + 1),
+      section: known ? known.section : epubSectionLabel("", index, doc),
       rects: [],
     });
   });
+});
+view.addEventListener("show-annotation", (event) => {
+  const cfi = event.detail && event.detail.value;
+  if (!cfi) return;
+  for (const highlight of highlights.values()) {
+    if (highlight.cfi === cfi) {
+      emit({ type: "open-highlight", id: highlight.id });
+      return;
+    }
+  }
 });
 async function openEpub(base64) {
   const binary = atob(base64);
@@ -518,14 +614,16 @@ window.__hostMessage = async (raw) => {
   const message = JSON.parse(raw);
   try {
     if (message.type === "open-epub") await openEpub(message.base64);
-    else if (message.type === "restore") for (const highlight of message.highlights) paint(highlight);
-    else if (message.type === "paint") paint(message.highlight);
+    else if (message.type === "restore") {
+      for (const highlight of message.highlights) await restoreHighlight(highlight);
+    }
+    else if (message.type === "paint") await paint(message.highlight);
     else if (message.type === "remove") {
       const current = highlights.get(message.id);
       highlights.delete(message.id);
       if (current && current.cfi) view.deleteAnnotation({ value: current.cfi }).catch(() => {});
     }
-    else if (message.type === "locate") emit(await locate(message));
+    else if (message.type === "locate") emit(await locate(Object.assign({ reason: "request" }, message)));
   } catch (error) {
     emit({ type: "error", message: String(error && error.message || error) });
   }

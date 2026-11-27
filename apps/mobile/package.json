@@ -7,7 +7,7 @@
     "start": "expo start",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/contract/*.test.ts src/highlight/*.test.ts",
+    "test": "tsx --test src/contract/*.test.ts src/highlight/*.test.ts && jest --watchman=false --ci",
     "test:jest": "jest --watchman=false --ci",
     "lint": "expo lint"
   },

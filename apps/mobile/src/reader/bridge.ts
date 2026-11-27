@@ -45,11 +45,13 @@ export type ViewerToHost =
       prefix: string;
       suffix: string;
       rects: number[][];
+      reason?: "restore" | "request";
     }
+  | { type: "open-highlight"; id: string }
   | { type: "error"; message: string };
 
 const hostTypes = new Set(["open-pdf", "open-epub", "restore", "paint", "remove", "locate"]);
-const viewerTypes = new Set(["ready", "selection", "corpus", "located", "error"]);
+const viewerTypes = new Set(["ready", "selection", "corpus", "located", "open-highlight", "error"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
