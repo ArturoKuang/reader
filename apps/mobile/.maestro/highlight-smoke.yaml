@@ -1,0 +1,56 @@
+# Highlight smoke for Reader QA.
+# Android application id: com.reader
+#
+# The page is a WebView (testID reader-surface). longPressOn that id presses
+# the middle of the page, which is where the sample text is drawn.
+# Selectors: library-pdf, library-epub, reader-surface, highlight-sheet,
+# highlight-color-1 … highlight-color-6, remove-highlight, reader-library.
+appId: com.reader
+---
+- launchApp
+- assertVisible:
+    id: library-pdf
+- tapOn:
+    id: library-pdf
+- extendedWaitUntil:
+    visible:
+      id: reader-surface
+    timeout: 30000
+- longPressOn:
+    id: reader-surface
+- extendedWaitUntil:
+    visible:
+      id: highlight-sheet
+    timeout: 10000
+- tapOn:
+    id: highlight-color-2
+- tapOn:
+    id: remove-highlight
+- assertNotVisible:
+    id: highlight-sheet
+- tapOn:
+    id: reader-library
+- assertVisible:
+    id: library-epub
+- tapOn:
+    id: library-epub
+- extendedWaitUntil:
+    visible:
+      id: reader-surface
+    timeout: 30000
+- longPressOn:
+    id: reader-surface
+- extendedWaitUntil:
+    visible:
+      id: highlight-sheet
+    timeout: 10000
+- tapOn:
+    id: highlight-color-3
+- tapOn:
+    id: remove-highlight
+- assertNotVisible:
+    id: highlight-sheet
+- tapOn:
+    id: reader-library
+- assertVisible:
+    id: library-pdf

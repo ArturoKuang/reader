@@ -10,7 +10,12 @@ const chip = tokens.syncStatus;
 export function SyncStatusChip({ status, onPress }: { status: SyncStatus; onPress?: () => void }) {
   const tone = chip[status.state];
   return (
-    <Pressable accessibilityRole="button" accessibilityLabel={`sync ${status.state}`} onPress={onPress}>
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`sync ${status.state}`}
+      testID="sync-status-chip"
+      onPress={onPress}
+    >
       <View style={styles.row}>
         <View style={[styles.dot, { backgroundColor: tone.dot }]} />
         <Text>{tone.label}</Text>

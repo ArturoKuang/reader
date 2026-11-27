@@ -88,14 +88,14 @@ export function ReaderHome({
         <Text style={styles.caption}>
           Long-press a word. It is highlighted in the last color, then the sheet can change the color, add a note, or remove it.
         </Text>
-        <Pressable onPress={() => setFormat("pdf")} style={styles.card}>
+        <Pressable testID="library-pdf" onPress={() => setFormat("pdf")} style={styles.card}>
           <Text style={styles.cardHeading}>{sampleTitles.pdf}</Text>
           <Text style={styles.caption}>PDF · text layer · {pdfBook.fingerprint}</Text>
           {sync.pausedBookIds.includes(pdfBook.fingerprint) ? (
             <Text>{tokens.syncStatus.storageFull.badge}</Text>
           ) : null}
         </Pressable>
-        <Pressable onPress={() => setFormat("epub")} style={styles.card}>
+        <Pressable testID="library-epub" onPress={() => setFormat("epub")} style={styles.card}>
           <Text style={styles.cardHeading}>{sampleTitles.epub}</Text>
           <Text style={styles.caption}>EPUB · foliate-js · {epubBook.epubId}</Text>
           {sync.pausedBookIds.includes(epubBook.fingerprint) ? (
@@ -284,7 +284,7 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
   return (
     <View style={styles.reader}>
       <View style={styles.header}>
-        <Pressable onPress={onBack} style={styles.back}>
+        <Pressable testID="reader-library" onPress={onBack} style={styles.back}>
           <Text style={styles.buttonLabelDark}>Library</Text>
         </Pressable>
         <Text style={styles.cardHeading}>{format === "pdf" ? "PDF" : "EPUB"}</Text>
@@ -293,6 +293,7 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
       {error ? <Text style={styles.error}>{error}</Text> : null}
       {uri && base64 && (format === "epub" || workerSource) ? (
         <ReaderWeb
+          testID="reader-surface"
           style={styles.web}
           originWhitelist={["*"]}
           source={{ uri }}
@@ -308,7 +309,7 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
       )}
       {notice ? <Text style={styles.caption}>{notice}</Text> : null}
       {active ? (
-        <View style={styles.sheet}>
+        <View testID="highlight-sheet" style={styles.sheet}>
           <Text style={styles.cardHeading}>Highlight</Text>
           <Text style={styles.quote}>“{active.quote}”</Text>
           <Text style={styles.caption}>
@@ -320,6 +321,7 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
               <Pressable
                 key={swatch.id}
                 accessibilityLabel={`Highlight color ${swatch.id}`}
+                testID={`highlight-color-${swatch.id}`}
                 onPress={() => chooseColor(swatch.id)}
                 style={[
                   styles.swatch,
@@ -342,7 +344,7 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
                 {draft.trim().length === 0 && activeNote ? "Remove note" : "Save note"}
               </Text>
             </Pressable>
-            <Pressable onPress={removeActive} style={styles.buttonSecondary}>
+            <Pressable testID="remove-highlight" onPress={removeActive} style={styles.buttonSecondary}>
               <Text style={styles.buttonLabelDark}>Remove highlight</Text>
             </Pressable>
             <Pressable onPress={scramble} style={styles.buttonSecondary}>
