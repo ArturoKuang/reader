@@ -21,9 +21,11 @@ if ! command -v swift >/dev/null; then
   exit 1
 fi
 
+REAL_HOME="$HOME"
 STAMP="$(date +%Y%m%d-%H%M%S)-$$"
 SCRATCH="$(mktemp -d "/tmp/reader-smoke-${STAMP}-XXXX")"
 DERIVED="$SCRATCH/derived"
+BUNDLE_ID=""
 APP_PID=""
 APP_LOG="$SCRATCH/app.log"
 
@@ -47,6 +49,11 @@ cleanup() {
       fi
     fi
     APP_PID=""
+  fi
+  if [[ -n "${BUNDLE_ID:-}" ]]; then
+    defaults delete "$BUNDLE_ID" >/dev/null 2>&1 || true
+    rm -f "$REAL_HOME/Library/Preferences/${BUNDLE_ID}.plist"           "$REAL_HOME/Library/Preferences/${BUNDLE_ID}.plist.lockfile"
+    rm -rf "$REAL_HOME/Library/Saved Application State/${BUNDLE_ID}.savedState"            "$REAL_HOME/Library/Caches/${BUNDLE_ID}"            "$REAL_HOME/Library/HTTPStorages/${BUNDLE_ID}"
   fi
   rm -rf "$SCRATCH"
   return "$status"
@@ -95,9 +102,11 @@ fi
 
 echo "==> 3. isolated launch of $BUNDLE_ID"
 HOME_DIR="$SCRATCH/home"
+SUPPORT_DIR="$SCRATCH/support"
+CACHES_DIR="$SCRATCH/caches"
 PDF_DIR="$SCRATCH/docs"
 LAUNCH_TMP="$SCRATCH/tmp"
-mkdir -p "$HOME_DIR" "$PDF_DIR" "$LAUNCH_TMP"
+mkdir -p "$HOME_DIR" "$SUPPORT_DIR" "$CACHES_DIR" "$PDF_DIR" "$LAUNCH_TMP"
 
 # Minimal one-page PDF written only under this scratch directory.
 python3 - "$PDF_DIR/Smoke.pdf" << 'PY'
@@ -133,8 +142,11 @@ cp -R "$APP" "$LAUNCH_APP"
 # Keep the unique bundle ID on the copy (already baked in by xcodebuild).
 BIN="$LAUNCH_APP/Contents/MacOS/Reader"
 
-# Isolated HOME / TMPDIR: no SecondBrain, no Application Support of Arturo's Reader.
+# Isolated HOME / CFFIXED_USER_HOME / READER_QA_SUPPORT / TMPDIR: zero user-data side effects.
 HOME="$HOME_DIR" \
+CFFIXED_USER_HOME="$HOME_DIR" \
+READER_QA_SUPPORT="$SUPPORT_DIR" \
+READER_QA_CACHES="$CACHES_DIR" \
 TMPDIR="$LAUNCH_TMP" \
 "$BIN" -ApplePersistenceIgnoreState YES "$PDF_DIR/Smoke.pdf" \
   >"$APP_LOG" 2>&1 &

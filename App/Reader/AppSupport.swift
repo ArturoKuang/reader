@@ -4,6 +4,10 @@ import Security
 
 enum AppPaths {
     static var support: String {
+        if let override = ProcessInfo.processInfo.environment["READER_QA_SUPPORT"], !override.isEmpty {
+            try? FileManager.default.createDirectory(atPath: override, withIntermediateDirectories: true)
+            return override
+        }
         let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Reader", isDirectory: true)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
@@ -11,6 +15,10 @@ enum AppPaths {
     }
 
     static var caches: String {
+        if let override = ProcessInfo.processInfo.environment["READER_QA_CACHES"], !override.isEmpty {
+            try? FileManager.default.createDirectory(atPath: override, withIntermediateDirectories: true)
+            return override
+        }
         let url = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Reader", isDirectory: true)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
