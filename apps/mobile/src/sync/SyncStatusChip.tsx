@@ -4,6 +4,7 @@ import { tokens } from "../ui/tokens";
 import type { SyncStatus } from "./status";
 import { ConflictCard } from "./ConflictCard";
 import type { OpenConflict } from "./wire";
+import { PairingScan } from "../ui/PairingScan";
 
 const chip = tokens.syncStatus;
 
@@ -15,10 +16,11 @@ export function SyncStatusChip({ status, onPress }: { status: SyncStatus; onPres
       accessibilityLabel={`sync ${status.state}`}
       testID="sync-status-chip"
       onPress={onPress}
+      style={styles.chip}
     >
       <View style={styles.row}>
         <View style={[styles.dot, { backgroundColor: tone.dot }]} />
-        <Text>{tone.label}</Text>
+        <Text style={styles.chipLabel}>{tone.label}</Text>
       </View>
     </Pressable>
   );
@@ -36,6 +38,8 @@ export function SyncChrome({
   onRetry,
   onSyncNow,
   onPair,
+  onUnpair,
+  onOpenConflict,
 }: {
   status: SyncStatus;
   conflicts: readonly OpenConflict[];
@@ -44,25 +48,57 @@ export function SyncChrome({
   onRetry?: () => void;
   onSyncNow?: () => void;
   onPair?: (url: string) => void;
+  onUnpair?: () => void;
+  onOpenConflict?: (conflict: OpenConflict) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [url, setUrl] = useState("");
+  const [scanning, setScanning] = useState(false);
   const unpaired = status.state === "unpaired";
+
+  function toggleSheet() {
+    if (status.state === "error") onRetry?.();
+    if (status.state === "conflict" && onOpenConflict && conflicts[0]) {
+      onOpenConflict(conflicts[0]);
+      return;
+    }
+    setOpen((value) => !value);
+  }
+
   return (
     <View>
-      <SyncStatusChip
-        status={status}
-        onPress={() => {
-          if (status.state === "error") onRetry?.();
-          setOpen((value) => !value);
-        }}
-      />
+      <SyncStatusChip status={status} onPress={toggleSheet} />
       {open ? (
         <View testID="sync-sheet" accessibilityLabel="sync sheet" style={styles.sheet}>
           <Text style={styles.heading}>{unpaired ? "Pair" : "Sync"}</Text>
           {unpaired ? (
             <View style={styles.block}>
-              <Text>Paste a readersync://pair?v=2 link to connect this phone.</Text>
+              <Text style={styles.title}>Connect to your Mac</Text>
+              <Text style={styles.copy}>
+                In Reader on your Mac, open Settings, then Phone, and scan the code shown there.
+              </Text>
+              {scanning ? (
+                <PairingScan
+                  onCode={(value) => {
+                    setScanning(false);
+                    setUrl(value);
+                    onPair?.(value);
+                  }}
+                  onCancel={() => setScanning(false)}
+                />
+              ) : (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Scan code"
+                  testID="pair-scan"
+                  onPress={() => setScanning(true)}
+                  style={styles.button}
+                >
+                  <Text style={styles.buttonLabel}>Scan code</Text>
+                </Pressable>
+              )}
+              <Text style={styles.hint}>Your phone needs Tailscale turned on.</Text>
+              <Text style={styles.copy}>Or paste a readersync://pair?v=2 link to connect this phone.</Text>
               <TextInput
                 testID="pair-url-input"
                 accessibilityLabel="Pairing URL"
@@ -96,6 +132,15 @@ export function SyncChrome({
               >
                 <Text style={styles.buttonLabel}>Sync now</Text>
               </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Unpair"
+                testID="unpair"
+                onPress={() => onUnpair?.()}
+                style={styles.buttonSecondary}
+              >
+                <Text style={styles.buttonLabelDark}>Unpair</Text>
+              </Pressable>
             </View>
           )}
           {status.state === "storageFull" ? (
@@ -126,17 +171,30 @@ export function SyncChrome({
 }
 
 const styles = StyleSheet.create({
-  row: { flexDirection: "row", alignItems: "center", gap: 8 },
-  dot: { width: 8, height: 8, borderRadius: 8 },
+  chip: {
+    borderWidth: 1,
+    borderColor: tokens.line,
+    borderRadius: tokens.radius.chip,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    minHeight: 28,
+    justifyContent: "center",
+  },
+  row: { flexDirection: "row", alignItems: "center", gap: 5 },
+  dot: { width: 7, height: 7, borderRadius: 7 },
+  chipLabel: { color: tokens.ink, fontSize: 11 },
   sheet: {
     marginTop: 8,
     padding: 12,
-    borderRadius: 12,
+    borderRadius: tokens.radius.card,
     backgroundColor: tokens.paper,
     gap: 8,
     maxWidth: 320,
   },
   heading: { fontSize: 17, fontWeight: "600", color: tokens.ink },
+  title: { fontSize: 17, fontWeight: "600", color: tokens.ink },
+  copy: { fontSize: 14, color: "#636366", lineHeight: 20 },
+  hint: { fontSize: 12, color: "#8E8E93" },
   block: { gap: 8 },
   input: {
     minHeight: 44,
@@ -154,6 +212,17 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     paddingHorizontal: 16,
   },
+  buttonSecondary: {
+    minHeight: 44,
+    borderRadius: 12,
+    backgroundColor: tokens.paper,
+    borderWidth: 1,
+    borderColor: tokens.line,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 16,
+  },
   buttonLabel: { color: tokens.paper, fontWeight: "600" },
+  buttonLabelDark: { color: tokens.ink, fontWeight: "600" },
   error: { color: "#EB5757" },
 });

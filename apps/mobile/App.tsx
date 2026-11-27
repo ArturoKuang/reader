@@ -3,7 +3,7 @@ import { StyleSheet } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { installCryptoPolyfill } from "./src/sync/cryptoPolyfill";
 import { SyncProvider } from "./src/sync/SyncProvider";
-import { ReaderHome } from "./src/ui/BookReader";
+import { AppShell } from "./src/ui/AppShell";
 import { tokens } from "./src/ui/tokens";
 
 installCryptoPolyfill();
@@ -14,7 +14,7 @@ export default function App() {
       <SafeAreaView style={styles.root} edges={["top", "left", "right"]}>
         <StatusBar style="dark" />
         <SyncProvider>
-          <ReaderHome />
+          <AppShell />
         </SyncProvider>
       </SafeAreaView>
     </SafeAreaProvider>

@@ -74,6 +74,7 @@ describe("sync chrome mounted in the library", () => {
     );
     await fireEvent.press(screen.getByLabelText("sync conflict"));
     expect(screen.getByText("Both versions are kept. Pick one in Reader on your Mac.")).toBeTruthy();
-    expect(screen.queryByText("Resolve")).toBeNull();
+    expect(screen.getByText("Resolve on Mac")).toBeTruthy();
+    expect(screen.queryByLabelText("Resolve")).toBeNull();
   });
 });

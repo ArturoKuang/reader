@@ -54,7 +54,9 @@ describe("conflict card", () => {
     await render(<ConflictCard conflict={conflict} />);
     expect(screen.getByText("Both versions are kept. Pick one in Reader on your Mac.")).toBeTruthy();
     expect(screen.getByText("This note changed on 2 devices")).toBeTruthy();
-    expect(screen.queryByText(/resolve/i)).toBeNull();
+    expect(screen.getByText("Resolve on Mac")).toBeTruthy();
+    expect(screen.queryByLabelText("Resolve")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Resolve" })).toBeNull();
   });
 });
 

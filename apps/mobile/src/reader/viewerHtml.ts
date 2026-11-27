@@ -407,7 +407,29 @@ function selectionFrom(range) {
     rects,
   });
 }
-async function openPdf(base64, workerSource) {
+
+function currentPdfPage() {
+  let best = 1;
+  let bestVisible = 0;
+  for (const page of pages) {
+    const rect = page.element.getBoundingClientRect();
+    const visible = Math.min(rect.bottom, window.innerHeight) - Math.max(rect.top, 0);
+    if (visible > bestVisible) {
+      bestVisible = visible;
+      best = page.pageNumber;
+    }
+  }
+  return best;
+}
+function emitPdfLocation() {
+  emit({ type: "location", format: "pdf", page: currentPdfPage(), pageCount: pages.length });
+}
+function gotoPdf(page) {
+  const target = pages.find((item) => item.pageNumber === page);
+  if (target) target.element.scrollIntoView();
+  emitPdfLocation();
+}
+async function openPdf(base64, workerSource, startPage) {
   const blob = new Blob([workerSource], { type: "text/javascript" });
   pdfjs.GlobalWorkerOptions.workerSrc = URL.createObjectURL(blob);
   const binary = atob(base64);
@@ -456,15 +478,19 @@ async function openPdf(base64, workerSource) {
     const id = highlightIdAtPoint(clientX, clientY);
     if (id) emit({ type: "open-highlight", id });
   });
+  window.addEventListener("scroll", emitPdfLocation, { passive: true });
+  if (startPage) gotoPdf(startPage);
+  else emitPdfLocation();
 }
 window.__hostMessage = async (raw) => {
   const message = JSON.parse(raw);
   try {
-    if (message.type === "open-pdf") await openPdf(message.base64, message.workerSource);
+    if (message.type === "open-pdf") await openPdf(message.base64, message.workerSource, message.page);
     else if (message.type === "restore") message.highlights.forEach(restoreHighlight);
     else if (message.type === "paint") paint(message.highlight);
     else if (message.type === "remove") removeHighlight(message.id);
     else if (message.type === "locate") emit(locate(Object.assign({ reason: "request" }, message)));
+    else if (message.type === "goto" && message.page) gotoPdf(message.page);
   } catch (error) {
     emit({ type: "error", message: String(error && error.message || error) });
   }
@@ -629,13 +655,33 @@ view.addEventListener("show-annotation", (event) => {
     }
   }
 });
-async function openEpub(base64) {
+function emitEpubLocation(detail) {
+  const location = detail || view.lastLocation || {};
+  const fraction = typeof location.fraction === "number"
+    ? location.fraction
+    : (location.section && location.section.current && location.section.total
+      ? location.section.current / location.section.total
+      : undefined);
+  emit({
+    type: "location",
+    format: "epub",
+    cfi: location.cfi,
+    section: location.tocItem && location.tocItem.label,
+    progression: fraction,
+  });
+}
+async function gotoEpub(cfi) {
+  if (!cfi || typeof view.goTo !== "function") return;
+  await view.goTo(cfi);
+}
+async function openEpub(base64, startCfi) {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
   const file = new File([bytes], "book.epub", { type: "application/epub+zip" });
   await view.open(file);
-  await view.init({ showTextStart: true });
+  view.addEventListener("relocate", (event) => emitEpubLocation(event.detail));
+  await view.init({ lastLocation: startCfi, showTextStart: !startCfi });
   sections = await sectionDocs();
   emit({
     type: "corpus",
@@ -645,7 +691,7 @@ async function openEpub(base64) {
 window.__hostMessage = async (raw) => {
   const message = JSON.parse(raw);
   try {
-    if (message.type === "open-epub") await openEpub(message.base64);
+    if (message.type === "open-epub") await openEpub(message.base64, message.cfi);
     else if (message.type === "restore") {
       for (const highlight of message.highlights) await restoreHighlight(highlight);
     }
@@ -656,6 +702,7 @@ window.__hostMessage = async (raw) => {
       if (current && current.cfi) view.deleteAnnotation({ value: current.cfi }).catch(() => {});
     }
     else if (message.type === "locate") emit(await locate(Object.assign({ reason: "request" }, message)));
+    else if (message.type === "goto" && message.cfi) await gotoEpub(message.cfi);
   } catch (error) {
     emit({ type: "error", message: String(error && error.message || error) });
   }

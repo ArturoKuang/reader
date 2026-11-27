@@ -19,22 +19,26 @@ import { parseViewerMessage } from "../reader/bridge";
 import { SHOW_HIGHLIGHT_HARNESS } from "./devFlags";
 import type { HostToViewer, ViewerHighlight } from "../reader/bridge";
 import { File } from "expo-file-system";
-import { readAssetBase64, viewerRoot } from "../reader/installViewer";
-import { epubBook, epubModule, pdfBook, pdfModule, sampleTitles } from "../reader/samples";
+import { viewerRoot } from "../reader/installViewer";
 import { emptyShelf, parseShelf, serializeShelf, shelfKey } from "../reader/shelf";
 import type { BookShelf } from "../reader/shelf";
 import { makeId } from "../reader/ids";
-import { sha256OfFingerprint, unpairedStatus } from "../sync/controller";
+import { parseProgress, progressKey, serializeProgress, type BookProgress } from "../library/progress";
+import type { LibraryBook } from "../library/catalog";
+import { epubChapterKey } from "../sync/engine";
 import { useSync } from "../sync/SyncProvider";
-import { SyncChrome } from "../sync/SyncStatusChip";
+import { SyncStatusChip } from "../sync/SyncStatusChip";
+import { unpairedStatus } from "../sync/controller";
+import type { Locator } from "../sync/wire";
 import { tokens } from "./tokens";
+import type { JumpTo } from "./navigation";
+import { PositionToast } from "./ResumeToast";
+import { resumeLocator, toastFromOffer, type PositionToastView } from "./resumeOffer";
 
 function byteLengthFromBase64(base64: string): number {
   const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
   return Math.floor((base64.length * 3) / 4) - padding;
 }
-
-type Format = "pdf" | "epub";
 
 function sectionIndex(section: string | undefined): number {
   if (!section) return 0;
@@ -63,65 +67,37 @@ function toViewer(highlight: HighlightRecord): ViewerHighlight {
   };
 }
 
-export function ReaderHome() {
-  const sync = useSync();
-  const status = sync?.status ?? unpairedStatus;
-  const [format, setFormat] = useState<Format | null>(null);
-  if (!format) {
-    return (
-      <View style={styles.home}>
-        <View style={styles.header}>
-          <Text style={styles.title}>Reader</Text>
-          <SyncChrome
-            status={status}
-            conflicts={sync?.conflicts ?? []}
-            pairingError={sync?.pairingError}
-            onCheckAgain={() => {
-              void sync?.recheckStorage();
-            }}
-            onRetry={() => {
-              void sync?.retryNow();
-            }}
-            onSyncNow={() => {
-              void sync?.syncNow();
-            }}
-            onPair={(url) => {
-              void sync?.pair(url);
-            }}
-          />
-        </View>
-        <Text style={styles.heading}>Highlight</Text>
-        <Text style={styles.caption}>
-          Long-press a word. It is highlighted in the last color, then the sheet can change the color, add a note, or remove it.
-        </Text>
-        <Pressable testID="library-pdf" onPress={() => setFormat("pdf")} style={styles.card}>
-          <Text style={styles.cardHeading}>{sampleTitles.pdf}</Text>
-          <Text style={styles.caption}>PDF · text layer · {pdfBook.fingerprint}</Text>
-          {status.pausedBookIds.includes(pdfBook.fingerprint) ? (
-            <Text>{tokens.syncStatus.storageFull.badge}</Text>
-          ) : null}
-        </Pressable>
-        <Pressable testID="library-epub" onPress={() => setFormat("epub")} style={styles.card}>
-          <Text style={styles.cardHeading}>{sampleTitles.epub}</Text>
-          <Text style={styles.caption}>EPUB · foliate-js · {epubBook.epubId}</Text>
-          {status.pausedBookIds.includes(epubBook.fingerprint) ? (
-            <Text>{tokens.syncStatus.storageFull.badge}</Text>
-          ) : null}
-        </Pressable>
-      </View>
-    );
-  }
-  return <BookReader key={format} format={format} onBack={() => setFormat(null)} />;
+function nowMs(): number {
+  return Date.now();
 }
 
-function BookReader({ format, onBack }: { format: Format; onBack: () => void }) {
-  const book = format === "pdf" ? pdfBook : epubBook;
+function fileUri(directoryUri: string, name: string): string {
+  return directoryUri.endsWith("/") ? directoryUri + name : `${directoryUri}/${name}`;
+}
+
+export function BookReader({
+  book,
+  loadBase64,
+  onBack,
+  onOpenNotebook,
+  jumpTo,
+}: {
+  book: LibraryBook;
+  loadBase64: () => Promise<string>;
+  onBack: () => void;
+  onOpenNotebook: () => void;
+  jumpTo?: JumpTo;
+}) {
   const sync = useSync();
   const syncRef = useRef(sync);
   const insets = useSafeAreaInsets();
   const webRef = useRef<ReaderWebHandle>(null);
   const shelfRef = useRef<BookShelf>(emptyShelf());
-  const bookBytesRef = useRef(0);
+  const bookBytesRef = useRef(book.size);
+  const jumpRef = useRef(jumpTo);
+  const progressRef = useRef<BookProgress | null>(null);
+  const openedRef = useRef(false);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [shelf, setShelf] = useState<BookShelf>(emptyShelf());
   const [uri, setUri] = useState<string | null>(null);
   const [base64, setBase64] = useState<string | null>(null);
@@ -130,25 +106,33 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
   const [draft, setDraft] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [toast, setToast] = useState<PositionToastView | null>(null);
+  const [location, setLocation] = useState<{ page?: number; pageCount?: number; section?: string; cfi?: string }>({});
 
   const active = shelf.highlights.find((highlight) => highlight.id === activeId) ?? null;
   const activeNote = shelf.notes.find((note) => note.id === active?.id);
+  const status = sync?.status ?? unpairedStatus;
 
   function send(message: HostToViewer) {
     const payload = JSON.stringify(message);
     webRef.current?.injectJavaScript(`window.__hostMessage(${JSON.stringify(payload)}); true;`);
   }
 
+  function gotoLocator(locator: Locator) {
+    if (locator.format === "pdf") send({ type: "goto", page: locator.page });
+    else send({ type: "goto", cfi: locator.cfi });
+  }
+
   async function publishShelf(previous: BookShelf, next: BookShelf) {
     if (!sync) return;
     const bookId = book.fingerprint;
     await sync.ensureBook({
-      sha256: sha256OfFingerprint(book.fingerprint),
-      size: bookBytesRef.current || (format === "pdf" ? 1397 : 2284),
-      format,
-      docId: format === "pdf" ? book.pdfId : book.epubId,
-      title: sampleTitles[format],
-      filename: format === "pdf" ? "ishmael.pdf" : "ishmael.epub",
+      sha256: book.sha256,
+      size: bookBytesRef.current || book.size,
+      format: book.format,
+      docId: book.docId,
+      title: book.title,
+      filename: book.filename,
     });
     const previousIds = new Set(previous.highlights.map((highlight) => highlight.id));
     const nextIds = new Set(next.highlights.map((highlight) => highlight.id));
@@ -172,9 +156,20 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
     if (!options?.skipSync) await publishShelf(previous, next);
   }
 
+  async function persistProgress(update: Omit<BookProgress, "updatedAt">, locator?: Locator) {
+    const next = { ...progressRef.current, ...update, updatedAt: nowMs() };
+    progressRef.current = next;
+    await AsyncStorage.setItem(progressKey(book.fingerprint), serializeProgress(next));
+    if (locator) syncRef.current?.updatePosition(book.fingerprint, locator);
+  }
+
   useEffect(() => {
     syncRef.current = sync;
   }, [sync]);
+
+  useEffect(() => {
+    jumpRef.current = jumpTo;
+  }, [jumpTo]);
 
   useEffect(() => {
     let cancelled = false;
@@ -182,17 +177,18 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
       try {
         const loaded = parseShelf(await AsyncStorage.getItem(shelfKey(book.fingerprint)));
         const saved = syncRef.current?.mergeShelf(loaded, book.fingerprint) ?? loaded;
+        const progress = parseProgress(await AsyncStorage.getItem(progressKey(book.fingerprint)));
         const root = await viewerRoot();
-        const encoded = await readAssetBase64(format === "pdf" ? pdfModule : epubModule);
-        const worker =
-          format === "pdf" ? await new File(root, "pdfjs", "pdf.worker.min.mjs").text() : null;
+        const encoded = await loadBase64();
+        const worker = book.format === "pdf" ? await new File(root, "pdfjs", "pdf.worker.min.mjs").text() : null;
         if (cancelled) return;
         bookBytesRef.current = byteLengthFromBase64(encoded);
         shelfRef.current = saved;
+        progressRef.current = progress;
         setShelf(saved);
         setBase64(encoded);
         setWorkerSource(worker);
-        setUri(fileUri(root.uri, format === "pdf" ? "pdf.html" : "epub.html"));
+        setUri(fileUri(root.uri, book.format === "pdf" ? "pdf.html" : "epub.html"));
       } catch (cause) {
         if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
       }
@@ -200,7 +196,7 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
     return () => {
       cancelled = true;
     };
-  }, [book.fingerprint, format]);
+  }, [book.fingerprint, book.format, loadBase64]);
 
   useEffect(() => {
     const controller = syncRef.current;
@@ -238,12 +234,63 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
     return () => subscription.remove();
   }, [activeId, onBack]);
 
+  useEffect(() => {
+    return () => {
+      if (toastTimer.current) clearTimeout(toastTimer.current);
+    };
+  }, []);
+
+  function showToast(view: PositionToastView) {
+    setToast(view);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), view.durationMs);
+  }
+
+  function applyJump(target: JumpTo | undefined) {
+    if (!target) return;
+    const highlight = target.highlightId
+      ? shelfRef.current.highlights.find((item) => item.id === target.highlightId)
+      : undefined;
+    if (highlight?.page) send({ type: "goto", page: highlight.page });
+    else if (highlight?.cfi) send({ type: "goto", cfi: highlight.cfi });
+    else if (target.locator) gotoLocator(target.locator);
+    if (highlight) openSheet(highlight.id);
+  }
+
+  async function applyResume() {
+    if (openedRef.current) return;
+    openedRef.current = true;
+    const target = jumpRef.current;
+    if (target?.highlightId || target?.locator) {
+      applyJump(target);
+      return;
+    }
+    const controller = syncRef.current;
+    const saved = progressRef.current;
+    const here =
+      book.format === "pdf"
+        ? { page: saved?.page }
+        : { chapterKey: saved?.chapterKey };
+    const offer = controller ? await controller.openBook(book.fingerprint, here) : null;
+    const locator = resumeLocator(offer);
+    if (locator) {
+      gotoLocator(locator);
+      if (locator.format === "pdf") {
+        void persistProgress({ page: locator.page });
+      } else {
+        void persistProgress({ chapterKey: epubChapterKey(locator.cfi), progression: locator.progression });
+      }
+    }
+    const view = toastFromOffer(offer);
+    if (view) showToast(view);
+  }
+
   function onViewerMessage(raw: string) {
     const message = parseViewerMessage(raw);
     if (!message) return;
     if (message.type === "ready") {
       if (!base64) return;
-      if (format === "pdf") {
+      if (book.format === "pdf") {
         if (!workerSource) return;
         send({ type: "open-pdf", base64, workerSource });
       } else {
@@ -260,6 +307,27 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
           : current;
       if (restored.reanchoredIds.length > 0) void commit(next);
       send({ type: "restore", highlights: next.highlights.map(toViewer) });
+      void applyResume();
+      return;
+    }
+    if (message.type === "location") {
+      setLocation({
+        page: message.page,
+        pageCount: message.pageCount,
+        section: message.section,
+        cfi: message.cfi,
+      });
+      if (message.format === "pdf" && typeof message.page === "number") {
+        void persistProgress(
+          { page: message.page, pageCount: message.pageCount },
+          { format: "pdf", page: message.page },
+        );
+      } else if (message.format === "epub" && typeof message.cfi === "string") {
+        void persistProgress(
+          { chapterKey: epubChapterKey(message.cfi), progression: message.progression },
+          { format: "epub", cfi: message.cfi, progression: message.progression },
+        );
+      }
       return;
     }
     if (message.type === "error") {
@@ -272,7 +340,7 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
         message.before.length,
         message.before.length + message.quote.length,
         message.page,
-        format === "epub" ? normalizeEpubSection(message.section, sectionIndex(message.section)) : message.section,
+        book.format === "epub" ? normalizeEpubSection(message.section, sectionIndex(message.section)) : message.section,
       );
       if (!anchor.quote.trim()) return;
       const color = shelfRef.current.lastColor;
@@ -313,7 +381,7 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
       void commit({ ...shelfRef.current, highlights: persisted.highlights, notes: persisted.notes });
       if (updated) send({ type: "paint", highlight: toViewer(updated) });
       if (message.reason !== "restore") {
-        setNotice(format === "pdf" ? `Re-anchored on page ${updated?.page ?? "?"}` : "Re-anchored by quote");
+        setNotice(book.format === "pdf" ? `Re-anchored on page ${updated?.page ?? "?"}` : "Re-anchored by quote");
       }
     }
   }
@@ -352,8 +420,8 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
       highlight.id === active.id
         ? {
             ...highlight,
-            page: format === "pdf" ? 99 : highlight.page,
-            cfi: format === "epub" ? "epubcfi(/6/98!/4,/1:0,/1:1)" : highlight.cfi,
+            page: book.format === "pdf" ? 99 : highlight.page,
+            cfi: book.format === "epub" ? "epubcfi(/6/98!/4,/1:0,/1:1)" : highlight.cfi,
           }
         : highlight,
     );
@@ -372,18 +440,30 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
     });
   }
 
+  const pageLabel =
+    book.format === "pdf" && location.page
+      ? location.pageCount
+        ? `p. ${location.page} of ${location.pageCount}`
+        : `p. ${location.page}`
+      : location.section || (book.format === "epub" ? "EPUB" : book.format.toUpperCase());
+
   return (
     <View style={styles.reader}>
       <View style={styles.header}>
-        <Pressable testID="reader-library" onPress={onBack} style={styles.back}>
-          <Text style={styles.buttonLabelDark}>Library</Text>
+        <Pressable testID="reader-library" accessibilityLabel="Library" onPress={onBack} style={styles.back}>
+          <Text style={styles.buttonLabelDark}>‹</Text>
         </Pressable>
-        <Text style={styles.cardHeading}>{format === "pdf" ? "PDF" : "EPUB"}</Text>
+        <Text style={styles.readerTitle} numberOfLines={1}>
+          {book.title}
+        </Text>
+        <Pressable testID="reader-notebook" accessibilityLabel="Notebook" onPress={onOpenNotebook} style={styles.back}>
+          <Text style={styles.notebookLabel}>Notebook</Text>
+        </Pressable>
+        <SyncStatusChip status={status} />
       </View>
-      <Text style={styles.caption}>Long-press a word. Color {shelf.lastColor} is applied at once.</Text>
       {error ? <Text style={styles.error}>{error}</Text> : null}
       <View style={styles.surface}>
-        {uri && base64 && (format === "epub" || workerSource) ? (
+        {uri && base64 && (book.format === "epub" || workerSource) ? (
           <ReaderWeb
             testID="reader-surface"
             style={styles.web}
@@ -400,6 +480,19 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
           <ActivityIndicator style={styles.spinner} />
         )}
         {notice ? <Text style={styles.notice}>{notice}</Text> : null}
+        <Text style={styles.pageLabel} testID="reader-position">
+          {pageLabel}
+        </Text>
+        {toast ? (
+          <PositionToast
+            toast={toast}
+            onAction={() => {
+              gotoLocator(toast.locator);
+              setToast(null);
+            }}
+            onDismiss={() => setToast(null)}
+          />
+        ) : null}
         {active ? (
           <View style={styles.sheetOverlay} pointerEvents="box-none">
             <Pressable
@@ -420,7 +513,7 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
                 {tokens.highlight.palette.map((swatch) => (
                   <Pressable
                     key={swatch.id}
-                    accessibilityLabel={`Highlight color ${swatch.id}`}
+                    accessibilityLabel={swatch.name}
                     testID={`highlight-color-${swatch.id}`}
                     onPress={() => chooseColor(swatch.id)}
                     style={[
@@ -470,63 +563,32 @@ type ReaderWebHandle = { injectJavaScript: (script: string) => void };
 
 const ReaderWeb = WebView as unknown as ComponentType<WebViewProps & { ref?: Ref<ReaderWebHandle> }>;
 
-function fileUri(directoryUri: string, name: string): string {
-  return directoryUri.endsWith("/") ? directoryUri + name : `${directoryUri}/${name}`;
-}
-
 const styles = StyleSheet.create({
-  home: { flex: 1, padding: tokens.space[3], gap: tokens.space[3], backgroundColor: tokens.canvas },
   reader: { flex: 1, backgroundColor: tokens.canvas },
   header: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
-    gap: tokens.space[2],
-    paddingHorizontal: tokens.space[3],
-    paddingTop: tokens.space[2],
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: tokens.line,
   },
-  title: {
+  readerTitle: {
+    flex: 1,
+    minWidth: 0,
     color: tokens.ink,
-    fontSize: tokens.type.title.size,
-    fontWeight: tokens.type.title.weight,
-    lineHeight: tokens.type.title.lineHeight,
+    fontSize: 15,
+    fontWeight: "600",
   },
-  heading: {
-    color: tokens.ink,
-    fontSize: tokens.type.heading.size,
-    fontWeight: tokens.type.heading.weight,
-    lineHeight: tokens.type.heading.lineHeight,
-  },
+  notebookLabel: { color: tokens.ink, fontSize: 13, fontWeight: "600" },
   cardHeading: {
     color: tokens.ink,
     fontSize: tokens.type.heading.size,
     fontWeight: tokens.type.heading.weight,
     lineHeight: tokens.type.heading.lineHeight,
   },
-  caption: {
-    color: "#636366",
-    fontSize: tokens.type.caption.size,
-    lineHeight: tokens.type.caption.lineHeight,
-    paddingHorizontal: tokens.space[3],
-  },
   quote: { color: tokens.ink, fontSize: tokens.type.quote.size, lineHeight: tokens.type.quote.lineHeight },
-  chip: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: tokens.space[1],
-    minHeight: tokens.touchTarget,
-    paddingHorizontal: tokens.space[2],
-    borderRadius: tokens.radius.chip,
-    backgroundColor: tokens.paper,
-  },
-  dot: { width: 8, height: 8, borderRadius: 4, backgroundColor: tokens.syncStatus.offline.dot },
-  chipLabel: { color: tokens.ink, fontSize: tokens.type.caption.size },
-  card: {
-    backgroundColor: tokens.paper,
-    borderRadius: tokens.radius.card,
-    padding: tokens.space[3],
-    gap: tokens.space[1],
-  },
   web: { flex: 1, backgroundColor: tokens.canvas },
   spinner: { marginTop: tokens.space[5] },
   error: { color: "#EB5757", paddingHorizontal: tokens.space[3] },
@@ -536,6 +598,15 @@ const styles = StyleSheet.create({
     fontSize: tokens.type.caption.size,
     lineHeight: tokens.type.caption.lineHeight,
     paddingHorizontal: tokens.space[3],
+  },
+  pageLabel: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 14,
+    textAlign: "center",
+    fontSize: 12,
+    color: "#8E8E93",
   },
   sheetOverlay: {
     ...StyleSheet.absoluteFill,
@@ -596,10 +667,11 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   buttonLabel: { color: tokens.paper, fontSize: tokens.type.body.size, fontWeight: "600" },
-  buttonLabelDark: { color: tokens.ink, fontSize: tokens.type.body.size, fontWeight: "600" },
+  buttonLabelDark: { color: tokens.ink, fontSize: 18, fontWeight: "600" },
   back: {
     minHeight: tokens.touchTarget,
+    minWidth: tokens.touchTarget,
     justifyContent: "center",
-    paddingRight: tokens.space[2],
+    alignItems: "center",
   },
 });
