@@ -33,7 +33,7 @@ import type { Locator } from "../sync/wire";
 import { tokens } from "./tokens";
 import type { JumpTo } from "./navigation";
 import { PositionToast } from "./ResumeToast";
-import { resumeLocator, toastFromOffer, type PositionToastView } from "./resumeOffer";
+import { applyResume as planResume, priorLocator, type PositionToastView } from "./resumeOffer";
 
 function byteLengthFromBase64(base64: string): number {
   const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
@@ -98,6 +98,7 @@ export function BookReader({
   const progressRef = useRef<BookProgress | null>(null);
   const openedRef = useRef(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const backLocatorRef = useRef<Locator | null>(null);
   const [shelf, setShelf] = useState<BookShelf>(emptyShelf());
   const [uri, setUri] = useState<string | null>(null);
   const [base64, setBase64] = useState<string | null>(null);
@@ -267,22 +268,25 @@ export function BookReader({
     }
     const controller = syncRef.current;
     const saved = progressRef.current;
+    const prior = priorLocator(book.format, saved);
     const here =
       book.format === "pdf"
         ? { page: saved?.page }
         : { chapterKey: saved?.chapterKey };
     const offer = controller ? await controller.openBook(book.fingerprint, here) : null;
-    const locator = resumeLocator(offer);
-    if (locator) {
-      gotoLocator(locator);
-      if (locator.format === "pdf") {
-        void persistProgress({ page: locator.page });
+    const planned = planResume(offer, prior);
+    if (planned.jump) {
+      gotoLocator(planned.jump);
+      if (planned.jump.format === "pdf") {
+        void persistProgress({ page: planned.jump.page });
       } else {
-        void persistProgress({ chapterKey: epubChapterKey(locator.cfi), progression: locator.progression });
+        void persistProgress({
+          chapterKey: epubChapterKey(planned.jump.cfi),
+          progression: planned.jump.progression,
+        });
       }
     }
-    const view = toastFromOffer(offer);
-    if (view) showToast(view);
+    if (planned.toast) showToast(planned.toast);
   }
 
   function onViewerMessage(raw: string) {
@@ -311,6 +315,15 @@ export function BookReader({
       return;
     }
     if (message.type === "location") {
+      const held = backLocatorRef.current;
+      if (held) {
+        const arrived =
+          held.format === "pdf"
+            ? message.format === "pdf" && message.page === held.page
+            : message.format === "epub" && message.cfi === held.cfi;
+        if (!arrived) return;
+        backLocatorRef.current = null;
+      }
       setLocation({
         page: message.page,
         pageCount: message.pageCount,
@@ -487,8 +500,22 @@ export function BookReader({
           <PositionToast
             toast={toast}
             onAction={() => {
-              gotoLocator(toast.locator);
+              if (toastTimer.current) clearTimeout(toastTimer.current);
+              const prior = toast.locator;
               setToast(null);
+              if (!prior) return;
+              backLocatorRef.current = prior;
+              gotoLocator(prior);
+              if (prior.format === "pdf") {
+                setLocation((current) => ({ ...current, page: prior.page }));
+                void persistProgress({ page: prior.page }, prior);
+              } else {
+                setLocation((current) => ({ ...current, cfi: prior.cfi }));
+                void persistProgress(
+                  { chapterKey: epubChapterKey(prior.cfi), progression: prior.progression },
+                  prior,
+                );
+              }
             }}
             onDismiss={() => setToast(null)}
           />
