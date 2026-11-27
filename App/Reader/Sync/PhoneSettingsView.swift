@@ -7,18 +7,21 @@ struct PhoneSettingsView: View {
     let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            connectionRow
-            pairBlock
-            deviceList
-            if !controller.lastMessage.isEmpty {
-                Text(controller.lastMessage)
-                    .font(.caption)
-                    .foregroundStyle(.red)
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 20) {
+                connectionRow
+                pairBlock
+                deviceList
+                if !controller.lastMessage.isEmpty {
+                    Text(controller.lastMessage)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
             }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .padding(24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
             Task { await controller.refreshDevices() }
             updateCountdown()
