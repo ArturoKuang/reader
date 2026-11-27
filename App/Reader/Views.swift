@@ -108,12 +108,91 @@ private struct WelcomeTile: View {
     }
 }
 
+struct MarkJumpOverlay: View {
+    @ObservedObject var session: ReaderSession
+    var jump: (MarkEntry) -> Void
+    var close: () -> Void
+
+    var body: some View {
+        let sections = MarkList.sections(local: session.marks, global: session.globalMarks)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Marks").font(.headline)
+                Spacer()
+                Button("Close", action: close).buttonStyle(.borderless)
+            }
+            if sections.isEmpty {
+                Text("Press m and a letter to set a mark.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(sections) { section in
+                    Text(section.title)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.top, section.id == sections.first?.id ? 0 : 6)
+                    ForEach(section.lines) { line in
+                        Button {
+                            let mark = session.marks.first { $0.id == line.id } ?? session.globalMarks.first { $0.id == line.id }
+                            if let mark { jump(mark) }
+                        } label: {
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text(line.symbol).font(.body.monospaced().weight(.semibold)).frame(width: 22, alignment: .leading)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(line.location).font(.callout)
+                                    if !line.snippet.isEmpty {
+                                        Text(line.snippet).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                    }
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.regularMaterial)
+    }
+}
+
 struct SidebarView: View {
     @ObservedObject var session: ReaderSession
     @State private var outlineSelection: String?
+    @State private var markSelection: String?
+
+    private var sidebarPick: Binding<SidebarMode?> {
+        Binding(
+            get: {
+                switch session.sidebar {
+                case .thumbnails, .tableOfContents, .marks:
+                    return session.sidebar
+                default:
+                    return nil
+                }
+            },
+            set: { mode in
+                guard let mode else { return }
+                session.setSidebar(mode)
+            }
+        )
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            Picker("Sidebar", selection: sidebarPick) {
+                Text("Pages").tag(Optional(SidebarMode.thumbnails))
+                Text("Contents").tag(Optional(SidebarMode.tableOfContents))
+                Text("Marks").tag(Optional(SidebarMode.marks))
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .controlSize(.small)
+            .background(ClearSegmentSelection(clear: session.sidebar == .highlightsAndNotes))
+            .padding(.horizontal, 8)
+            .padding(.top, 8)
+            .padding(.bottom, 4)
             if let notice = session.notice {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(notice).font(.caption)
@@ -141,6 +220,8 @@ struct SidebarView: View {
                 annotationList
             case .bookmarks:
                 bookmarkList
+            case .marks:
+                marksList
             case .searchResults:
                 searchList
             }
@@ -225,6 +306,61 @@ struct SidebarView: View {
         controller.reveal(ReadingPosition(page: item.page, cfi: item.cfi, section: item.section, quote: item.quote))
     }
 
+    private var marksList: some View {
+        let sections = MarkList.sections(local: session.marks, global: session.globalMarks)
+        return Group {
+            if sections.isEmpty {
+                ContentUnavailableView("No marks", systemImage: "bookmark", description: Text("Press m and a letter to set a mark."))
+            } else {
+                List(selection: $markSelection) {
+                    ForEach(sections) { section in
+                        Section(section.title) {
+                            ForEach(section.lines) { line in
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    Text(line.symbol).font(.body.monospaced().weight(.semibold)).frame(width: 22, alignment: .leading)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(line.location).font(.callout)
+                                        if !line.snippet.isEmpty {
+                                            Text(line.snippet).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                        }
+                                    }
+                                }
+                                .contentShape(Rectangle())
+                                .tag(line.id)
+                            }
+                        }
+                    }
+                }
+                .listStyle(.sidebar)
+                .onChange(of: markSelection) { _, id in
+                    guard let id else { return }
+                    jumpToMark(id: id)
+                }
+                .onKeyPress(keys: [.return], phases: .down) { _ in
+                    guard let markSelection else { return .ignored }
+                    jumpToMark(id: markSelection)
+                    return .handled
+                }
+                .onKeyPress(keys: [KeyEquivalent("x")], phases: .down) { _ in
+                    guard let markSelection else { return .ignored }
+                    session.removeMark(id: markSelection)
+                    return .handled
+                }
+            }
+        }
+    }
+
+    private func jumpToMark(id: String) {
+        let mark = session.marks.first { $0.id == id } ?? session.globalMarks.first { $0.id == id }
+        guard let mark else { return }
+        if mark.scope == .global, mark.bookFingerprint != session.fingerprint, let path = mark.bookPath {
+            (NSApp.keyWindow?.windowController as? ReaderWindowController)?.openBookInOtherPane(url: URL(fileURLWithPath: path), position: mark.position)
+            return
+        }
+        guard let controller = NSApp.keyWindow?.windowController as? ReaderWindowController else { return }
+        controller.reveal(mark.position)
+    }
+
     private var bookmarkList: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
@@ -280,7 +416,7 @@ struct SidebarView: View {
         }
         .onTapGesture {
             if global, mark.bookFingerprint != session.fingerprint, let path = mark.bookPath {
-                NSDocumentController.shared.openDocument(withContentsOf: URL(fileURLWithPath: path), display: true) { _, _, _ in }
+                (NSApp.keyWindow?.windowController as? ReaderWindowController)?.openBookInOtherPane(url: URL(fileURLWithPath: path), position: mark.position)
             } else if let controller = NSApp.keyWindow?.windowController as? ReaderWindowController {
                 controller.reveal(mark.position)
             }
@@ -794,6 +930,8 @@ struct SettingsView: View {
         .tabItem { Text("AI") }
         VaultLibrarySettings()
             .tabItem { Text("Vault") }
+        PhoneSettingsView()
+            .tabItem { Text("Phone") }
         ShortcutList()
             .tabItem { Text("Shortcuts") }
         }
@@ -809,7 +947,7 @@ struct SettingsView: View {
             storeKey(account: "anthropic", value: anthropicKey)
         }
         .padding()
-        .frame(width: 500, height: 560)
+        .frame(width: 520, height: 600)
     }
 
     private var aiReady: Bool {
@@ -999,5 +1137,49 @@ struct ShortcutsView: View {
         }
         .padding()
         .frame(minWidth: 480, minHeight: 560)
+    }
+}
+
+/// SwiftUI's segmented picker keeps the last selected segment filled when the
+/// binding is nil. When Highlights/Notes is open, clear that fill so two sidebar
+/// modes don't look selected at once.
+private struct ClearSegmentSelection: NSViewRepresentable {
+    var clear: Bool
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        view.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        view.setContentHuggingPriority(.defaultLow, for: .vertical)
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async {
+            guard let control = Self.segmentedControl(from: view) else { return }
+            if clear {
+                if control.selectedSegment != -1 {
+                    control.selectedSegment = -1
+                }
+            }
+        }
+    }
+
+    private static func segmentedControl(from view: NSView) -> NSSegmentedControl? {
+        var current: NSView? = view
+        while let host = current {
+            if let match = findSegmented(in: host) { return match }
+            current = host.superview
+        }
+        return nil
+    }
+
+    private static func findSegmented(in view: NSView) -> NSSegmentedControl? {
+        if let control = view as? NSSegmentedControl, control.segmentCount == 3 {
+            return control
+        }
+        for child in view.subviews {
+            if let found = findSegmented(in: child) { return found }
+        }
+        return nil
     }
 }

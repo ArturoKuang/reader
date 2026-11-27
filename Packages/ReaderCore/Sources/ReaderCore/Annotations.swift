@@ -235,14 +235,18 @@ public enum AnnotationEdit {
             return Annotation(highlight: nil, note: note)
         }
         if let existing = AnnotationIndex.highlight(matchingQuote: selection.text, page: selection.page, cfi: selection.cfi, in: package.highlights.highlights) {
-            let linked = existing.noteID ?? noteID
+            // A note attached to a highlight always reuses the highlight's id (spec / Android).
+            let linked = existing.noteID ?? existing.id
             addNote(toHighlight: existing.id, noteID: linked, now: now, package: &package)
             let note = package.notes.notes.first { $0.id == linked }
             let highlight = package.highlights.highlights.first { $0.id == existing.id }
             return Annotation(highlight: highlight, note: note)
         }
+        // New highlight + note: both records share the highlight id, even if the
+        // caller passed a different noteID.
+        let hid = highlightID ?? noteID
         let note = NoteEntry(
-            id: noteID,
+            id: hid,
             page: selection.page,
             cfi: selection.cfi,
             quote: selection.text,
@@ -253,7 +257,7 @@ public enum AnnotationEdit {
             body: ""
         )
         let highlight = HighlightEntry(
-            id: highlightID ?? noteID,
+            id: hid,
             color: chosen,
             page: selection.page,
             cfi: selection.cfi,
@@ -262,7 +266,7 @@ public enum AnnotationEdit {
             suffix: selection.suffix,
             section: selection.section,
             rects: selection.rects,
-            noteID: noteID
+            noteID: hid
         )
         package.highlights.highlights.append(highlight)
         package.notes.notes.append(note)
@@ -277,8 +281,10 @@ public enum AnnotationEdit {
             return true
         }
         let highlight = package.highlights.highlights[index]
+        // New notes on a highlight reuse the highlight id (spec / Android).
+        let resolvedNoteID = highlight.noteID ?? highlight.id
         let note = NoteEntry(
-            id: noteID,
+            id: resolvedNoteID,
             page: highlight.page,
             cfi: highlight.cfi,
             quote: highlight.quote,
@@ -289,7 +295,7 @@ public enum AnnotationEdit {
             body: ""
         )
         package.notes.notes.append(note)
-        package.highlights.highlights[index].noteID = noteID
+        package.highlights.highlights[index].noteID = resolvedNoteID
         return true
     }
 

@@ -1,0 +1,46 @@
+{
+  "expo": {
+    "name": "Reader",
+    "slug": "reader",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "scheme": "readersync",
+    "platforms": [
+      "ios",
+      "android",
+      "web"
+    ],
+    "web": {
+      "bundler": "metro"
+    },
+    "ios": {
+      "bundleIdentifier": "com.reader.Reader",
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.reader",
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ],
+          "data": [
+            {
+              "scheme": "readersync",
+              "host": "pair"
+            }
+          ]
+        }
+      ]
+    },
+    "plugins": [
+      "expo-asset",
+      "expo-secure-store",
+      "./plugins/withDebugCleartext"
+    ]
+  }
+}

@@ -304,6 +304,94 @@ final class CoreTests: XCTestCase {
         XCTAssertFalse(localText.contains("\"symbol\":\"a\""))
     }
 
+    func testMarkListOrdersLinesAndQuestionMarkOpensTheList() {
+        let here = ReadingPosition(page: 4, section: "Chapter 4", quote: "hard to vary\nmore")
+        let local = MarkEntry(id: "m1", symbol: "b", position: here, documentTitle: "Book", setAt: "t")
+        let earlier = MarkEntry(id: "m0", symbol: "a", position: ReadingPosition(page: 1, section: "Intro"), documentTitle: "Book", setAt: "t")
+        let global = MarkEntry(id: "g1", symbol: "A", position: ReadingPosition(page: 9, quote: "global quote"), bookPath: "/other.pdf", documentTitle: "Other", setAt: "t")
+        let lines = MarkList.lines(local: [local, earlier], global: [global])
+        XCTAssertEqual(lines.map(\.symbol), ["a", "b", "A"])
+        XCTAssertEqual(lines[0].location, "p. 1")
+        XCTAssertEqual(lines[0].snippet, "Intro")
+        XCTAssertEqual(lines[1].snippet, "hard to vary")
+        XCTAssertEqual(lines[2].location, "Other · p. 9")
+        XCTAssertEqual(lines[2].snippet, "global quote")
+        let sections = MarkList.sections(local: [local, earlier], global: [global])
+        XCTAssertEqual(sections.map(\.title), ["This book", "Other books"])
+        XCTAssertEqual(sections[0].lines.map(\.symbol), ["a", "b"])
+        XCTAssertEqual(sections[1].lines.map(\.symbol), ["A"])
+        var store = MarkStore(local: [local], global: [global])
+        XCTAssertTrue(store.remove(id: "m1"))
+        XCTAssertTrue(store.local.isEmpty)
+        XCTAssertEqual(store.global.map(\.id), ["g1"])
+        var chord = MarkChord.idle
+        var history = NavigationHistory()
+        let opened = MarkController.handle(chord: &chord, key: MarkKey(character: "`", documentFocused: true, textInputFocused: false), store: &store, current: here, history: &history, bookFingerprint: "sha256:a", bookPath: "/a.pdf", title: "Book", now: "t", makeID: { "x" })
+        XCTAssertEqual(opened.effect, .consume)
+        let listed = MarkController.handle(chord: &chord, key: MarkKey(character: "?", documentFocused: true, textInputFocused: false), store: &store, current: here, history: &history, bookFingerprint: "sha256:a", bookPath: "/a.pdf", title: "Book", now: "t", makeID: { "x" })
+        XCTAssertEqual(listed.effect, .showList)
+        XCTAssertEqual(chord, .idle)
+    }
+
+    func testVaultMarksStayOutsideTheVaultAndGlobalMarksAreShared() throws {
+        let root = try temporaryDirectory()
+        let fs = LocalFileSystem()
+        let support = root + "/Application Support/Reader"
+        let vaultNotes = root + "/VaultBook/notes/Chapter 1.md"
+        try fs.createDirectory(Paths.parent(vaultNotes))
+        let original = "The vault note stays untouched.\n"
+        try fs.writeString(vaultNotes, original)
+        let here = ReadingPosition(page: 3, scrollY: 0.55, section: "Chapter 1", quote: "para five")
+        let local = MarkEntry(id: "m-a", symbol: "a", position: here, bookFingerprint: "sha256:vault", bookPath: "/VaultBook/book.epub", documentTitle: "Vault Book", setAt: "t")
+        let globalB = MarkEntry(id: "m-b", symbol: "B", scope: .global, position: here, bookFingerprint: "sha256:vault", bookPath: "/VaultBook/book.epub", documentTitle: "Vault Book", setAt: "t")
+        try BookMarks.save([local], applicationSupport: support, fingerprint: "sha256:vault", document: "book.epub", fs: fs)
+        let hub = GlobalMarkHub()
+        var secondWindow: [MarkEntry] = []
+        hub.observe(UUID()) { secondWindow = $0 }
+        let first = UUID()
+        hub.publish([globalB], source: first, applicationSupport: support, fs: fs)
+        XCTAssertEqual(secondWindow.map(\.symbol), ["B"])
+        let third = UUID()
+        let elsewhere = ReadingPosition(page: 8, scrollY: 0.2)
+        let globalD = MarkEntry(id: "m-d", symbol: "D", scope: .global, position: elsewhere, bookFingerprint: "sha256:other", bookPath: "/Other.pdf", documentTitle: "Other", setAt: "t")
+        hub.publish([globalB, globalD], source: third, applicationSupport: support, fs: fs)
+        XCTAssertEqual(secondWindow.map(\.symbol), ["B", "D"])
+        let reloadedLocal = BookMarks.load(applicationSupport: support, fingerprint: "sha256:vault", fs: fs)
+        XCTAssertEqual(reloadedLocal.first?.symbol, "a")
+        XCTAssertEqual(reloadedLocal.first?.position.page, 3)
+        XCTAssertEqual(reloadedLocal.first?.position.scrollY, 0.55)
+        let reloadedGlobal = GlobalMarks.load(applicationSupport: support, fs: fs)
+        XCTAssertEqual(reloadedGlobal.map(\.symbol).sorted(), ["B", "D"])
+        XCTAssertEqual(try fs.readString(vaultNotes), original)
+        XCTAssertFalse((try fs.readString(vaultNotes)).contains("para five"))
+        let bookFile = try fs.readString(BookMarks.path(applicationSupport: support, fingerprint: "sha256:vault"))
+        XCTAssertTrue(bookFile.contains("\"symbol\":\"a\""))
+        XCTAssertFalse(bookFile.contains(vaultNotes))
+    }
+
+    func testGlobalMarkJumpKeepsPageAndInChapterScroll() {
+        var chord = MarkChord.idle
+        var store = MarkStore()
+        var history = NavigationHistory()
+        let marked = ReadingPosition(page: 3, scrollY: 0.4, cfi: EPUBCFI.make(spineIndex: 2, start: 0, end: 0).value, section: "Chapter 3")
+        func key(_ character: String) -> MarkKey {
+            MarkKey(character: character, documentFocused: true, textInputFocused: false)
+        }
+        _ = MarkController.handle(chord: &chord, key: key("m"), store: &store, current: marked, history: &history, bookFingerprint: "sha256:b", bookPath: "/B.epub", title: "B", now: "t", makeID: { "e" })
+        _ = MarkController.handle(chord: &chord, key: key("E"), store: &store, current: marked, history: &history, bookFingerprint: "sha256:b", bookPath: "/B.epub", title: "B", now: "t", makeID: { "e" })
+        _ = MarkController.handle(chord: &chord, key: key("`"), store: &store, current: ReadingPosition(page: 1), history: &history, bookFingerprint: "sha256:a", bookPath: "/A.pdf", title: "A", now: "t", makeID: { "x" })
+        let jump = MarkController.handle(chord: &chord, key: key("E"), store: &store, current: ReadingPosition(page: 1), history: &history, bookFingerprint: "sha256:a", bookPath: "/A.pdf", title: "A", now: "t", makeID: { "x" })
+        XCTAssertEqual(jump.jump?.openOtherBook, true)
+        XCTAssertEqual(jump.jump?.position.page, 3)
+        XCTAssertEqual(jump.jump?.position.scrollY, 0.4)
+        XCTAssertEqual(jump.jump?.bookPath, "/B.epub")
+        MarkOpenQueue.store(path: "/B.epub", position: jump.jump!.position)
+        let queued = MarkOpenQueue.take(path: "/B.epub")
+        XCTAssertEqual(queued?.page, 3)
+        XCTAssertEqual(queued?.scrollY, 0.4)
+        XCTAssertNil(MarkOpenQueue.take(path: "/B.epub"))
+    }
+
     func testSidecarCreateRenameMoveFallbackAndRelink() throws {
         let root = try temporaryDirectory()
         let fs = LocalFileSystem()

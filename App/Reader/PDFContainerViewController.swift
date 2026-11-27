@@ -8,11 +8,16 @@ import SwiftUI
 /// markers on top and lets hits fall through everywhere except those controls.
 final class PDFContainerViewController: NSViewController {
     let session: ReaderSession
+    /// Only the active pane writes the shared page, zoom, and find hits.
+    var publishesPosition = true
+    var ownsFindSession = false
+    private var lockedFit: FitMode?
+    private var lockedZoom: Double?
     private let pdfView = ReaderPDFView()
     private let overlay = NoteOverlay()
-    private let findBar = NSSearchField()
-    private var findTop: NSLayoutConstraint?
-    private var pdfTopConstraint: NSLayoutConstraint?
+    private let titleStrip = PaneTitleStrip()
+    private var findBar: NSSearchField { titleStrip.findField }
+    private var stripTop: NSLayoutConstraint?
     private var matches: [PDFSelection] = []
     private var matchIndex = 0
     private var pickInitialMatch = false
@@ -27,6 +32,9 @@ final class PDFContainerViewController: NSViewController {
     private var didFinishOpeningLayout = false
     private var applyingJump = false
     private var stickJump: PDFJump?
+    /// 1-based page from a mark/link reveal. Kept until PDFKit reports that page
+    /// so a closed-book jump to body page 3 cannot show "Page 2" in the subtitle.
+    private var pinnedRevealPage: Int?
     private var suppressScaleSave = false
     private var lastFitSize: CGSize = .zero
 
@@ -48,34 +56,41 @@ final class PDFContainerViewController: NSViewController {
         pdfView.backgroundColor = .windowBackgroundColor
         pdfView.minScaleFactor = 0.1
         pdfView.maxScaleFactor = 8
-        pdfView.document = session.pdfDocument
+        // Each pane owns a document. A shared PDFDocument only redraws annotations in one PDFView.
+        pdfView.document = PDFDocument(data: session.bookData) ?? session.pdfDocument
+        applyDisplayedRotations()
         view.addSubview(pdfView)
         overlay.pdfView = pdfView
         overlay.session = session
         overlay.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(overlay)
-        findBar.translatesAutoresizingMaskIntoConstraints = false
-        findBar.placeholderString = "Find"
         findBar.target = self
         findBar.action = #selector(findFromBar)
-        findBar.isHidden = true
-        view.addSubview(findBar)
-        let findConstraint = findBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8)
-        findTop = findConstraint
-        let pdfTop = pdfView.topAnchor.constraint(equalTo: view.topAnchor)
-        pdfTopConstraint = pdfTop
+        (findBar.cell as? NSActionCell)?.sendsActionOnEndEditing = false
+        view.addSubview(titleStrip)
+        let stripConstraint = titleStrip.topAnchor.constraint(equalTo: view.topAnchor)
+        stripTop = stripConstraint
         NSLayoutConstraint.activate([
+            titleStrip.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            titleStrip.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            stripConstraint,
             pdfView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             pdfView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             pdfView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            pdfTop,
+            pdfView.topAnchor.constraint(equalTo: titleStrip.bottomAnchor),
             overlay.leadingAnchor.constraint(equalTo: pdfView.leadingAnchor),
             overlay.trailingAnchor.constraint(equalTo: pdfView.trailingAnchor),
             overlay.topAnchor.constraint(equalTo: pdfView.topAnchor),
             overlay.bottomAnchor.constraint(equalTo: pdfView.bottomAnchor),
-            findBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            findBar.widthAnchor.constraint(equalToConstant: 240),
-            findConstraint,
+        ])
+        let ring = PaneFocusRing()
+        ring.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(ring)
+        NSLayoutConstraint.activate([
+            ring.topAnchor.constraint(equalTo: titleStrip.topAnchor),
+            ring.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            ring.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            ring.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
         applyDisplayMode()
         // Do not scale here. bounds are still zero, and PDFView would stick at minScaleFactor (10%).
@@ -86,17 +101,29 @@ final class PDFContainerViewController: NSViewController {
         pdfView.onMouseUp = { [weak self] in self?.captureSelection() }
         pdfView.highlightIDAt = { [weak self] point in self?.highlightID(atViewPoint: point) }
         pdfView.onRemoveHighlight = { [weak self] id in self?.session.deleteHighlight(id: id) }
-        pdfView.onOpenHighlight = { [weak self] id in
-            self?.session.lastAnnotationHit = id
-            self?.session.openAnnotation(id)
+        pdfView.onOpenHighlight = { [weak self] id, option in
+            guard let self else { return }
+            if option {
+                (self.view.window?.windowController as? ReaderWindowController)?.openInPane(id: id)
+                return
+            }
+            self.session.lastAnnotationHit = id
+            self.session.openAnnotation(id)
         }
         pdfView.conceptAt = { [weak self] point in self?.conceptID(atViewPoint: point) }
         pdfView.onConcept = { [weak self] id in self?.presentConcept(id) }
         pdfView.session = session
         pdfView.prepareSelection = { [weak self] in self?.captureSelection(showBar: false) }
         pdfView.beginFind = { [weak self] in self?.toggleFind() }
-        session.onAnnotationsChanged = { [weak self] in self?.refreshAnnotations() }
+        session.watchAnnotations(self) { [weak self] in
+            self?.refreshAnnotations()
+        }
         refreshAnnotations()
+        setPaneActive(publishesPosition)
+    }
+
+    deinit {
+        session.unwatchAnnotations(self)
     }
 
     override func viewDidLayout() {
@@ -108,13 +135,14 @@ final class PDFContainerViewController: NSViewController {
     /// The PDF scroll view fills the full-height pane, which runs under the toolbar.
     /// Move the view down so the page starts at the bottom edge of the bar.
     private func placePDFBelowToolbar() {
-        guard findBar.isHidden, let window = view.window, let constraint = pdfTopConstraint else { return }
+        guard let window = view.window, let constraint = stripTop else { return }
         let topInWindow = view.convert(view.bounds, to: nil).maxY
         let overlap = topInWindow - window.contentLayoutRect.maxY
         let constant = overlap > 0.5 ? overlap : 0
         if abs(constraint.constant - constant) > 0.5 {
             constraint.constant = constant
         }
+        refreshPaneTitle()
         if let scroll = enclosingScrollClip(in: pdfView)?.enclosingScrollView {
             scroll.automaticallyAdjustsContentInsets = false
             if scroll.contentInsets.top != 0 {
@@ -150,8 +178,18 @@ final class PDFContainerViewController: NSViewController {
         guard view.window != nil else { return }
         let bounds = pdfView.bounds
         guard bounds.width > 160, bounds.height > 160, pdfView.document != nil else { return }
+        // Restore a pending mark (or saved place) before capturing the destination
+        // used to hold the page across a scale change. Otherwise the pre-restore
+        // page 1 (or a 0-based neighbor) is fitted back into view and the subtitle
+        // shows the wrong page.
+        if session.pendingMarkReveal != nil || !didRestorePosition {
+            restorePositionOnce()
+        }
         let anchored = pdfView.currentDestination
-        let mode: FitMode = session.hasSavedViewState ? session.fitMode : .fitPage
+        let mode: FitMode = {
+            if !publishesPosition, let lockedFit { return lockedFit }
+            return session.hasSavedViewState ? session.fitMode : .fitPage
+        }()
         switch mode {
         case .fitPage:
             guard force || bounds.size != lastFitSize else {
@@ -167,7 +205,7 @@ final class PDFContainerViewController: NSViewController {
             }
             pdfView.autoScales = true
             suppressScaleSave = false
-            session.rememberZoom(pdfView.scaleFactor, fit: .fitPage)
+            storeZoom(pdfView.scaleFactor, fit: .fitPage)
         case .fitWidth:
             guard bounds.size != lastFitSize else {
                 restorePositionOnce()
@@ -193,7 +231,7 @@ final class PDFContainerViewController: NSViewController {
             lastFitSize = bounds.size
             suppressScaleSave = true
             pdfView.autoScales = false
-            let scale = min(max(session.zoom, 0.25), pdfView.maxScaleFactor)
+            let scale = min(max(lockedZoom ?? session.zoom, 0.25), pdfView.maxScaleFactor)
             pdfView.scaleFactor = scale
             suppressScaleSave = false
         }
@@ -211,6 +249,19 @@ final class PDFContainerViewController: NSViewController {
     }
 
     private func restorePositionOnce() {
+        if let pending = session.pendingMarkReveal {
+            guard pdfView.bounds.width > 160, pdfView.document != nil else { return }
+            session.pendingMarkReveal = nil
+            didRestorePosition = true
+            reveal(pending)
+            pinPageFromMark(pending)
+            session.finishViewRestore()
+            return
+        }
+        guard publishesPosition else {
+            didRestorePosition = true
+            return
+        }
         guard !didRestorePosition else { return }
         guard pdfView.bounds.width > 160, pdfView.document != nil else { return }
         didRestorePosition = true
@@ -232,7 +283,31 @@ final class PDFContainerViewController: NSViewController {
     }
 
     func capturePositionForSave() {
+        guard publishesPosition else { return }
         session.rememberScroll(currentPosition())
+    }
+
+    func freezeLayout() {
+        lockedFit = session.fitMode
+        lockedZoom = Double(pdfView.scaleFactor)
+    }
+
+    func publishCurrentPosition() {
+        guard let page = pdfView.currentPage, let document = pdfView.document else { return }
+        let index = document.index(for: page)
+        guard index != NSNotFound else { return }
+        let number = index + 1
+        let section = session.outline.last { ($0.page ?? 0) <= number }?.title
+        session.updatePage(number, count: document.pageCount, section: section)
+        session.rememberZoom(Double(pdfView.scaleFactor), fit: lockedFit ?? session.fitMode)
+        session.rememberScroll(currentPosition())
+    }
+
+    private func storeZoom(_ scale: CGFloat, fit: FitMode) {
+        lockedFit = fit
+        lockedZoom = Double(scale)
+        guard publishesPosition else { return }
+        session.rememberZoom(Double(scale), fit: fit)
     }
 
     func applyDisplayMode() {
@@ -271,14 +346,14 @@ final class PDFContainerViewController: NSViewController {
         pdfView.autoScales = false
         pdfView.scaleFactor = 1
         suppressScaleSave = false
-        session.rememberZoom(1, fit: .actual)
+        storeZoom(1, fit: .actual)
     }
 
     func zoomToFit() {
         suppressScaleSave = true
         pdfView.autoScales = true
         suppressScaleSave = false
-        session.rememberZoom(pdfView.scaleFactor, fit: .fitPage)
+        storeZoom(pdfView.scaleFactor, fit: .fitPage)
     }
 
     func fitWidth() {
@@ -290,7 +365,7 @@ final class PDFContainerViewController: NSViewController {
         suppressScaleSave = true
         pdfView.scaleFactor = available / width
         suppressScaleSave = false
-        session.rememberZoom(pdfView.scaleFactor, fit: .fitWidth)
+        storeZoom(pdfView.scaleFactor, fit: .fitWidth)
     }
 
     func zoomIn() { pdfView.zoomIn(nil) }
@@ -304,7 +379,7 @@ final class PDFContainerViewController: NSViewController {
         let factor = min(size.width / max(bounds.width, 1), size.height / max(bounds.height, 1)) * 0.9
         pdfView.scaleFactor = min(max(factor, pdfView.minScaleFactor), pdfView.maxScaleFactor)
         pdfView.go(to: bounds, on: page)
-        session.rememberZoom(pdfView.scaleFactor, fit: .custom)
+        storeZoom(pdfView.scaleFactor, fit: .custom)
     }
 
     func nextPage() { pdfView.goToNextPage(nil) }
@@ -322,13 +397,13 @@ final class PDFContainerViewController: NSViewController {
         return true
     }
 
-    func toggleFind() {
-        findBar.isHidden = false
-        findTop?.constant = 8
-        pdfTopConstraint?.isActive = false
-        let belowFind = pdfView.topAnchor.constraint(equalTo: findBar.bottomAnchor, constant: 4)
-        belowFind.isActive = true
-        pdfTopConstraint = belowFind
+    func setPaneActive(_ active: Bool) {
+        titleStrip.setActive(active)
+        refreshPaneTitle()
+    }
+
+    func focusFind() {
+        setPaneActive(true)
         if findBar.stringValue.isEmpty { findBar.stringValue = session.findQuery }
         view.layoutSubtreeIfNeeded()
         DispatchQueue.main.async { [weak self] in
@@ -338,11 +413,33 @@ final class PDFContainerViewController: NSViewController {
         }
     }
 
-    func search(_ query: String) {
+    func toggleFind() {
+        focusFind()
+    }
+
+    func setFindCount(_ text: String) {
+        titleStrip.setCount(text)
+    }
+
+    private func refreshPaneTitle() {
+        let title = session.bookURL.deletingPathExtension().lastPathComponent
+        titleStrip.show(title: title, page: "p. \(displayedPageNumber())")
+    }
+
+    private func displayedPageNumber() -> Int {
+        guard let page = pdfView.currentPage, let document = pdfView.document else { return session.page }
+        let index = document.index(for: page)
+        guard index != NSNotFound else { return session.page }
+        return index + 1
+    }
+
+    func search(_ query: String, explicitAdvance: Bool = true) {
+        ownsFindSession = true
+        (view.window?.windowController as? ReaderWindowController)?.claimFindSession(from: self)
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let hasMatches = !matches.isEmpty && matches.first?.string?.localizedCaseInsensitiveContains(trimmed) == true
-        let command = FindQuery.command(query: trimmed, previous: lastFindQuery, hasMatches: hasMatches, committed: findCommitted)
+        let command = FindQuery.command(query: trimmed, previous: lastFindQuery, hasMatches: hasMatches, committed: findCommitted, explicitAdvance: explicitAdvance)
         findBar.stringValue = trimmed
         session.findQuery = trimmed
         switch command {
@@ -377,7 +474,7 @@ final class PDFContainerViewController: NSViewController {
 
     private func ownsFind(_ notification: Notification) -> Bool {
         guard let document = pdfView.document else { return false }
-        return (notification.object as? PDFDocument) === document
+        return ownsFindSession && (notification.object as? PDFDocument) === document
     }
 
     private func publishHits() {
@@ -408,7 +505,7 @@ final class PDFContainerViewController: NSViewController {
     }
 
     @objc private func findFromBar() {
-        search(findBar.stringValue.isEmpty ? session.findQuery : findBar.stringValue)
+        search(findBar.stringValue.isEmpty ? session.findQuery : findBar.stringValue, explicitAdvance: FindCommit.isExplicitAdvance())
     }
     func findNext() { stepMatch(forward: true) }
     func findPrevious() { stepMatch(forward: false) }
@@ -428,6 +525,9 @@ final class PDFContainerViewController: NSViewController {
     /// Find Next moves one match. A new search must not call this before the first hit is shown.
     private func stepMatch(forward: Bool) {
         let query = findBar.stringValue.isEmpty ? session.findQuery : findBar.stringValue
+        session.findQuery = query
+        ownsFindSession = true
+        (view.window?.windowController as? ReaderWindowController)?.claimFindSession(from: self)
         guard !query.isEmpty else { return }
         if matches.isEmpty || matches.first?.string?.localizedCaseInsensitiveContains(query) != true {
             lastFindQuery = query
@@ -482,6 +582,7 @@ final class PDFContainerViewController: NSViewController {
     }
 
     func refreshAnnotations() {
+        applyDisplayedRotations()
         for annotation in annotations {
             annotation.page?.removeAnnotation(annotation)
         }
@@ -520,6 +621,14 @@ final class PDFContainerViewController: NSViewController {
         }
         addConceptMarkers(to: document)
         overlay.needsLayout = true
+    }
+
+    private func applyDisplayedRotations() {
+        guard let document = pdfView.document else { return }
+        for (key, rotation) in session.package.state.rotations {
+            guard let number = Int(key), let page = document.page(at: number - 1) else { continue }
+            if page.rotation != rotation { page.rotation = rotation }
+        }
     }
 
     private func addConceptMarkers(to document: PDFDocument) {
@@ -564,6 +673,31 @@ final class PDFContainerViewController: NSViewController {
         }
     }
 
+    /// Prefer the 1-based page stored on the mark, not PDFKit's 0-based index or
+    /// the left page of a two-page spread, so the window subtitle stays correct.
+    private func pinPageFromMark(_ position: ReadingPosition) {
+        guard let page = position.page else { return }
+        let number = max(page, 1)
+        pinnedRevealPage = number
+        if publishesPosition {
+            let count = pdfView.document?.pageCount ?? session.pageCount
+            session.updatePage(number, count: max(count, 1), section: position.section ?? session.sectionTitle)
+        }
+        refreshPaneTitle()
+        // Hold through PDFKit's follow-up pageChanged, then allow normal updates.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if self.pinnedRevealPage == number {
+                if self.publishesPosition {
+                    let count = self.pdfView.document?.pageCount ?? self.session.pageCount
+                    self.session.updatePage(number, count: max(count, 1), section: position.section ?? self.session.sectionTitle)
+                    self.refreshPaneTitle()
+                }
+                self.pinnedRevealPage = nil
+            }
+        }
+    }
+
     func reveal(_ position: ReadingPosition) {
         guard let document = pdfView.document else { return }
         let index = min(max((position.page ?? 1) - 1, 0), max(document.pageCount - 1, 0))
@@ -574,8 +708,25 @@ final class PDFContainerViewController: NSViewController {
         }
         let bounds = page.bounds(for: pdfView.displayBox)
         let y = position.pdfY ?? (bounds.maxY - (position.scrollY ?? 0) * bounds.height)
-        let rect = NSRect(x: position.pdfX ?? bounds.minX, y: y - 12, width: 12, height: 12)
-        pdfView.go(to: rect, on: page)
+        // A destination puts this point at the top of the view. go(to:rect:) leaves
+        // the page where it is when that corner is already barely on screen.
+        let destination = PDFDestination(page: page, at: NSPoint(x: position.pdfX ?? bounds.minX, y: y))
+        pdfView.go(to: destination)
+        pinPageFromMark(position)
+    }
+
+    /// Scrolls this pane only and flashes the quote for about a second.
+    func showInPane(_ position: ReadingPosition) {
+        reveal(position)
+        guard let document = pdfView.document, let pageNumber = position.page, let page = document.page(at: pageNumber - 1) else { return }
+        guard let quote = position.quote, let string = page.string, let range = string.range(of: quote), let selection = page.selection(for: NSRange(range, in: string)) else { return }
+        pdfView.setCurrentSelection(selection, animate: true)
+        let flash = PDFAnnotation(bounds: selection.bounds(for: page), forType: .highlight, withProperties: nil)
+        flash.color = NSColor.systemYellow.withAlphaComponent(0.55)
+        page.addAnnotation(flash)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            page.removeAnnotation(flash)
+        }
     }
 
     var noteHostView: NSView { pdfView }
@@ -718,16 +869,35 @@ final class PDFContainerViewController: NSViewController {
     }
 
     @objc private func pageChanged() {
+        overlay.needsLayout = true
+        refreshPaneTitle()
+        guard publishesPosition else { return }
+        // A mark or vault-link restore is still waiting; keep the 1-based page
+        // already written onto the session so the subtitle does not flash the
+        // document's initial page.
+        if session.pendingMarkReveal != nil { return }
         guard let page = pdfView.currentPage, let document = pdfView.document else { return }
-        let number = document.index(for: page) + 1
+        let index = document.index(for: page)
+        guard index != NSNotFound else { return }
+        let number = index + 1
+        if let pinned = pinnedRevealPage {
+            if number == pinned {
+                pinnedRevealPage = nil
+            } else {
+                // PDFKit often reports the left page of a spread, or a neighbor
+                // still on screen after go(to:). Hold the 1-based mark page.
+                session.updatePage(pinned, count: document.pageCount, section: session.sectionTitle)
+                refreshPaneTitle()
+                return
+            }
+        }
         let section = session.outline.last { ($0.page ?? 0) <= number }?.title
         session.updatePage(number, count: document.pageCount, section: section)
         session.rememberScroll(currentPosition())
-        overlay.needsLayout = true
     }
 
     @objc private func scrolled() {
-        session.rememberScroll(currentPosition())
+        if publishesPosition { session.rememberScroll(currentPosition()) }
         (view.window?.windowController as? ReaderWindowController)?.dismissSelectionBar()
     }
 
@@ -738,13 +908,13 @@ final class PDFContainerViewController: NSViewController {
         let scale = pdfView.scaleFactor
         guard scale.isFinite, scale > 0.05 else { return }
         if pdfView.autoScales {
-            session.rememberZoom(scale, fit: .fitPage)
-        } else if session.fitMode == .fitWidth {
-            session.rememberZoom(scale, fit: .fitWidth)
-        } else if abs(scale - 1) < 0.001 && session.fitMode == .actual {
-            session.rememberZoom(1, fit: .actual)
+            storeZoom(scale, fit: .fitPage)
+        } else if (lockedFit ?? session.fitMode) == .fitWidth {
+            storeZoom(scale, fit: .fitWidth)
+        } else if abs(scale - 1) < 0.001 && (lockedFit ?? session.fitMode) == .actual {
+            storeZoom(1, fit: .actual)
         } else {
-            session.rememberZoom(scale, fit: .custom)
+            storeZoom(scale, fit: .custom)
         }
     }
 
@@ -781,7 +951,7 @@ final class ReaderPDFView: PDFView {
     var onMouseUp: (() -> Void)?
     var highlightIDAt: ((NSPoint) -> String?)?
     var onRemoveHighlight: ((String) -> Void)?
-    var onOpenHighlight: ((String) -> Void)?
+    var onOpenHighlight: ((String, Bool) -> Void)?
     var conceptAt: ((NSPoint) -> String?)?
     var onConcept: ((String) -> Void)?
     var prepareSelection: (() -> Void)?
@@ -791,7 +961,7 @@ final class ReaderPDFView: PDFView {
         super.mouseUp(with: event)
         let point = convert(event.locationInWindow, from: nil)
         if let id = highlightIDAt?(point) {
-            onOpenHighlight?(id)
+            onOpenHighlight?(id, event.modifierFlags.contains(.option))
             return
         }
         if let id = conceptAt?(point) {
@@ -1026,6 +1196,11 @@ final class NoteOverlay: NSView {
 
     @objc private func open(_ sender: NSClickGestureRecognizer) {
         guard let id = (sender.view as? NSImageView)?.identifier?.rawValue else { return }
+        let option = NSEvent.modifierFlags.contains(.option) || NSApp.currentEvent?.modifierFlags.contains(.option) == true
+        if option {
+            (window?.windowController as? ReaderWindowController)?.openInPane(id: id)
+            return
+        }
         session?.lastAnnotationHit = id
         session?.openAnnotation(id)
     }

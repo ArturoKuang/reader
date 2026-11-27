@@ -6,6 +6,8 @@ final class ReaderDocument: NSDocument {
     private var vault: VaultCoordinator?
     private var bookData = Data()
     private static var pendingVaultNotice: String?
+    /// Set while a book is being opened into an existing pane, so it does not also get its own window.
+    static var openingIntoPane = false
     private static var queuedLinks: [String: ReaderLink] = [:]
 
     /// Holds a deep link until `read` builds the session, so the first layout can land on it.
@@ -51,6 +53,18 @@ final class ReaderDocument: NSDocument {
                 session.page = max(session.package.state.page, 1)
             }
             coordinator.attach(session)
+            let storedMarks = BookMarks.load(applicationSupport: AppPaths.support, fingerprint: identity.fingerprint, fs: fs)
+            if !storedMarks.isEmpty {
+                session.package.marks.marks = storedMarks
+            }
+            if let pending = MarkOpenQueue.take(path: opened.url.path) {
+                session.pendingMarkReveal = pending
+                if let page = pending.page {
+                    session.page = max(page, 1)
+                    session.package.state.page = session.page
+                }
+                if let scroll = pending.scrollY { session.package.state.scrollY = scroll }
+            }
             if let link = Self.takeQueuedLink(for: opened.url.path) {
                 session.pendingReaderLink = link
             }
@@ -81,6 +95,14 @@ final class ReaderDocument: NSDocument {
         )
         try index.save(to: AppPaths.indexFile, fs: fs)
         let session = ReaderSession(bookURL: opened.url, bookData: opened.data, open: result)
+        if let pending = MarkOpenQueue.take(path: opened.url.path) {
+            session.pendingMarkReveal = pending
+            if let page = pending.page {
+                session.page = max(page, 1)
+                session.package.state.page = session.page
+            }
+            if let scroll = pending.scrollY { session.package.state.scrollY = scroll }
+        }
         if let link = Self.takeQueuedLink(for: opened.url.path) {
             session.pendingReaderLink = link
         }
@@ -102,15 +124,65 @@ final class ReaderDocument: NSDocument {
     }
 
     override func makeWindowControllers() {
+        if Self.openingIntoPane { return }
         guard let session else { return }
         session.undoManager = undoManager
         let controller = ReaderWindowController(session: session)
         addWindowController(controller)
         session.undoManager = undoManager
+        controller.attachHostDocument()
         refreshSubtitle()
+        Task { @MainActor in
+            SyncController.shared.register(session)
+            SyncController.shared.applyOpeningPosition(to: session)
+        }
     }
 
-    /// Autosave writes the sidecar only. The book file is never replaced.
+    override func close() {
+        if let session {
+            Task { @MainActor in
+                SyncController.shared.unregister(session)
+            }
+        }
+        super.close()
+    }
+
+    static func openMark(path: String, position: ReadingPosition) {
+        MarkOpenQueue.store(path: path, position: position)
+        NSDocumentController.shared.openDocument(withContentsOf: URL(fileURLWithPath: path), display: true) { document, _, _ in
+            (document as? ReaderDocument)?.revealMark(position)
+        }
+    }
+
+    func revealMark(_ position: ReadingPosition) {
+        session?.pendingMarkReveal = position
+        if let page = position.page {
+            session?.page = max(page, 1)
+            session?.package.state.page = session?.page ?? 1
+        }
+        if let scroll = position.scrollY {
+            session?.package.state.scrollY = scroll
+        }
+        if let controller = windowControllers.first as? ReaderWindowController {
+            controller.reveal(position)
+        }
+    }
+
+    override func save(_ sender: Any?) {
+        // Avoid NSDocument's performActivityWithSynchronousWaiting path.
+        // If an earlier activity is stuck (historically a modal "Save to Vault"
+        // alert during windowDidBecomeKey), that wait freezes the main thread
+        // at 0% CPU with no recovery.
+        for controller in windowControllers {
+            controller.window?.endEditing(for: nil)
+        }
+        persistSidecarOrVault(clearEdited: true) { [weak self] error in
+            if let error {
+                self?.presentError(error)
+            }
+        }
+    }
+
     func reveal(_ link: ReaderLink) {
         _ = Self.takeQueuedLink(for: link.path)
         guard let session else {
@@ -125,25 +197,45 @@ final class ReaderDocument: NSDocument {
         }
     }
 
+    /// Autosave writes the sidecar only. The book file is never replaced.
     override func save(to url: URL, ofType typeName: String, for saveOperation: NSDocument.SaveOperationType, completionHandler: @escaping (Error?) -> Void) {
+        // May be invoked off the main thread during autosave. AppKit work and
+        // the completion handler must run on the main thread. If we are already
+        // on the main thread, complete synchronously — dispatching async here
+        // deadlocks performActivityWithSynchronousWaiting.
+        let clearEdited = saveOperation != .saveToOperation
+        let finish: (Error?) -> Void = { error in
+            completionHandler(error)
+        }
+        if Thread.isMainThread {
+            persistSidecarOrVault(clearEdited: clearEdited, completion: finish)
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.persistSidecarOrVault(clearEdited: clearEdited, completion: finish) ?? finish(nil)
+            }
+        }
+    }
+
+    private func persistSidecarOrVault(clearEdited: Bool, completion: @escaping (Error?) -> Void) {
         if session?.usesVault == true {
-            session?.onVaultFlush?()
-            if saveOperation != .saveToOperation {
+            session?.persistVaultMarks()
+            session?.onVaultSave?()
+            if clearEdited {
                 updateChangeCount(.changeCleared)
             }
-            completionHandler(nil)
+            completion(nil)
             return
         }
         do {
             try session?.persistSidecar()
-            // This override replaces NSDocument's save, which is what normally
+            // This path replaces NSDocument's save, which is what normally
             // clears the edited flag. Without this, " — Edited" stays after ⌘S.
-            if saveOperation != .saveToOperation {
+            if clearEdited {
                 updateChangeCount(.changeCleared)
             }
-            completionHandler(nil)
+            completion(nil)
         } catch {
-            completionHandler(error)
+            completion(error)
         }
     }
 
@@ -160,16 +252,48 @@ final class ReaderDocument: NSDocument {
         refreshSubtitle()
     }
 
+    /// Writes the sidecar, then closes the document. Used when the last pane of this book goes away.
+    func saveForPaneClose() {
+        let url = fileURL ?? session?.bookURL
+        let finish: (Error?) -> Void = { [weak self] error in
+            guard let self else { return }
+            if error != nil { try? self.session?.persistSidecar() }
+            if !self.isShownInAWindow() { self.close() }
+        }
+        guard let url else {
+            finish(nil)
+            return
+        }
+        save(to: url, ofType: fileType ?? "com.adobe.pdf", for: .autosaveInPlaceOperation, completionHandler: finish)
+    }
+
+    private func isShownInAWindow() -> Bool {
+        guard let session else { return !windowControllers.isEmpty }
+        for case let reader as ReaderDocument in NSDocumentController.shared.documents {
+            for controller in reader.windowControllers {
+                if (controller as? ReaderWindowController)?.shows(session) == true { return true }
+            }
+        }
+        return false
+    }
+
     /// Page or section text only. AppKit appends " — Edited" while the document
     /// is dirty and removes it when the change count is cleared.
     func refreshSubtitle() {
-        guard let session, let window = windowControllers.first?.window else { return }
-        if session.isPDF {
-            window.subtitle = "Page \(session.page) of \(max(session.pageCount, 1))"
-        } else {
-            window.subtitle = session.sectionTitle.isEmpty ? "EPUB" : session.sectionTitle
+        guard let session else { return }
+        let active = windowControllers.compactMap { controller -> NSWindow? in
+            guard let reader = controller as? ReaderWindowController, reader.session === session else { return nil }
+            return controller.window
         }
-        window.title = session.bookURL.deletingPathExtension().lastPathComponent
+        let windows = active.isEmpty ? windowControllers.compactMap(\.window) : active
+        for window in windows {
+            if session.isPDF {
+                window.subtitle = "Page \(session.page) of \(max(session.pageCount, 1))"
+            } else {
+                window.subtitle = session.sectionTitle.isEmpty ? "EPUB" : session.sectionTitle
+            }
+            window.title = session.bookURL.deletingPathExtension().lastPathComponent
+        }
     }
 
     private static func resolveBook(_ url: URL) throws -> (url: URL, data: Data, kind: BookKind) {

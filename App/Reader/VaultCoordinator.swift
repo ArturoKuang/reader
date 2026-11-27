@@ -55,6 +55,12 @@ final class VaultCoordinator {
             guard let self, let session, self.settings.enabled else { return }
             self.scheduleFlush(session)
         }
+        session.onVaultSave = { [weak self, weak session] in
+            guard let self, let session, self.settings.enabled else { return }
+            self.flushTimer?.invalidate()
+            self.flushTimer = nil
+            self.flush(session)
+        }
         session.onSaveVaultState = { [weak self, weak session] in
             guard let self, let session else { return }
             let wasWriting = self.settings.enabled
@@ -173,7 +179,7 @@ final class VaultCoordinator {
         loadedBlockIDs = ids
         session.wordsFromVault(loadVocabulary(title: session.bookURL.deletingPathExtension().lastPathComponent))
         session.objectWillChange.send()
-        session.onAnnotationsChanged?()
+        session.publishAnnotationsChanged()
     }
 
     func scheduleFlush(_ session: ReaderSession) {
@@ -194,6 +200,7 @@ final class VaultCoordinator {
         settings.view = session.package.state
         settings.claudeSessionID = session.claudeSessionID
         settings.showConceptMarkers = session.showConceptMarkers
+        session.persistVaultMarks()
         try? settings.save(bookFolder: location.bookFolder, fs: fs)
     }
 

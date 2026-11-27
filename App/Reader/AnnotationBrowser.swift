@@ -14,7 +14,7 @@ struct AnnotationBrowser: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading, spacing: 6) {
-                TextField("Search notes and highlights", text: $session.annotationQuery)
+                TextField("Search notes…", text: $session.annotationQuery)
                     .textFieldStyle(.roundedBorder)
                 Menu {
                     Section("Show") {
@@ -44,7 +44,19 @@ struct AnnotationBrowser: View {
             if session.visibleAnnotations.isEmpty {
                 Group {
                     if session.annotationQuery.isEmpty && session.annotationFilter == "all" {
-                        ContentUnavailableView("No highlights or notes yet", systemImage: "highlighter", description: Text("Select text, then press ⌃⌘1–6 to highlight or ⇧⌘N to add a note."))
+                        VStack(spacing: 8) {
+                            Image(systemName: "highlighter")
+                                .font(.system(size: 28))
+                                .foregroundStyle(.secondary)
+                            Text("No highlights or notes yet")
+                                .font(.system(size: 17, weight: .semibold))
+                            Text("Select text, then press ⌃⌘1–6 to highlight or ⇧⌘N to add a note.")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .padding(24)
                     } else {
                         ContentUnavailableView.search(text: session.annotationQuery)
                     }
@@ -63,6 +75,10 @@ struct AnnotationBrowser: View {
                 }
                 .onChange(of: session.annotationSelection) { _, ids in
                     guard !suppressJump, ids.count == 1, let id = ids.first, let item = session.visibleAnnotations.first(where: { $0.id == id }) else { return }
+                    if NSEvent.modifierFlags.contains(.option) {
+                        (NSApp.keyWindow?.windowController as? ReaderWindowController)?.openInPane(item)
+                        return
+                    }
                     onJump(item)
                 }
                 .onCopyCommand {
@@ -81,6 +97,7 @@ struct AnnotationBrowser: View {
                     self.selectionMenu(ids)
                 }, primaryAction: { ids in
                     guard let id = ids.first, let item = session.annotations.first(where: { $0.id == id }) else { return }
+                    if NSEvent.modifierFlags.contains(.option) { return }
                     beginEditing(item)
                 })
                 .onDeleteCommand { session.deleteSelectedAnnotations() }
@@ -175,6 +192,9 @@ struct AnnotationBrowser: View {
             Button("Delete \(ids.count) Items") { session.deleteAnnotations(ids: ids) }
         } else if let id = ids.first, let item = session.annotations.first(where: { $0.id == id }) {
             Button("Edit Note") { beginEditing(item) }
+            Button("Open in Pane") {
+                (NSApp.keyWindow?.windowController as? ReaderWindowController)?.openInPane(item)
+            }
             Menu("Color") {
                 ForEach(1...6, id: \.self) { color in
                     Button(HighlightCallout.name(for: color).capitalized) {
