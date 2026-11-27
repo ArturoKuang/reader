@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { parseHostMessage, parseViewerMessage } from "../reader/bridge";
 import { viewportRectToPdfRect } from "../reader/pdfRects";
 import { applyLocated } from "../reader/applyLocated";
+import { epubViewerHtml } from "../reader/viewerHtml";
 import { emptyShelf, parseShelf, serializeShelf } from "../reader/shelf";
 import { addHighlight, reanchorRecords } from "../highlight/store";
 import type { HighlightRecord } from "../contract/types";
@@ -147,5 +148,13 @@ describe("sample books", () => {
     };
     expect(catalog.pdf.fingerprint).toBe(`sha256:${createHash("sha256").update(pdf).digest("hex")}`);
     expect(catalog.epub.fingerprint).toBe(`sha256:${createHash("sha256").update(epub).digest("hex")}`);
+  });
+});
+
+describe("epub viewer HTML", () => {
+  test("the CFI spine regex is valid after template-literal escaping", () => {
+    const html = epubViewerHtml();
+    expect(html).toContain(String.raw`/epubcfi\(\/6\/(\d+)/`);
+    expect(html).not.toContain("/epubcfi(/6/(d+)/");
   });
 });

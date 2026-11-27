@@ -496,7 +496,7 @@ document.body.append(view);
 const highlights = new Map();
 let sections = [];
 function epubCfiSpineIndex(cfi) {
-  const match = /epubcfi\(\/6\/(\d+)/.exec(cfi || "");
+  const match = /epubcfi\\(\\/6\\/(\\d+)/.exec(cfi || "");
   if (!match) return null;
   const step = Number(match[1]);
   if (!Number.isFinite(step) || step < 2 || step % 2 !== 0) return null;
