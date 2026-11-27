@@ -22,7 +22,7 @@ export const tokens = {
     synced: { dot: "#27AE60", label: "Synced" },
     syncing: { dot: "#2F80ED", label: "Syncing…" },
     offline: { dot: "#8E8E93", label: "Offline, changes saved" },
-    conflict: { dot: "#F2994A", label: "2 versions to review" },
+    conflict: { dot: "#F2994A", label: "1 version to review" },
     error: { dot: "#EB5757", label: "Can't reach Mac mini" },
     storageFull: {
       dot: "#EB5757",
@@ -50,6 +50,11 @@ export const tokens = {
   line: "#E5E3DF",
   selection: "rgba(47, 128, 237, 0.18)",
 };
+
+/** Chip copy for open conflicts. One conflict is one shared record with two device versions. */
+export function conflictVersionsLabel(count: number): string {
+  return count === 1 ? "1 version to review" : `${count} versions to review`;
+}
 
 export function highlightPaint(hex: string): string {
   const value = hex.replace("#", "");

@@ -1,13 +1,18 @@
 import { useState } from "react";
 import { Modal, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { tokens } from "../ui/tokens";
+import { conflictVersionsLabel, tokens } from "../ui/tokens";
 import type { SyncStatus } from "./status";
 import { ConflictCard } from "./ConflictCard";
 import type { OpenConflict } from "./wire";
 import { PairingScan } from "../ui/PairingScan";
 
 const chip = tokens.syncStatus;
+
+function statusLabel(status: SyncStatus): string {
+  if (status.state === "conflict") return conflictVersionsLabel(status.conflictCount);
+  return chip[status.state].label;
+}
 
 export function SyncStatusChip({ status, onPress }: { status: SyncStatus; onPress?: () => void }) {
   const tone = chip[status.state];
@@ -21,7 +26,7 @@ export function SyncStatusChip({ status, onPress }: { status: SyncStatus; onPres
     >
       <View style={styles.row}>
         <View style={[styles.dot, { backgroundColor: tone.dot }]} />
-        <Text style={styles.chipLabel}>{tone.label}</Text>
+        <Text style={styles.chipLabel}>{statusLabel(status)}</Text>
       </View>
     </Pressable>
   );
@@ -66,11 +71,14 @@ export function SyncChrome({
 
   function toggleSheet() {
     if (status.state === "error") onRetry?.();
-    if (status.state === "conflict" && onOpenConflict && conflicts[0]) {
-      onOpenConflict(conflicts[0]);
-      return;
-    }
     setOpen((value) => !value);
+  }
+
+  function reviewInNotebook() {
+    const conflict = conflicts[0];
+    if (!conflict) return;
+    closeSheet();
+    onOpenConflict?.(conflict);
   }
 
   return (
@@ -182,9 +190,24 @@ export function SyncChrome({
                 </Pressable>
               </View>
             ) : null}
-            {status.state === "conflict"
-              ? conflicts.map((conflict) => <ConflictCard key={conflict.conflictId} conflict={conflict} />)
-              : null}
+            {conflicts.length > 0 ? (
+              <View style={styles.block}>
+                {conflicts.map((conflict) => (
+                  <ConflictCard key={conflict.conflictId} conflict={conflict} />
+                ))}
+                {onOpenConflict ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Review in Notebook"
+                    testID="review-in-notebook"
+                    onPress={reviewInNotebook}
+                    style={styles.buttonSecondary}
+                  >
+                    <Text style={styles.buttonLabelDark}>Review in Notebook</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            ) : null}
           </View>
         </View>
       </Modal>

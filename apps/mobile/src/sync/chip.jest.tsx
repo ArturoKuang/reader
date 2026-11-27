@@ -78,3 +78,39 @@ describe("unpaired chip", () => {
     expect(screen.queryByText("Synced")).toBeNull();
   });
 });
+
+describe("conflict chip label", () => {
+  it("shows 1 version to review for a single conflict", async () => {
+    await render(
+      <SyncStatusChip
+        status={{
+          state: "conflict",
+          pendingCount: 0,
+          conflictCount: 1,
+          pausedBookIds: [],
+          lastSyncedAt: null,
+        }}
+      />,
+    );
+    expect(screen.getByLabelText("sync conflict")).toBeTruthy();
+    expect(screen.getByText("1 version to review")).toBeTruthy();
+    expect(screen.queryByText("2 versions to review")).toBeNull();
+  });
+
+  it("shows the real count for multiple conflicts", async () => {
+    await render(
+      <SyncStatusChip
+        status={{
+          state: "conflict",
+          pendingCount: 0,
+          conflictCount: 3,
+          pausedBookIds: [],
+          lastSyncedAt: null,
+        }}
+      />,
+    );
+    expect(screen.getByText("3 versions to review")).toBeTruthy();
+    expect(screen.queryByText("2 versions to review")).toBeNull();
+  });
+});
+

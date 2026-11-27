@@ -1,11 +1,36 @@
 import type { BookListItem } from "./wire";
 import { SyncApiError, type SyncTransport } from "./transport";
 
-export async function sha256Hex(bytes: Uint8Array): Promise<string> {
+/** Standalone copy so views with a non-zero byteOffset hash only the intended bytes. */
+function packedBytes(bytes: Uint8Array): Uint8Array {
   const copy = new Uint8Array(bytes.byteLength);
   copy.set(bytes);
-  const digest = await crypto.subtle.digest("SHA-256", copy);
+  return copy;
+}
+
+function hexOf(digest: ArrayBuffer): string {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * SHA-256 as 64 lowercase hex chars.
+ * Hermes has no `crypto.subtle`; use expo-crypto there. Node and web keep `subtle`.
+ * expo-crypto is required lazily so Node tests that have `subtle` do not load the ESM native module.
+ */
+function expoCryptoModule(): typeof import("expo-crypto") {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  return require("expo-crypto") as typeof import("expo-crypto");
+}
+
+export async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const packed = packedBytes(bytes);
+  const buffer = packed.buffer as ArrayBuffer;
+  const subtle = globalThis.crypto?.subtle;
+  if (typeof subtle?.digest === "function") {
+    return hexOf(await subtle.digest("SHA-256", buffer));
+  }
+  const expoCrypto = expoCryptoModule();
+  return hexOf(await expoCrypto.digest(expoCrypto.CryptoDigestAlgorithm.SHA256, buffer));
 }
 
 /**
