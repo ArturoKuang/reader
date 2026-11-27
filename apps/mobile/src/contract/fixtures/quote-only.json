@@ -1,0 +1,24 @@
+{
+  "quote": "natural selection",
+  "prefix": "NOT-A-PREFIX",
+  "suffix": "NOT-A-SUFFIX",
+  "corpus": [
+    {
+      "page": 2,
+      "section": "Ch. 1",
+      "text": "See natural selection in the first place."
+    },
+    {
+      "page": 3,
+      "section": "Ch. 2",
+      "text": "And natural selection again."
+    }
+  ],
+  "hit": {
+    "page": 2,
+    "section": "Ch. 1",
+    "prefix": "See ",
+    "suffix": " in the first place.",
+    "confidence": "quoteOnly"
+  }
+}
