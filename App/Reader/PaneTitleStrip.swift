@@ -50,6 +50,8 @@ final class PaneTitleStrip: NSView {
         findField.controlSize = .small
         findField.font = .systemFont(ofSize: 11)
         findField.focusRingType = .none
+        findField.sendsSearchStringImmediately = true
+        findField.sendsWholeSearchString = false
         findField.setContentHuggingPriority(.required, for: .horizontal)
         findField.setContentCompressionResistancePriority(.required, for: .horizontal)
         translatesAutoresizingMaskIntoConstraints = false

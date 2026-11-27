@@ -158,12 +158,12 @@ final class ReaderSession: ObservableObject {
         self.provider = SettingsStore.load().defaultProvider
         let fs = LocalFileSystem()
         globalHub.ensureLoaded(applicationSupport: AppPaths.support, fs: fs)
+        self.globalMarks = globalHub.marks
         globalHub.observe(globalObserver) { [weak self] marks in
             guard let self else { return }
             self.globalMarks = marks
             self.objectWillChange.send()
         }
-        self.globalMarks = globalHub.marks
         if isPDF {
             loadPDF()
         } else {

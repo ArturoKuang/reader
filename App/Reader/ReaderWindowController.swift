@@ -1115,6 +1115,13 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         return true
     }
 
+    func claimFindSession(from controller: NSViewController) {
+        for pane in readingPanes {
+            pane.pdf?.ownsFindSession = (pane.pdf === controller)
+            pane.epub?.ownsFindSession = (pane.epub === controller)
+        }
+    }
+
     func showFindCount(_ index: Int, of total: Int) {
         let text = total > 0 ? "\(index) of \(total)" : ""
         pdfController?.setFindCount(text)
