@@ -1,0 +1,20 @@
+{
+  "cases": [
+    {
+      "name": "empty quote",
+      "quote": "",
+      "prefix": "called ",
+      "suffix": " works",
+      "corpus": [{ "page": 1, "text": "called  works" }],
+      "hit": null
+    },
+    {
+      "name": "whitespace quote",
+      "quote": " \n\t ",
+      "prefix": "",
+      "suffix": "",
+      "corpus": [{ "page": 1, "text": "natural selection" }],
+      "hit": null
+    }
+  ]
+}

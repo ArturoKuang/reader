@@ -223,6 +223,40 @@ final class VaultTests: XCTestCase {
         XCTAssertEqual(try CLIOutput.parseClaude(stdout), "Why?")
         let link = ReaderLink(path: "/book.pdf", location: "page=4&y=12", id: "h1")
         XCTAssertEqual(ReaderLink.parse(link.url)?.pageNumber, 4)
+        XCTAssertEqual(ReaderLink.parse(link.url)?.verticalOffset, 12)
+    }
+
+    func testPDFVaultLinkResolvesTheHighlightThenThePage() {
+        let encoded = "reader://open?path=/books/book.pdf&loc=page%3D3&id=h_highlight&fp=sha256%3Aabc"
+        let parsed = ReaderLink.parse(encoded)
+        XCTAssertEqual(parsed?.path, "/books/book.pdf")
+        XCTAssertEqual(parsed?.pageNumber, 3)
+        XCTAssertEqual(parsed?.id, "h_highlight")
+        XCTAssertEqual(parsed?.fingerprint, "sha256:abc")
+        XCTAssertNil(parsed?.scrollFraction)
+
+        let fraction = ReaderLink.parse("reader://open?path=/books/book.pdf&loc=page%3D3%26fp%3D0.25")
+        XCTAssertEqual(fraction?.pageNumber, 3)
+        XCTAssertEqual(fraction?.scrollFraction, 0.25)
+        XCTAssertEqual(ReaderLink.parse("reader://open?path=/books/book.pdf&loc=page%253D2")?.pageNumber, 2)
+
+        let highlight = HighlightEntry(id: "h_highlight", color: 1, page: 3, quote: "on page three", rects: [[8, 10, 40, 22]])
+        let byID = PDFJumpResolver.resolve(link: ReaderLink(path: "/books/book.pdf", location: "page=1", id: "h_highlight"), highlights: [highlight], notes: [])
+        XCTAssertEqual(byID?.page, 3)
+        XCTAssertEqual(byID?.rects, [[8, 10, 40, 22]])
+        XCTAssertEqual(byID?.quote, "on page three")
+
+        let bare = ReaderLink(path: "/books/book.pdf", location: "page=3&fp=0.4&y=80")
+        let byPage = PDFJumpResolver.resolve(link: bare, highlights: [], notes: [])
+        XCTAssertEqual(byPage?.page, 3)
+        XCTAssertEqual(byPage?.scrollY, 0.4)
+        XCTAssertEqual(byPage?.pdfY, 80)
+        XCTAssertTrue(byPage?.rects.isEmpty == true)
+
+        let note = NoteEntry(id: "n1", page: 2, quote: "a note", body: "body")
+        let byNote = PDFJumpResolver.resolve(link: ReaderLink(path: "/books/book.pdf", id: "n1"), highlights: [], notes: [note])
+        XCTAssertEqual(byNote?.page, 2)
+        XCTAssertEqual(byNote?.quote, "a note")
     }
 
     func testChapterTextFileNames() throws {
@@ -294,5 +328,36 @@ final class VaultTests: XCTestCase {
         XCTAssertEqual(again, merged)
         XCTAssertEqual(AIError.missingKey(provider: "ChatGPT").userMessage, "Add a ChatGPT API key in Settings.")
         XCTAssertEqual(AIError.missingCLI(name: "Claude Code").userMessage, "Claude Code was not found. Set its path in Settings.")
+    }
+
+    func testPDFLookupHeadingAndVocabularyFileName() throws {
+        let fs = MemoryFileSystem()
+        try fs.createDirectory("/vault/books/boi")
+        let settings = VaultBookSettings()
+        let written = VaultPaths.vocabularyFile(bookFolder: "/vault/books/boi", settings: settings, fs: fs)
+        XCTAssertEqual(written, "/vault/books/boi/words.md")
+        XCTAssertEqual(ObsidianLink.displayPath(vaultRoot: "/vault", absolute: written), "books/boi/words.md")
+        try fs.createDirectory("/vault/books/boi/learner")
+        try fs.write("/vault/books/boi/learner/vocabulary.md", Data("# Vocabulary\n".utf8))
+        XCTAssertTrue(VaultPaths.vocabularyFile(bookFolder: "/vault/books/boi", settings: settings, fs: fs).hasSuffix("learner/vocabulary.md"))
+
+        let entry = VocabEntry(
+            id: "w_epistemology",
+            word: "epistemology",
+            chapter: nil,
+            page: 3,
+            meaning: "The study of knowledge.",
+            bookContext: "epistemology matters",
+            plainLanguage: nil,
+            example: nil,
+            added: "November 24, 2026",
+            readerOwned: true
+        )
+        let markdown = VocabularyFile.upsert("", title: "Book", entry: entry)
+        XCTAssertTrue(markdown.contains("## Page 3"))
+        XCTAssertFalse(markdown.contains("?"))
+        XCTAssertEqual(VocabularyFile.parse(markdown).first?.page, 3)
+        XCTAssertNil(VocabularyFile.parse(markdown).first?.chapter)
+        XCTAssertNil(VocabularyFile.sectionHeading(for: VocabEntry(id: "w", word: "x", chapter: nil, meaning: "", bookContext: "", added: "", readerOwned: true)))
     }
 }

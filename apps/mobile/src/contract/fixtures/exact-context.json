@@ -1,0 +1,24 @@
+{
+  "quote": "natural selection",
+  "prefix": "called ",
+  "suffix": " works slowly",
+  "corpus": [
+    {
+      "page": 1,
+      "section": "Preface",
+      "text": "People say natural selection without the surrounding words."
+    },
+    {
+      "page": 9,
+      "section": "Ch. 4",
+      "text": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAcalled natural selection works slowly over time."
+    }
+  ],
+  "hit": {
+    "page": 9,
+    "section": "Ch. 4",
+    "prefix": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAcalled ",
+    "suffix": " works slowly over time.",
+    "confidence": "exactContext"
+  }
+}

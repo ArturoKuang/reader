@@ -1,0 +1,16 @@
+{
+  "pdf": {
+    "title": "Moby-Dick, opening",
+    "file": "ishmael.pdf",
+    "format": "pdf",
+    "fingerprint": "sha256:f4e07738d0e88e10d71d2ea7cadf2ffdca9165c02b117a35fc60bcd4b76ec055",
+    "pdfId": "4b1e77c0"
+  },
+  "epub": {
+    "title": "Moby-Dick, opening",
+    "file": "ishmael.epub",
+    "format": "epub",
+    "fingerprint": "sha256:21667e0af53fc1a270f6ca89c9fddb5131cae5d559c22d5b39fca45cf1700352",
+    "epubId": "urn:public-domain:moby-dick-opening"
+  }
+}

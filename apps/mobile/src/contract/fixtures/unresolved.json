@@ -1,0 +1,33 @@
+{
+  "corpus": [
+    {
+      "page": 9,
+      "section": "Ch. 4",
+      "text": "This process, called natural selection works slowly over time."
+    }
+  ],
+  "records": [
+    {
+      "id": "n1",
+      "quote": "natural selection",
+      "prefix": "called ",
+      "suffix": " works slowly"
+    },
+    {
+      "id": "h1",
+      "quote": "missing sentence",
+      "prefix": "",
+      "suffix": ""
+    }
+  ],
+  "unresolvedIDs": ["h1"],
+  "resolved": {
+    "n1": {
+      "page": 9,
+      "section": "Ch. 4",
+      "prefix": "This process, called ",
+      "suffix": " works slowly over time.",
+      "confidence": "exactContext"
+    }
+  }
+}
