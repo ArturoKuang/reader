@@ -212,6 +212,14 @@ final class PDFContainerViewController: NSViewController {
     }
 
     private func restorePositionOnce() {
+        if let pending = session.pendingMarkReveal {
+            guard pdfView.bounds.width > 160, pdfView.document != nil else { return }
+            session.pendingMarkReveal = nil
+            didRestorePosition = true
+            reveal(pending)
+            session.finishViewRestore()
+            return
+        }
         guard !didRestorePosition else { return }
         guard pdfView.bounds.width > 160, pdfView.document != nil else { return }
         didRestorePosition = true
@@ -575,8 +583,10 @@ final class PDFContainerViewController: NSViewController {
         }
         let bounds = page.bounds(for: pdfView.displayBox)
         let y = position.pdfY ?? (bounds.maxY - (position.scrollY ?? 0) * bounds.height)
-        let rect = NSRect(x: position.pdfX ?? bounds.minX, y: y - 12, width: 12, height: 12)
-        pdfView.go(to: rect, on: page)
+        // A destination puts this point at the top of the view. go(to:rect:) leaves
+        // the page where it is when that corner is already barely on screen.
+        let destination = PDFDestination(page: page, at: NSPoint(x: position.pdfX ?? bounds.minX, y: y))
+        pdfView.go(to: destination)
     }
 
     var noteHostView: NSView { pdfView }

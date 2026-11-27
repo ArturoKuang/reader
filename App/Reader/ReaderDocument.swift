@@ -51,6 +51,18 @@ final class ReaderDocument: NSDocument {
                 session.page = max(session.package.state.page, 1)
             }
             coordinator.attach(session)
+            let storedMarks = BookMarks.load(applicationSupport: AppPaths.support, fingerprint: identity.fingerprint, fs: fs)
+            if !storedMarks.isEmpty {
+                session.package.marks.marks = storedMarks
+            }
+            if let pending = MarkOpenQueue.take(path: opened.url.path) {
+                session.pendingMarkReveal = pending
+                if let page = pending.page {
+                    session.page = max(page, 1)
+                    session.package.state.page = session.page
+                }
+                if let scroll = pending.scrollY { session.package.state.scrollY = scroll }
+            }
             if let link = Self.takeQueuedLink(for: opened.url.path) {
                 session.pendingReaderLink = link
             }
@@ -81,6 +93,14 @@ final class ReaderDocument: NSDocument {
         )
         try index.save(to: AppPaths.indexFile, fs: fs)
         let session = ReaderSession(bookURL: opened.url, bookData: opened.data, open: result)
+        if let pending = MarkOpenQueue.take(path: opened.url.path) {
+            session.pendingMarkReveal = pending
+            if let page = pending.page {
+                session.page = max(page, 1)
+                session.package.state.page = session.page
+            }
+            if let scroll = pending.scrollY { session.package.state.scrollY = scroll }
+        }
         if let link = Self.takeQueuedLink(for: opened.url.path) {
             session.pendingReaderLink = link
         }
@@ -108,6 +128,27 @@ final class ReaderDocument: NSDocument {
         addWindowController(controller)
         session.undoManager = undoManager
         refreshSubtitle()
+    }
+
+    static func openMark(path: String, position: ReadingPosition) {
+        MarkOpenQueue.store(path: path, position: position)
+        NSDocumentController.shared.openDocument(withContentsOf: URL(fileURLWithPath: path), display: true) { document, _, _ in
+            (document as? ReaderDocument)?.revealMark(position)
+        }
+    }
+
+    func revealMark(_ position: ReadingPosition) {
+        session?.pendingMarkReveal = position
+        if let page = position.page {
+            session?.page = max(page, 1)
+            session?.package.state.page = session?.page ?? 1
+        }
+        if let scroll = position.scrollY {
+            session?.package.state.scrollY = scroll
+        }
+        if let controller = windowControllers.first as? ReaderWindowController {
+            controller.reveal(position)
+        }
     }
 
     override func save(_ sender: Any?) {
@@ -160,6 +201,7 @@ final class ReaderDocument: NSDocument {
 
     private func persistSidecarOrVault(clearEdited: Bool, completion: @escaping (Error?) -> Void) {
         if session?.usesVault == true {
+            session?.persistVaultMarks()
             session?.onVaultSave?()
             if clearEdited {
                 updateChangeCount(.changeCleared)
