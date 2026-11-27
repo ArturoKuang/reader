@@ -1,6 +1,6 @@
 const fs = require("fs");
 const path = require("path");
-const { withDangerousMod } = require("expo/config-plugins");
+const { withDangerousMod, withInfoPlist } = require("expo/config-plugins");
 
 const XML = `<?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
@@ -14,7 +14,7 @@ const XML = `<?xml version="1.0" encoding="utf-8"?>
 `;
 
 /** Debug builds may talk to the emulator host. Release builds stay HTTPS-only. */
-function withDebugCleartext(config) {
+function withAndroidDebugCleartext(config) {
   return withDangerousMod(config, [
     "android",
     (mod) => {
@@ -48,6 +48,30 @@ function withDebugCleartext(config) {
       return mod;
     },
   ]);
+}
+
+/** Allow Metro and the local 127.0.0.1 test sync server over HTTP. */
+function withIosLocalNetworking(config) {
+  return withInfoPlist(config, (mod) => {
+    const ats = mod.modResults.NSAppTransportSecurity ?? {};
+    ats.NSAllowsLocalNetworking = true;
+    const domains = ats.NSExceptionDomains ?? {};
+    domains.localhost = {
+      NSExceptionAllowsInsecureHTTPLoads: true,
+      NSIncludesSubdomains: true,
+    };
+    domains["127.0.0.1"] = {
+      NSExceptionAllowsInsecureHTTPLoads: true,
+      NSIncludesSubdomains: false,
+    };
+    ats.NSExceptionDomains = domains;
+    mod.modResults.NSAppTransportSecurity = ats;
+    return mod;
+  });
+}
+
+function withDebugCleartext(config) {
+  return withIosLocalNetworking(withAndroidDebugCleartext(config));
 }
 
 module.exports = withDebugCleartext;

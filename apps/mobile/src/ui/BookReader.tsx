@@ -3,6 +3,9 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   ActivityIndicator,
   BackHandler,
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -400,6 +403,7 @@ export function BookReader({
   }
 
   function chooseColor(color: number) {
+    Keyboard.dismiss();
     if (!active) return;
     const highlights = shelf.highlights.map((highlight) =>
       highlight.id === active.id ? { ...highlight, color } : highlight,
@@ -521,7 +525,11 @@ export function BookReader({
           />
         ) : null}
         {active ? (
-          <View style={styles.sheetOverlay} pointerEvents="box-none">
+          <KeyboardAvoidingView
+            style={styles.sheetOverlay}
+            behavior={Platform.OS === "ios" ? "padding" : undefined}
+            pointerEvents="box-none"
+          >
             <Pressable
               testID="highlight-sheet-backdrop"
               accessibilityLabel="Dismiss highlight sheet"
@@ -529,8 +537,12 @@ export function BookReader({
               style={styles.backdrop}
             />
             <View testID="highlight-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 12 }]}>
-              <View style={styles.handle} accessibilityLabel="Dismiss handle" />
-              <Text style={styles.cardHeading}>Highlight</Text>
+              <Pressable onPress={() => Keyboard.dismiss()} accessibilityLabel="Dismiss handle">
+                <View style={styles.handle} />
+              </Pressable>
+              <Pressable onPress={() => Keyboard.dismiss()} accessibilityRole="button" accessibilityLabel="Highlight heading">
+                <Text style={styles.cardHeading}>Highlight</Text>
+              </Pressable>
               <Text style={styles.quote}>“{active.quote}”</Text>
               <Text style={styles.sheetCaption}>
                 {active.page ? `Page ${active.page}` : active.section ? active.section : "No location hint"}
@@ -552,6 +564,8 @@ export function BookReader({
                 ))}
               </View>
               <TextInput
+                testID="highlight-note-input"
+                accessibilityLabel="Write a note"
                 multiline
                 onChangeText={setDraft}
                 placeholder="Write a note…"
@@ -579,7 +593,7 @@ export function BookReader({
                 ) : null}
               </View>
             </View>
-          </View>
+          </KeyboardAvoidingView>
         ) : null}
       </View>
     </View>
