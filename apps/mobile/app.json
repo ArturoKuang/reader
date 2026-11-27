@@ -6,6 +6,7 @@
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
+    "scheme": "readersync",
     "platforms": [
       "ios",
       "android",
@@ -19,7 +20,22 @@
       "supportsTablet": true
     },
     "android": {
-      "package": "com.reader"
+      "package": "com.reader",
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ],
+          "data": [
+            {
+              "scheme": "readersync",
+              "host": "pair"
+            }
+          ]
+        }
+      ]
     },
     "plugins": [
       "expo-asset",

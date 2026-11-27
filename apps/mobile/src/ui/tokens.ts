@@ -18,6 +18,7 @@ export const tokens = {
     ],
   },
   syncStatus: {
+    unpaired: { dot: "#8E8E93", label: "Not paired" },
     synced: { dot: "#27AE60", label: "Synced" },
     syncing: { dot: "#2F80ED", label: "Syncing…" },
     offline: { dot: "#8E8E93", label: "Offline, changes saved" },

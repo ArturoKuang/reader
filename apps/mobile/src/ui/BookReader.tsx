@@ -9,11 +9,12 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import WebView, { type WebViewMessageEvent, type WebViewProps } from "react-native-webview";
 import type { HighlightRecord } from "../contract/types";
 import { captureAnchor } from "../highlight/selection";
 import { normalizeEpubSection } from "../highlight/epubSection";
-import { addHighlight, persistReanchoredHighlight, removeHighlight, saveNote } from "../highlight/store";
+import { addHighlight, autoReanchorOnOpen, persistReanchoredHighlight, removeHighlight, saveNote } from "../highlight/store";
 import { parseViewerMessage } from "../reader/bridge";
 import { SHOW_HIGHLIGHT_HARNESS } from "./devFlags";
 import type { HostToViewer, ViewerHighlight } from "../reader/bridge";
@@ -23,18 +24,15 @@ import { epubBook, epubModule, pdfBook, pdfModule, sampleTitles } from "../reade
 import { emptyShelf, parseShelf, serializeShelf, shelfKey } from "../reader/shelf";
 import type { BookShelf } from "../reader/shelf";
 import { makeId } from "../reader/ids";
+import { sha256OfFingerprint, unpairedStatus } from "../sync/controller";
+import { useSync } from "../sync/SyncProvider";
 import { SyncChrome } from "../sync/SyncStatusChip";
-import type { SyncStatus } from "../sync/status";
-import type { OpenConflict } from "../sync/wire";
 import { tokens } from "./tokens";
 
-const idleSync: SyncStatus = {
-  state: "synced",
-  pendingCount: 0,
-  conflictCount: 0,
-  pausedBookIds: [],
-  lastSyncedAt: null,
-};
+function byteLengthFromBase64(base64: string): number {
+  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+  return Math.floor((base64.length * 3) / 4) - padding;
+}
 
 type Format = "pdf" | "epub";
 
@@ -65,24 +63,32 @@ function toViewer(highlight: HighlightRecord): ViewerHighlight {
   };
 }
 
-export function ReaderHome({
-  sync = idleSync,
-  conflicts = [],
-  onCheckAgain,
-  onRetry,
-}: {
-  sync?: SyncStatus;
-  conflicts?: readonly OpenConflict[];
-  onCheckAgain?: () => void;
-  onRetry?: () => void;
-} = {}) {
+export function ReaderHome() {
+  const sync = useSync();
+  const status = sync?.status ?? unpairedStatus;
   const [format, setFormat] = useState<Format | null>(null);
   if (!format) {
     return (
       <View style={styles.home}>
         <View style={styles.header}>
           <Text style={styles.title}>Reader</Text>
-          <SyncChrome status={sync} conflicts={conflicts} onCheckAgain={onCheckAgain} onRetry={onRetry} />
+          <SyncChrome
+            status={status}
+            conflicts={sync?.conflicts ?? []}
+            pairingError={sync?.pairingError}
+            onCheckAgain={() => {
+              void sync?.recheckStorage();
+            }}
+            onRetry={() => {
+              void sync?.retryNow();
+            }}
+            onSyncNow={() => {
+              void sync?.syncNow();
+            }}
+            onPair={(url) => {
+              void sync?.pair(url);
+            }}
+          />
         </View>
         <Text style={styles.heading}>Highlight</Text>
         <Text style={styles.caption}>
@@ -91,14 +97,14 @@ export function ReaderHome({
         <Pressable testID="library-pdf" onPress={() => setFormat("pdf")} style={styles.card}>
           <Text style={styles.cardHeading}>{sampleTitles.pdf}</Text>
           <Text style={styles.caption}>PDF · text layer · {pdfBook.fingerprint}</Text>
-          {sync.pausedBookIds.includes(pdfBook.fingerprint) ? (
+          {status.pausedBookIds.includes(pdfBook.fingerprint) ? (
             <Text>{tokens.syncStatus.storageFull.badge}</Text>
           ) : null}
         </Pressable>
         <Pressable testID="library-epub" onPress={() => setFormat("epub")} style={styles.card}>
           <Text style={styles.cardHeading}>{sampleTitles.epub}</Text>
           <Text style={styles.caption}>EPUB · foliate-js · {epubBook.epubId}</Text>
-          {sync.pausedBookIds.includes(epubBook.fingerprint) ? (
+          {status.pausedBookIds.includes(epubBook.fingerprint) ? (
             <Text>{tokens.syncStatus.storageFull.badge}</Text>
           ) : null}
         </Pressable>
@@ -110,8 +116,12 @@ export function ReaderHome({
 
 function BookReader({ format, onBack }: { format: Format; onBack: () => void }) {
   const book = format === "pdf" ? pdfBook : epubBook;
+  const sync = useSync();
+  const syncRef = useRef(sync);
+  const insets = useSafeAreaInsets();
   const webRef = useRef<ReaderWebHandle>(null);
   const shelfRef = useRef<BookShelf>(emptyShelf());
+  const bookBytesRef = useRef(0);
   const [shelf, setShelf] = useState<BookShelf>(emptyShelf());
   const [uri, setUri] = useState<string | null>(null);
   const [base64, setBase64] = useState<string | null>(null);
@@ -129,22 +139,55 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
     webRef.current?.injectJavaScript(`window.__hostMessage(${JSON.stringify(payload)}); true;`);
   }
 
-  async function commit(next: BookShelf) {
+  async function publishShelf(previous: BookShelf, next: BookShelf) {
+    if (!sync) return;
+    const bookId = book.fingerprint;
+    await sync.ensureBook({
+      sha256: sha256OfFingerprint(book.fingerprint),
+      size: bookBytesRef.current || (format === "pdf" ? 1397 : 2284),
+      format,
+      docId: format === "pdf" ? book.pdfId : book.epubId,
+      title: sampleTitles[format],
+      filename: format === "pdf" ? "ishmael.pdf" : "ishmael.epub",
+    });
+    const previousIds = new Set(previous.highlights.map((highlight) => highlight.id));
+    const nextIds = new Set(next.highlights.map((highlight) => highlight.id));
+    for (const id of previousIds) {
+      if (!nextIds.has(id)) await sync.deleteHighlight(bookId, id);
+    }
+    const previousNotes = new Set(previous.notes.map((note) => note.id));
+    const nextNotes = new Set(next.notes.map((note) => note.id));
+    for (const id of previousNotes) {
+      if (!nextNotes.has(id) && nextIds.has(id)) await sync.deleteNote(bookId, id);
+    }
+    for (const highlight of next.highlights) await sync.putHighlight(bookId, highlight);
+    for (const note of next.notes) await sync.putNote(bookId, note);
+  }
+
+  async function commit(next: BookShelf, options?: { skipSync?: boolean }) {
+    const previous = shelfRef.current;
     shelfRef.current = next;
     setShelf(next);
     await AsyncStorage.setItem(shelfKey(book.fingerprint), serializeShelf(next));
+    if (!options?.skipSync) await publishShelf(previous, next);
   }
+
+  useEffect(() => {
+    syncRef.current = sync;
+  }, [sync]);
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        const saved = parseShelf(await AsyncStorage.getItem(shelfKey(book.fingerprint)));
+        const loaded = parseShelf(await AsyncStorage.getItem(shelfKey(book.fingerprint)));
+        const saved = syncRef.current?.mergeShelf(loaded, book.fingerprint) ?? loaded;
         const root = await viewerRoot();
         const encoded = await readAssetBase64(format === "pdf" ? pdfModule : epubModule);
         const worker =
           format === "pdf" ? await new File(root, "pdfjs", "pdf.worker.min.mjs").text() : null;
         if (cancelled) return;
+        bookBytesRef.current = byteLengthFromBase64(encoded);
         shelfRef.current = saved;
         setShelf(saved);
         setBase64(encoded);
@@ -158,6 +201,20 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
       cancelled = true;
     };
   }, [book.fingerprint, format]);
+
+  useEffect(() => {
+    const controller = syncRef.current;
+    if (!controller) return;
+    const merged = controller.mergeShelf(shelfRef.current, book.fingerprint);
+    if (serializeShelf(merged) === serializeShelf(shelfRef.current)) return;
+    void (async () => {
+      shelfRef.current = merged;
+      setShelf(merged);
+      await AsyncStorage.setItem(shelfKey(book.fingerprint), serializeShelf(merged));
+      const payload = JSON.stringify({ type: "restore", highlights: merged.highlights.map(toViewer) });
+      webRef.current?.injectJavaScript(`window.__hostMessage(${JSON.stringify(payload)}); true;`);
+    })();
+  }, [book.fingerprint, sync, sync?.isPaired, sync?.status.lastSyncedAt]);
 
   function openSheet(id: string, notes = shelfRef.current.notes) {
     setActiveId(id);
@@ -195,7 +252,14 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
       return;
     }
     if (message.type === "corpus") {
-      send({ type: "restore", highlights: shelfRef.current.highlights.map(toViewer) });
+      const current = shelfRef.current;
+      const restored = autoReanchorOnOpen(current.highlights, current.notes, message.slices);
+      const next =
+        restored.reanchoredIds.length > 0
+          ? { ...current, highlights: restored.highlights, notes: restored.notes }
+          : current;
+      if (restored.reanchoredIds.length > 0) void commit(next);
+      send({ type: "restore", highlights: next.highlights.map(toViewer) });
       return;
     }
     if (message.type === "error") {
@@ -344,7 +408,7 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
               onPress={dismissSheet}
               style={styles.backdrop}
             />
-            <View testID="highlight-sheet" style={styles.sheet}>
+            <View testID="highlight-sheet" style={[styles.sheet, { paddingBottom: insets.bottom + 12 }]}>
               <View style={styles.handle} accessibilityLabel="Dismiss handle" />
               <Text style={styles.cardHeading}>Highlight</Text>
               <Text style={styles.quote}>“{active.quote}”</Text>

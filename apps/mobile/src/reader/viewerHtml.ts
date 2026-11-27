@@ -495,6 +495,34 @@ const view = document.createElement("foliate-view");
 document.body.append(view);
 const highlights = new Map();
 let sections = [];
+function epubCfiSpineIndex(cfi) {
+  const match = /epubcfi\(\/6\/(\d+)/.exec(cfi || "");
+  if (!match) return null;
+  const step = Number(match[1]);
+  if (!Number.isFinite(step) || step < 2 || step % 2 !== 0) return null;
+  return step / 2 - 1;
+}
+async function epubCfiResolves(cfi) {
+  if (!cfi) return false;
+  const spineCount = view.book && view.book.sections ? view.book.sections.length : 0;
+  const index = epubCfiSpineIndex(cfi);
+  if (index === null || index < 0 || index >= spineCount) return false;
+  try {
+    if (typeof view.resolveNavigation !== "function") return true;
+    const resolved = await view.resolveNavigation(cfi);
+    if (!resolved || typeof resolved.index !== "number") return false;
+    if (resolved.index < 0 || resolved.index >= spineCount) return false;
+    const item = sections.find((entry) => entry.index === resolved.index);
+    if (typeof resolved.anchor === "function") {
+      if (!item || !item.doc) return true;
+      const range = resolved.anchor(item.doc);
+      return !!(range && !range.collapsed);
+    }
+    return !!resolved.anchor;
+  } catch (error) {
+    return false;
+  }
+}
 async function paint(highlight) {
   const previous = highlights.get(highlight.id);
   if (previous && previous.cfi && previous.cfi !== highlight.cfi) {
@@ -502,6 +530,7 @@ async function paint(highlight) {
   }
   highlights.set(highlight.id, highlight);
   if (!highlight.cfi) return false;
+  if (!(await epubCfiResolves(highlight.cfi))) return false;
   try {
     const result = await view.addAnnotation({ value: highlight.cfi, color: highlight.hex });
     return !!result;
@@ -510,9 +539,12 @@ async function paint(highlight) {
   }
 }
 async function restoreHighlight(highlight) {
-  let painted = false;
-  if (highlight.cfi) painted = await paint(highlight);
-  if (painted) return;
+  highlights.set(highlight.id, highlight);
+  const hintOk = highlight.cfi ? await epubCfiResolves(highlight.cfi) : false;
+  if (hintOk) {
+    await paint(highlight);
+    return;
+  }
   const located = await locate(Object.assign({ reason: "restore" }, highlight));
   if (located.found && located.cfi) {
     const updated = Object.assign({}, highlight, {

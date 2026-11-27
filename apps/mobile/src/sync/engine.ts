@@ -164,6 +164,16 @@ export class SyncEngine {
     });
   }
 
+  /** True once a v=2 pairing has been redeemed and credentials restored. */
+  isPaired(): boolean {
+    return Boolean(this.deps.session.credential && this.deps.session.baseUrl);
+  }
+
+  /** Local highlight, note, word, and lookup records for one book. */
+  recordsFor(bookId: string): LocalRecord[] {
+    return this.state.records.filter((record) => record.bookId === bookId);
+  }
+
   subscribe(listener: (status: SyncStatus) => void): () => void {
     this.listeners.add(listener);
     return () => {

@@ -1,5 +1,6 @@
 import { addHighlight, autoReanchorOnOpen, persistReanchoredHighlight, saveNote } from "./store";
 import { normalizeEpubSection } from "./epubSection";
+import { STALE_EPUB_CFI, epubCfiResolvesOnSpine, epubCfiSpineIndex } from "./epubCfi";
 import type { HighlightRecord, NoteRecord } from "../contract/types";
 import type { TextSlice } from "./locate";
 
@@ -187,5 +188,92 @@ describe("EPUB section normalization", () => {
     );
     expect(pathOnNoteOnly?.highlights[0]?.section).toBe(pathOnNoteOnly?.notes[0]?.section);
     expect(pathOnNoteOnly?.highlights[0]?.section).toBe("Chapter 1. Loomings");
+  });
+});
+
+describe("stale EPUB CFI auto re-anchor on open", () => {
+  test("epubcfi(/6/98!/4,/1:0,/1:1) is out of spine for a short book", () => {
+    expect(epubCfiSpineIndex(STALE_EPUB_CFI)).toBe(48);
+    expect(epubCfiResolvesOnSpine(STALE_EPUB_CFI, 2)).toBe(false);
+    expect(epubCfiResolvesOnSpine("epubcfi(/6/2!/4,/1:0,/1:16)", 2)).toBe(true);
+  });
+
+  test("a stale highlight CFI is repaired on open while the note keeps its id and body", () => {
+    const created = addHighlight(
+      [],
+      {
+        quote: "Call me Ishmael.",
+        prefix: "",
+        suffix: "",
+        cfi: "epubcfi(/6/2!/4,/1:0,/1:16)",
+        section: "Chapter 1. Loomings",
+        rects: [],
+      },
+      1,
+      "h_stale",
+    );
+    const saved = saveNote(
+      created.highlights,
+      [],
+      "h_stale",
+      "The first sentence.",
+      "2026-11-26T00:00:00Z",
+    );
+    if (!saved) throw new Error("expected linked note");
+    const staleHighlight = { ...saved.highlights[0]!, cfi: STALE_EPUB_CFI };
+    const noteWithGoodCfi = { ...saved.notes[0]!, cfi: "epubcfi(/6/2!/4,/1:0,/1:16)" };
+    const restored = autoReanchorOnOpen([staleHighlight], [noteWithGoodCfi], epubCorpus);
+    expect(restored.reanchoredIds).toEqual(["h_stale"]);
+    expect(restored.highlights).toHaveLength(1);
+    expect(restored.notes).toHaveLength(1);
+    expect(restored.highlights[0]?.id).toBe("h_stale");
+    expect(restored.notes[0]?.id).toBe("h_stale");
+    expect(restored.notes[0]?.body).toBe("The first sentence.");
+    expect(restored.highlights[0]?.cfi).not.toBe(STALE_EPUB_CFI);
+    expect(restored.highlights[0]?.cfi).toMatch(/^epubcfi\(\/6\/2!/);
+    expect(restored.notes[0]?.cfi).toBe(restored.highlights[0]?.cfi);
+  });
+
+  test("persistReanchoredHighlight writes the repaired CFI onto the existing highlight and note", () => {
+    const created = addHighlight(
+      [],
+      {
+        quote: "Call me Ishmael.",
+        prefix: "",
+        suffix: "",
+        cfi: STALE_EPUB_CFI,
+        section: "Chapter 1. Loomings",
+        rects: [],
+      },
+      2,
+      "h_stale",
+    );
+    const saved = saveNote(
+      created.highlights,
+      [],
+      "h_stale",
+      "The first sentence.",
+      "2026-11-26T00:00:00Z",
+    );
+    if (!saved) throw new Error("expected linked note");
+    const repaired = "epubcfi(/6/2!/4,/1:0,/1:16)";
+    const persisted = persistReanchoredHighlight(saved.highlights, saved.notes, {
+      id: "h_stale",
+      found: true,
+      cfi: repaired,
+      section: "Chapter 1. Loomings",
+      prefix: "",
+      suffix: "",
+      rects: [],
+    });
+    expect(persisted).not.toBeNull();
+    expect(persisted?.highlights).toHaveLength(1);
+    expect(persisted?.notes).toHaveLength(1);
+    expect(persisted?.highlights[0]?.id).toBe("h_stale");
+    expect(persisted?.notes[0]?.id).toBe("h_stale");
+    expect(persisted?.highlights[0]?.color).toBe(2);
+    expect(persisted?.highlights[0]?.cfi).toBe(repaired);
+    expect(persisted?.notes[0]?.cfi).toBe(repaired);
+    expect(persisted?.notes[0]?.body).toBe("The first sentence.");
   });
 });

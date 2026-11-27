@@ -9,7 +9,7 @@
  */
 export const SYNC_STATES = ["synced", "syncing", "offline", "conflict", "error", "storageFull"] as const;
 
-export type SyncChipState = (typeof SYNC_STATES)[number];
+export type SyncChipState = (typeof SYNC_STATES)[number] | "unpaired";
 
 export interface SyncStatus {
   state: SyncChipState;

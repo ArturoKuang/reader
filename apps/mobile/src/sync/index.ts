@@ -26,3 +26,10 @@ export type { SyncTransport } from "./transport";
 export { normalizeWord, positionId, wordId } from "./ids";
 export { MockSyncServer } from "./mock/server";
 export type { ChangeInput, Envelope, Locator, OpenConflict, PushRequest, RecordKind } from "./wire";
+export { SyncProvider, useSync } from "./SyncProvider";
+export type { SyncController } from "./SyncProvider";
+export { SyncChrome } from "./SyncStatusChip";
+export { presentStatus, unpairedStatus, sha256OfFingerprint, bookIdOf } from "./controller";
+export { mergeSyncRecords } from "./mergeShelf";
+export { highlightFromPayload, noteFromPayload } from "./payload";
+

@@ -9,24 +9,29 @@
 # Library header chip:
 #   testID: sync-status-chip
 #   accessibility label: sync <state>
-#   state is one of: synced, syncing, offline, conflict, error, storageFull
+#   state is one of: unpaired, synced, syncing, offline, conflict, error, storageFull
 #   visible text:
+#     unpaired     Not paired
 #     synced       Synced
 #     syncing      Syncing…
 #     offline      Offline, changes saved
 #     conflict     2 versions to review
 #     error        Can't reach Mac mini
 #     storageFull  Mac mini is full
-# This build shows the chip before pairing. The idle label is "Synced"
-# and the accessibility label is "sync synced".
+# A fresh install is unpaired. Tapping the chip opens the pairing sheet.
 # Other library testIDs: library-pdf, library-epub.
 appId: com.reader
 ---
 - launchApp
 - assertVisible:
     id: sync-status-chip
-- assertVisible: Synced
+- assertVisible: "Not paired"
 - assertVisible:
     id: library-pdf
 - assertVisible:
     id: library-epub
+- tapOn:
+    id: sync-status-chip
+- assertVisible:
+    id: sync-sheet
+- assertVisible: Pair

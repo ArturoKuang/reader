@@ -57,3 +57,22 @@ describe("conflict card", () => {
     expect(screen.queryByText(/resolve/i)).toBeNull();
   });
 });
+
+describe("unpaired chip", () => {
+  it("shows Not paired instead of Synced", async () => {
+    await render(
+      <SyncStatusChip
+        status={{
+          state: "unpaired",
+          pendingCount: 0,
+          conflictCount: 0,
+          pausedBookIds: [],
+          lastSyncedAt: null,
+        }}
+      />,
+    );
+    expect(screen.getByLabelText("sync unpaired")).toBeTruthy();
+    expect(screen.getByText("Not paired")).toBeTruthy();
+    expect(screen.queryByText("Synced")).toBeNull();
+  });
+});

@@ -1,4 +1,4 @@
-import type { HighlightRecord, JsonValue, LookupRecord, NoteRecord, WordRecord } from "../contract/types";
+import { isHighlightColor, type HighlightRecord, type JsonValue, type LookupRecord, type NoteRecord, type WordRecord } from "../contract/types";
 import { asJsonObject } from "./canonical";
 import { wordId } from "./ids";
 import type { JsonObject, Locator, PositionPayload } from "./wire";
@@ -97,4 +97,81 @@ export function positionToPayload(bookId: string, deviceId: string, locator: Loc
     locator,
     extras: {},
   };
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function asNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function asRects(value: unknown): number[][] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is number[] => Array.isArray(item) && item.every((n) => typeof n === "number"));
+}
+
+function extrasOf(payload: JsonObject): { [key: string]: JsonValue } {
+  const extras = payload.extras;
+  if (!extras || typeof extras !== "object" || Array.isArray(extras)) return {};
+  return { ...(extras as { [key: string]: JsonValue }) };
+}
+
+/** Rebuild a highlight from a pulled or persisted payload. */
+export function highlightFromPayload(id: string, payload: JsonObject): HighlightRecord | null {
+  const quote = asString(payload.quote);
+  const prefix = asString(payload.prefix);
+  const suffix = asString(payload.suffix);
+  const color = asNumber(payload.color);
+  if (quote === undefined || prefix === undefined || suffix === undefined || color === undefined) return null;
+  if (!isHighlightColor(color)) return null;
+  const record: HighlightRecord = {
+    id,
+    color,
+    quote,
+    prefix,
+    suffix,
+    rects: asRects(payload.rects),
+    extras: extrasOf(payload),
+  };
+  const page = asNumber(payload.page);
+  const cfi = asString(payload.cfi);
+  const section = asString(payload.section);
+  if (page !== undefined) record.page = page;
+  if (cfi !== undefined) record.cfi = cfi;
+  if (section !== undefined) record.section = section;
+  return record;
+}
+
+/** Rebuild a note from a pulled or persisted payload. */
+export function noteFromPayload(id: string, payload: JsonObject): NoteRecord | null {
+  const quote = asString(payload.quote);
+  const prefix = asString(payload.prefix);
+  const suffix = asString(payload.suffix);
+  const body = asString(payload.body);
+  if (quote === undefined || prefix === undefined || suffix === undefined || body === undefined) return null;
+  const record: NoteRecord = {
+    id,
+    quote,
+    prefix,
+    suffix,
+    ai: payload.ai === true,
+    scope: asString(payload.scope) ?? "passage",
+    body,
+    extras: extrasOf(payload),
+  };
+  const page = asNumber(payload.page);
+  const cfi = asString(payload.cfi);
+  const section = asString(payload.section);
+  const created = asString(payload.created);
+  const updated = asString(payload.updated);
+  const provider = asString(payload.provider);
+  if (page !== undefined) record.page = page;
+  if (cfi !== undefined) record.cfi = cfi;
+  if (section !== undefined) record.section = section;
+  if (created !== undefined) record.created = created;
+  if (updated !== undefined) record.updated = updated;
+  if (provider !== undefined) record.provider = provider;
+  return record;
 }
