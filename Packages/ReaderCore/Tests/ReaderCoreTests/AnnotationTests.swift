@@ -273,4 +273,47 @@ final class AnnotationTests: XCTestCase {
         XCTAssertNil(VaultNoteFile.blocks(removed).first { $0.id == "h1" })
         XCTAssertNotNil(VaultNoteFile.blocks(removed).first { $0.id == "n-old" })
     }
+
+    func testHighlightPaintStaysOnTheRecordedChapter() {
+        let cfi = EPUBCFI.make(spineIndex: 0, start: 11, end: 23).value
+        let highlight = HighlightEntry(
+            id: "h1",
+            color: 1,
+            cfi: cfi,
+            quote: "hard to vary",
+            prefix: "is ",
+            suffix: " because",
+            section: "Chapter 1"
+        )
+        let marks = HighlightPaint.marks(for: [highlight])
+        XCTAssertEqual(marks.count, 1)
+        XCTAssertEqual(marks[0].spineIndex, 0)
+        XCTAssertEqual(marks[0].chapter, 1)
+        let text = "An idea is hard to vary because it explains."
+        XCTAssertNotNil(HighlightPaint.occurrence(of: marks[0], in: text, chapter: 1, spineIndex: 0))
+        XCTAssertNil(HighlightPaint.occurrence(of: marks[0], in: text, chapter: 2, spineIndex: 1))
+        XCTAssertNil(HighlightPaint.occurrence(of: marks[0], in: "hard to vary later", chapter: 1, spineIndex: 0))
+        var byChapter = marks[0]
+        byChapter.spineIndex = nil
+        XCTAssertNotNil(HighlightPaint.occurrence(of: byChapter, in: text, chapter: 1, spineIndex: nil))
+        XCTAssertNil(HighlightPaint.occurrence(of: byChapter, in: text, chapter: 2, spineIndex: nil))
+    }
+
+    func testFindSelectsTheFirstMatchInsteadOfTheNext() {
+        XCTAssertEqual(FindSelection.index(starts: [10, 40, 80], cursor: 0), 0)
+        XCTAssertEqual(FindSelection.index(starts: [10, 40], cursor: 10), 0)
+        XCTAssertEqual(FindSelection.index(starts: [1, 2], cursor: 1), 0)
+        XCTAssertEqual(FindSelection.index(starts: [10, 40], cursor: 15), 1)
+        XCTAssertEqual(FindSelection.index(starts: [10, 40], cursor: 90), 0)
+        XCTAssertEqual(FindSelection.step(count: 3, current: 0, forward: true), 1)
+        XCTAssertNil(FindSelection.index(starts: [], cursor: 0))
+        let typed = "quick brown fox"
+        XCTAssertEqual(FindQuery.command(query: typed, previous: "quick brown fo", hasMatches: true, committed: false), .begin)
+        XCTAssertEqual(FindQuery.command(query: typed, previous: typed, hasMatches: true, committed: false), .stay)
+        XCTAssertEqual(FindQuery.command(query: typed, previous: typed, hasMatches: true, committed: true), .step)
+        XCTAssertEqual(FindQuery.command(query: typed, previous: typed, hasMatches: false, committed: true), .begin)
+        // The field losing focus after a committed search must keep the current hit.
+        XCTAssertEqual(FindQuery.command(query: typed, previous: typed, hasMatches: true, committed: true, explicitAdvance: false), .stay)
+        XCTAssertEqual(FindQuery.command(query: typed, previous: typed, hasMatches: true, committed: false, explicitAdvance: false), .stay)
+    }
 }

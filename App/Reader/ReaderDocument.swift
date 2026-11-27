@@ -8,6 +8,20 @@ final class ReaderDocument: NSDocument {
     private static var pendingVaultNotice: String?
     /// Set while a book is being opened into an existing pane, so it does not also get its own window.
     static var openingIntoPane = false
+    private static var queuedLinks: [String: ReaderLink] = [:]
+
+    /// Holds a deep link until `read` builds the session, so the first layout can land on it.
+    static func queue(_ link: ReaderLink) {
+        queuedLinks[key(link.path)] = link
+    }
+
+    static func takeQueuedLink(for path: String) -> ReaderLink? {
+        queuedLinks.removeValue(forKey: key(path))
+    }
+
+    private static func key(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+    }
 
     override class var autosavesInPlace: Bool { true }
     override class var preservesVersions: Bool { false }
@@ -51,6 +65,9 @@ final class ReaderDocument: NSDocument {
                 }
                 if let scroll = pending.scrollY { session.package.state.scrollY = scroll }
             }
+            if let link = Self.takeQueuedLink(for: opened.url.path) {
+                session.pendingReaderLink = link
+            }
             var index = LibraryIndex.load(from: AppPaths.indexFile, fs: fs)
             SidecarStore.noteVaultBook(
                 bookPath: opened.url.path,
@@ -86,6 +103,9 @@ final class ReaderDocument: NSDocument {
             }
             if let scroll = pending.scrollY { session.package.state.scrollY = scroll }
         }
+        if let link = Self.takeQueuedLink(for: opened.url.path) {
+            session.pendingReaderLink = link
+        }
         if let notice = Self.pendingVaultNotice {
             session.notice = notice
             Self.pendingVaultNotice = nil
@@ -114,7 +134,6 @@ final class ReaderDocument: NSDocument {
         refreshSubtitle()
     }
 
-    /// Autosave writes the sidecar only. The book file is never replaced.
     static func openMark(path: String, position: ReadingPosition) {
         MarkOpenQueue.store(path: path, position: position)
         NSDocumentController.shared.openDocument(withContentsOf: URL(fileURLWithPath: path), display: true) { document, _, _ in
@@ -136,31 +155,74 @@ final class ReaderDocument: NSDocument {
         }
     }
 
-    func reveal(_ link: ReaderLink) {
-        session?.pendingReaderLink = link
-        session?.publishAnnotationsChanged()
+    override func save(_ sender: Any?) {
+        // Avoid NSDocument's performActivityWithSynchronousWaiting path.
+        // If an earlier activity is stuck (historically a modal "Save to Vault"
+        // alert during windowDidBecomeKey), that wait freezes the main thread
+        // at 0% CPU with no recovery.
+        for controller in windowControllers {
+            controller.window?.endEditing(for: nil)
+        }
+        persistSidecarOrVault(clearEdited: true) { [weak self] error in
+            if let error {
+                self?.presentError(error)
+            }
+        }
     }
 
+    func reveal(_ link: ReaderLink) {
+        _ = Self.takeQueuedLink(for: link.path)
+        guard let session else {
+            Self.queue(link)
+            return
+        }
+        session.pendingReaderLink = link
+        let controllers = windowControllers.compactMap { $0 as? ReaderWindowController }
+        if controllers.isEmpty { return }
+        for controller in controllers {
+            controller.applyPendingLink()
+        }
+    }
+
+    /// Autosave writes the sidecar only. The book file is never replaced.
     override func save(to url: URL, ofType typeName: String, for saveOperation: NSDocument.SaveOperationType, completionHandler: @escaping (Error?) -> Void) {
+        // May be invoked off the main thread during autosave. AppKit work and
+        // the completion handler must run on the main thread. If we are already
+        // on the main thread, complete synchronously — dispatching async here
+        // deadlocks performActivityWithSynchronousWaiting.
+        let clearEdited = saveOperation != .saveToOperation
+        let finish: (Error?) -> Void = { error in
+            completionHandler(error)
+        }
+        if Thread.isMainThread {
+            persistSidecarOrVault(clearEdited: clearEdited, completion: finish)
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.persistSidecarOrVault(clearEdited: clearEdited, completion: finish) ?? finish(nil)
+            }
+        }
+    }
+
+    private func persistSidecarOrVault(clearEdited: Bool, completion: @escaping (Error?) -> Void) {
         if session?.usesVault == true {
             session?.persistVaultMarks()
-            session?.onVaultFlush?()
-            if saveOperation != .saveToOperation {
+            session?.onVaultSave?()
+            if clearEdited {
                 updateChangeCount(.changeCleared)
             }
-            completionHandler(nil)
+            completion(nil)
             return
         }
         do {
             try session?.persistSidecar()
-            // This override replaces NSDocument's save, which is what normally
+            // This path replaces NSDocument's save, which is what normally
             // clears the edited flag. Without this, " — Edited" stays after ⌘S.
-            if saveOperation != .saveToOperation {
+            if clearEdited {
                 updateChangeCount(.changeCleared)
             }
-            completionHandler(nil)
+            completion(nil)
         } catch {
-            completionHandler(error)
+            completion(error)
         }
     }
 
