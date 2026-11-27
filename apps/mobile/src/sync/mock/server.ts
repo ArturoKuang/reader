@@ -421,7 +421,7 @@ export class MockSyncServer {
       parsed.push(change);
     }
     if (parsed.some((change) => change.kind === "book")) {
-      return this.fail(400, "use_register", "register books with POST /v1/books/register");
+      return this.fail(400, "use_register", "register books with POST /v1/books");
     }
     const request: PushRequest = { batchId: body.batchId, changes: parsed as ChangeInput[] };
     const canonical = canonicalJson(request);

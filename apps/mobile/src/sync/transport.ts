@@ -86,7 +86,7 @@ export class HttpTransport implements SyncTransport {
   }
 
   registerBook(body: RegisterBookRequest): Promise<RegisterBookResponse> {
-    return this.json("POST", "/v1/books/register", body);
+    return this.json("POST", "/v1/books", body);
   }
 
   books(): Promise<BooksResponse> {

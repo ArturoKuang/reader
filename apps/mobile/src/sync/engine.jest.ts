@@ -260,7 +260,7 @@ describe("sync engine", () => {
     await env.engine.putHighlight(BOOK, highlight(next, "second"));
     await env.engine.flush();
     expect(env.server.record(BOOK, "highlight", next)?.payload.quote).toBe("second");
-    expect(env.server.seenRequests.filter((request) => request.path.includes("/v1/books/register")).length).toBeGreaterThan(1);
+    expect(env.server.seenRequests.filter((request) => request.path.endsWith("/v1/books") && request.method === "POST").length).toBeGreaterThan(1);
   });
 
   it("pages until hasMore is false", async () => {
