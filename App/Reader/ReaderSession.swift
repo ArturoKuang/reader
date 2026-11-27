@@ -91,6 +91,7 @@ final class ReaderSession: ObservableObject {
     var onDirty: (() -> Void)?
     var onPageChange: (() -> Void)?
     var onAnnotationsChanged: (() -> Void)?
+    private var annotationObservers: [ObjectIdentifier: () -> Void] = [:]
     var onToast: ((String?) -> Void)?
     var pendingMarkReveal: ReadingPosition?
     weak var undoManager: UndoManager?
@@ -108,6 +109,22 @@ final class ReaderSession: ObservableObject {
     private let globalHub = GlobalMarkHub.shared
 
     var isPDF: Bool { bookURL.pathExtension.lowercased() == "pdf" }
+
+    /// Each pane registers itself. A new highlight then repaints every view of this book.
+    func watchAnnotations(_ owner: AnyObject, perform update: @escaping () -> Void) {
+        annotationObservers[ObjectIdentifier(owner)] = update
+    }
+
+    func unwatchAnnotations(_ owner: AnyObject) {
+        annotationObservers.removeValue(forKey: ObjectIdentifier(owner))
+    }
+
+    func publishAnnotationsChanged() {
+        onAnnotationsChanged?()
+        for update in annotationObservers.values {
+            update()
+        }
+    }
     var notes: [NoteEntry] { package.notes.notes }
     var words: [WordEntry] { package.words.words }
     var highlights: [HighlightEntry] { package.highlights.highlights }
@@ -344,7 +361,7 @@ final class ReaderSession: ObservableObject {
             session.deleteHighlight(id: entry.id)
         }
         undoManager?.setActionName("Remove Highlight")
-        onAnnotationsChanged?()
+        publishAnnotationsChanged()
         dirty()
     }
 
@@ -470,6 +487,7 @@ final class ReaderSession: ObservableObject {
         pdfPage.rotation = next
         package.state.rotations[String(page)] = next
         dirty()
+        publishAnnotationsChanged()
     }
 
     func applyRotations() {
@@ -871,7 +889,7 @@ final class ReaderSession: ObservableObject {
         }
         undoManager?.setActionName(name)
         annotationRevision += 1
-        onAnnotationsChanged?()
+        publishAnnotationsChanged()
         dirty()
     }
 
@@ -931,7 +949,7 @@ final class ReaderSession: ObservableObject {
         let previous = notes.first(where: { $0.id == id })?.body
         applyPendingNote(id: id, body: body)
         annotationRevision += 1
-        onAnnotationsChanged?()
+        publishAnnotationsChanged()
         dirty()
         undoManager?.registerUndo(withTarget: self) { session in
             if let previous {
@@ -939,7 +957,7 @@ final class ReaderSession: ObservableObject {
             } else {
                 session.applyPendingNote(id: id, body: "")
                 session.annotationRevision += 1
-                session.onAnnotationsChanged?()
+                session.publishAnnotationsChanged()
                 session.dirty()
             }
         }
@@ -965,7 +983,7 @@ final class ReaderSession: ObservableObject {
         if coalesced {
             for (id, body) in pending { applyPendingNote(id: id, body: body) }
             annotationRevision += 1
-            onAnnotationsChanged?()
+            publishAnnotationsChanged()
             dirty()
         } else {
             editAnnotations("Edit Note") {
@@ -1064,7 +1082,7 @@ final class ReaderSession: ObservableObject {
     func toggleMarginNotes() {
         showMarginNotes.toggle()
         package.state.showMarginNotes = showMarginNotes
-        onAnnotationsChanged?()
+        publishAnnotationsChanged()
         saveViewQuietly()
     }
 
@@ -1174,7 +1192,7 @@ final class ReaderSession: ObservableObject {
 // The mark store is mutated through a local copy. MarkController.handle takes inout MarkStore,
 // so the session method below replaces the broken pair above.
 extension ReaderSession {
-    func handleMarkEvent(_ event: NSEvent, documentFocused: Bool, position: ReadingPosition) -> (consumed: Bool, jump: ReadingPosition?) {
+    func handleMarkEvent(_ event: NSEvent, documentFocused: Bool, position: ReadingPosition) -> (consumed: Bool, jump: ReadingPosition?, otherBook: URL?) {
         let character = event.characters
         let textInput = event.window?.firstResponder is NSTextView
         let key = MarkKey(
@@ -1204,10 +1222,9 @@ extension ReaderSession {
         if result.effect == .showList { setSidebar(.marks) }
         if let toast = result.toast, result.effect != .showList { showToast(toast) }
         if let jump = result.jump, jump.openOtherBook, let path = jump.bookPath {
-            ReaderDocument.openMark(path: path, position: jump.position)
-            return (!result.passThrough && result.effect != .none, nil)
+            return (!result.passThrough && result.effect != .none, jump.position, URL(fileURLWithPath: path))
         }
-        return (!result.passThrough && result.effect != .none, result.jump?.position)
+        return (!result.passThrough && result.effect != .none, result.jump?.position, nil)
     }
 
     func removeMark(id: String) {

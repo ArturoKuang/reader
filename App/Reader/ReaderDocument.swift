@@ -6,6 +6,8 @@ final class ReaderDocument: NSDocument {
     private var vault: VaultCoordinator?
     private var bookData = Data()
     private static var pendingVaultNotice: String?
+    /// Set while a book is being opened into an existing pane, so it does not also get its own window.
+    static var openingIntoPane = false
     private static var queuedLinks: [String: ReaderLink] = [:]
 
     /// Holds a deep link until `read` builds the session, so the first layout can land on it.
@@ -122,11 +124,13 @@ final class ReaderDocument: NSDocument {
     }
 
     override func makeWindowControllers() {
+        if Self.openingIntoPane { return }
         guard let session else { return }
         session.undoManager = undoManager
         let controller = ReaderWindowController(session: session)
         addWindowController(controller)
         session.undoManager = undoManager
+        controller.attachHostDocument()
         refreshSubtitle()
     }
 
@@ -235,16 +239,48 @@ final class ReaderDocument: NSDocument {
         refreshSubtitle()
     }
 
+    /// Writes the sidecar, then closes the document. Used when the last pane of this book goes away.
+    func saveForPaneClose() {
+        let url = fileURL ?? session?.bookURL
+        let finish: (Error?) -> Void = { [weak self] error in
+            guard let self else { return }
+            if error != nil { try? self.session?.persistSidecar() }
+            if !self.isShownInAWindow() { self.close() }
+        }
+        guard let url else {
+            finish(nil)
+            return
+        }
+        save(to: url, ofType: fileType ?? "com.adobe.pdf", for: .autosaveInPlaceOperation, completionHandler: finish)
+    }
+
+    private func isShownInAWindow() -> Bool {
+        guard let session else { return !windowControllers.isEmpty }
+        for case let reader as ReaderDocument in NSDocumentController.shared.documents {
+            for controller in reader.windowControllers {
+                if (controller as? ReaderWindowController)?.shows(session) == true { return true }
+            }
+        }
+        return false
+    }
+
     /// Page or section text only. AppKit appends " — Edited" while the document
     /// is dirty and removes it when the change count is cleared.
     func refreshSubtitle() {
-        guard let session, let window = windowControllers.first?.window else { return }
-        if session.isPDF {
-            window.subtitle = "Page \(session.page) of \(max(session.pageCount, 1))"
-        } else {
-            window.subtitle = session.sectionTitle.isEmpty ? "EPUB" : session.sectionTitle
+        guard let session else { return }
+        let active = windowControllers.compactMap { controller -> NSWindow? in
+            guard let reader = controller as? ReaderWindowController, reader.session === session else { return nil }
+            return controller.window
         }
-        window.title = session.bookURL.deletingPathExtension().lastPathComponent
+        let windows = active.isEmpty ? windowControllers.compactMap(\.window) : active
+        for window in windows {
+            if session.isPDF {
+                window.subtitle = "Page \(session.page) of \(max(session.pageCount, 1))"
+            } else {
+                window.subtitle = session.sectionTitle.isEmpty ? "EPUB" : session.sectionTitle
+            }
+            window.title = session.bookURL.deletingPathExtension().lastPathComponent
+        }
     }
 
     private static func resolveBook(_ url: URL) throws -> (url: URL, data: Data, kind: BookKind) {

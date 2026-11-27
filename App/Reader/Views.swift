@@ -337,7 +337,7 @@ struct SidebarView: View {
         let mark = session.marks.first { $0.id == id } ?? session.globalMarks.first { $0.id == id }
         guard let mark else { return }
         if mark.scope == .global, mark.bookFingerprint != session.fingerprint, let path = mark.bookPath {
-            ReaderDocument.openMark(path: path, position: mark.position)
+            (NSApp.keyWindow?.windowController as? ReaderWindowController)?.openBookInOtherPane(url: URL(fileURLWithPath: path), position: mark.position)
             return
         }
         guard let controller = NSApp.keyWindow?.windowController as? ReaderWindowController else { return }
@@ -399,7 +399,7 @@ struct SidebarView: View {
         }
         .onTapGesture {
             if global, mark.bookFingerprint != session.fingerprint, let path = mark.bookPath {
-                ReaderDocument.openMark(path: path, position: mark.position)
+                (NSApp.keyWindow?.windowController as? ReaderWindowController)?.openBookInOtherPane(url: URL(fileURLWithPath: path), position: mark.position)
             } else if let controller = NSApp.keyWindow?.windowController as? ReaderWindowController {
                 controller.reveal(mark.position)
             }

@@ -9,12 +9,16 @@ import WebKit
 /// zoom changes the font size. Two-page mode uses CSS columns, which is an approximation.
 final class EPUBContainerViewController: NSViewController, WKScriptMessageHandler, WKNavigationDelegate {
     let session: ReaderSession
+    var publishesPosition = true
+    var ownsFindSession = false
     private var webView: WKWebView?
-    private let findBar = NSSearchField()
-    private var findTop: NSLayoutConstraint?
+    private let titleStrip = PaneTitleStrip()
+    private var findBar: NSSearchField { titleStrip.findField }
+    private var stripTop: NSLayoutConstraint?
     private var fontScale: Double = 1
     private var contactHost: NSHostingController<EPUBContactSheet>?
     private var spineLoaded = false
+    private var displayedSpineIndex = 0
     private var acceptSpineReports = false
     private var chapterIndex = 0
     private var chapterScroll: Double = 0
@@ -32,6 +36,10 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
+    deinit {
+        session.unwatchAnnotations(self)
+    }
+
     override func loadView() {
         view = NSView()
         let configuration = WKWebViewConfiguration()
@@ -41,30 +49,37 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         webView.translatesAutoresizingMaskIntoConstraints = false
         self.webView = webView
         view.addSubview(webView)
-        findBar.translatesAutoresizingMaskIntoConstraints = false
-        findBar.placeholderString = "Find"
         findBar.target = self
         findBar.action = #selector(submitFind)
         (findBar.cell as? NSActionCell)?.sendsActionOnEndEditing = false
-        findBar.isHidden = true
-        view.addSubview(findBar)
-        let findConstraint = findBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: -40)
-        findTop = findConstraint
+        view.addSubview(titleStrip)
+        let stripConstraint = titleStrip.topAnchor.constraint(equalTo: view.topAnchor)
+        stripTop = stripConstraint
         NSLayoutConstraint.activate([
+            titleStrip.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            titleStrip.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            stripConstraint,
             webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            webView.topAnchor.constraint(equalTo: findBar.bottomAnchor),
-            findBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            findBar.widthAnchor.constraint(equalToConstant: 240),
-            findConstraint,
+            webView.topAnchor.constraint(equalTo: titleStrip.bottomAnchor),
+        ])
+        let ring = PaneFocusRing()
+        ring.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(ring)
+        NSLayoutConstraint.activate([
+            ring.topAnchor.constraint(equalTo: titleStrip.topAnchor),
+            ring.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            ring.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            ring.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
         fontScale = session.zoom
         chapterIndex = max(session.page - 1, 0)
-        session.onAnnotationsChanged = { [weak self] in
+        session.watchAnnotations(self) { [weak self] in
             guard let self else { return }
             self.webView?.evaluateJavaScript("window.readerPaint && window.readerPaint(\(self.highlightScript()))")
         }
+        setPaneActive(publishesPosition)
         loadSpine()
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, event.window == self.view.window, self.view.window?.firstResponder is WKWebView else { return event }
@@ -102,7 +117,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         webView?.isHidden = visible
         guard visible else { return }
         let host = NSHostingController(rootView: EPUBContactSheet(session: session) { [weak self] index in
-            self?.session.page = index + 1
+            if self?.publishesPosition == true { self?.session.page = index + 1 }
             self?.session.setSidebar(.thumbnails)
             self?.loadSpine()
             (self?.view.window?.windowController as? ReaderWindowController)?.applyChrome()
@@ -118,13 +133,18 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         contactHost = host
     }
 
-    func actualSize() { fontScale = 1; session.rememberZoom(1, fit: .actual); applyLiveStyle() }
-    func zoomToFit() { fontScale = 1.15; session.rememberZoom(fontScale, fit: .fitPage); applyLiveStyle() }
-    func fitWidth() { fontScale = 1.15; session.rememberZoom(fontScale, fit: .fitWidth); applyLiveStyle() }
+    func actualSize() { fontScale = 1; storeZoom(1, fit: .actual); applyLiveStyle() }
+    func zoomToFit() { fontScale = 1.15; storeZoom(fontScale, fit: .fitPage); applyLiveStyle() }
+    func fitWidth() { fontScale = 1.15; storeZoom(fontScale, fit: .fitWidth); applyLiveStyle() }
     func zoom(by factor: Double) {
         fontScale = min(max(fontScale * factor, 0.6), 2.4)
-        session.rememberZoom(fontScale, fit: .custom)
+        storeZoom(fontScale, fit: .custom)
         applyLiveStyle()
+    }
+
+    private func storeZoom(_ scale: Double, fit: FitMode) {
+        guard publishesPosition else { return }
+        session.rememberZoom(scale, fit: fit)
     }
 
     func applyLiveStyle() {
@@ -144,9 +164,25 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     }
     func nextPage() { showSpine(index: min(session.page, max(session.pageCount - 1, 0))) }
     func previousPage() { showSpine(index: max(session.page - 2, 0)) }
-    func toggleFind() {
-        findBar.isHidden = false
-        findTop?.constant = 8
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        guard let window = view.window, let constraint = stripTop else { return }
+        let topInWindow = view.convert(view.bounds, to: nil).maxY
+        let overlap = topInWindow - window.contentLayoutRect.maxY
+        let constant = overlap > 0.5 ? overlap : 0
+        if abs(constraint.constant - constant) > 0.5 {
+            constraint.constant = constant
+        }
+        refreshPaneTitle()
+    }
+
+    func setPaneActive(_ active: Bool) {
+        titleStrip.setActive(active)
+        refreshPaneTitle()
+    }
+
+    func focusFind() {
+        setPaneActive(true)
         if findBar.stringValue.isEmpty { findBar.stringValue = session.findQuery }
         view.layoutSubtreeIfNeeded()
         DispatchQueue.main.async { [weak self] in
@@ -154,6 +190,19 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             self.view.window?.makeFirstResponder(self.findBar)
             self.findBar.currentEditor()?.selectAll(nil)
         }
+    }
+
+    func toggleFind() {
+        focusFind()
+    }
+
+    func setFindCount(_ text: String) {
+        titleStrip.setCount(text)
+    }
+
+    private func refreshPaneTitle() {
+        let title = session.bookURL.deletingPathExtension().lastPathComponent
+        titleStrip.show(title: title, page: "p. \(displayedSpineIndex + 1)")
     }
     func search(_ query: String, explicitAdvance: Bool = true) {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -187,6 +236,8 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     private func runFind(forward: Bool, fresh: Bool) {
         let query = findBar.stringValue.isEmpty ? session.findQuery : findBar.stringValue
         session.findQuery = query
+        ownsFindSession = true
+        (view.window?.windowController as? ReaderWindowController)?.claimFindSession(from: self)
         guard !query.isEmpty else { return }
         let escaped = query
             .replacingOccurrences(of: "\\", with: "\\\\")
@@ -239,6 +290,15 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         pendingChapterScroll = position.scrollY
         showSpine(index: index)
         if let quote = position.quote, !quote.isEmpty { flash(quote) }
+    }
+
+    func showInPane(_ position: ReadingPosition) {
+        reveal(position)
+    }
+
+    func publishCurrentPosition() {
+        guard publishesPosition, let epub = session.epub else { return }
+        applySpine(displayedSpineIndex, count: epub.spine.count)
     }
 
     func consumePendingJump() {
@@ -386,7 +446,10 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         let placements = SpineChapters.placements(spine: epub.spine, toc: epub.toc)
         let placement = placements[index]
         let title = placement.title.isEmpty ? epub.spine[index].title : placement.title
+        displayedSpineIndex = index
         chapterIndex = index
+        refreshPaneTitle()
+        guard publishesPosition else { return }
         session.updatePage(index + 1, count: count, section: title)
     }
 
@@ -494,6 +557,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
 
     private func loadSpine() {
         guard let epub = session.epub, let webView else { return }
+        displayedSpineIndex = min(max(session.page - 1, 0), max(epub.spine.count - 1, 0))
         let items: [EPUBSpineItem]
         if session.continuous {
             items = epub.spine
@@ -503,8 +567,11 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         } else {
             let index = min(max(session.page - 1, 0), max(epub.spine.count - 1, 0))
             items = [epub.spine[index]]
-            session.sectionTitle = epub.spine[index].title
-            session.updatePage(index + 1, count: epub.spine.count, section: epub.spine[index].title)
+            displayedSpineIndex = index
+            if publishesPosition {
+                session.sectionTitle = epub.spine[index].title
+                session.updatePage(index + 1, count: epub.spine.count, section: epub.spine[index].title)
+            }
         }
         let columns = session.twoPages && !session.continuous ? "column-count: 2; column-gap: 32px; height: 100vh;" : ""
         acceptSpineReports = false
