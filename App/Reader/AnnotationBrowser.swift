@@ -14,7 +14,7 @@ struct AnnotationBrowser: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading, spacing: 6) {
-                TextField("Search notes and highlights", text: $session.annotationQuery)
+                TextField("Search notes…", text: $session.annotationQuery)
                     .textFieldStyle(.roundedBorder)
                 Menu {
                     Section("Show") {
@@ -44,7 +44,19 @@ struct AnnotationBrowser: View {
             if session.visibleAnnotations.isEmpty {
                 Group {
                     if session.annotationQuery.isEmpty && session.annotationFilter == "all" {
-                        ContentUnavailableView("No highlights or notes yet", systemImage: "highlighter", description: Text("Select text, then press ⌃⌘1–6 to highlight or ⇧⌘N to add a note."))
+                        VStack(spacing: 8) {
+                            Image(systemName: "highlighter")
+                                .font(.system(size: 28))
+                                .foregroundStyle(.secondary)
+                            Text("No highlights or notes yet")
+                                .font(.system(size: 17, weight: .semibold))
+                            Text("Select text, then press ⌃⌘1–6 to highlight or ⇧⌘N to add a note.")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .padding(24)
                     } else {
                         ContentUnavailableView.search(text: session.annotationQuery)
                     }
