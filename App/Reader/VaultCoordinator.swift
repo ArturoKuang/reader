@@ -55,6 +55,12 @@ final class VaultCoordinator {
             guard let self, let session, self.settings.enabled else { return }
             self.scheduleFlush(session)
         }
+        session.onVaultSave = { [weak self, weak session] in
+            guard let self, let session, self.settings.enabled else { return }
+            self.flushTimer?.invalidate()
+            self.flushTimer = nil
+            self.flush(session)
+        }
         session.onSaveVaultState = { [weak self, weak session] in
             guard let self, let session else { return }
             let wasWriting = self.settings.enabled

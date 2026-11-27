@@ -312,5 +312,8 @@ final class AnnotationTests: XCTestCase {
         XCTAssertEqual(FindQuery.command(query: typed, previous: typed, hasMatches: true, committed: false), .stay)
         XCTAssertEqual(FindQuery.command(query: typed, previous: typed, hasMatches: true, committed: true), .step)
         XCTAssertEqual(FindQuery.command(query: typed, previous: typed, hasMatches: false, committed: true), .begin)
+        // The field losing focus after a committed search must keep the current hit.
+        XCTAssertEqual(FindQuery.command(query: typed, previous: typed, hasMatches: true, committed: true, explicitAdvance: false), .stay)
+        XCTAssertEqual(FindQuery.command(query: typed, previous: typed, hasMatches: true, committed: false, explicitAdvance: false), .stay)
     }
 }

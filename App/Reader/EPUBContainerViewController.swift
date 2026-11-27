@@ -42,6 +42,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         findBar.placeholderString = "Find"
         findBar.target = self
         findBar.action = #selector(submitFind)
+        (findBar.cell as? NSActionCell)?.sendsActionOnEndEditing = false
         findBar.isHidden = true
         view.addSubview(findBar)
         let findConstraint = findBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: -40)
@@ -150,11 +151,11 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             self.findBar.currentEditor()?.selectAll(nil)
         }
     }
-    func search(_ query: String) {
+    func search(_ query: String, explicitAdvance: Bool = true) {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let hasMatches = didFindQuery && trimmed == lastFindQuery
-        let command = FindQuery.command(query: trimmed, previous: lastFindQuery, hasMatches: hasMatches, committed: findCommitted)
+        let command = FindQuery.command(query: trimmed, previous: lastFindQuery, hasMatches: hasMatches, committed: findCommitted, explicitAdvance: explicitAdvance)
         findBar.stringValue = trimmed
         session.findQuery = trimmed
         switch command {
@@ -171,7 +172,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     }
 
     @objc private func submitFind() {
-        search(findBar.stringValue.isEmpty ? session.findQuery : findBar.stringValue)
+        search(findBar.stringValue.isEmpty ? session.findQuery : findBar.stringValue, explicitAdvance: FindCommit.isExplicitAdvance())
     }
 
     func find(forward: Bool) {

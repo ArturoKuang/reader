@@ -110,7 +110,21 @@ final class ReaderDocument: NSDocument {
         refreshSubtitle()
     }
 
-    /// Autosave writes the sidecar only. The book file is never replaced.
+    override func save(_ sender: Any?) {
+        // Avoid NSDocument's performActivityWithSynchronousWaiting path.
+        // If an earlier activity is stuck (historically a modal "Save to Vault"
+        // alert during windowDidBecomeKey), that wait freezes the main thread
+        // at 0% CPU with no recovery.
+        for controller in windowControllers {
+            controller.window?.endEditing(for: nil)
+        }
+        persistSidecarOrVault(clearEdited: true) { [weak self] error in
+            if let error {
+                self?.presentError(error)
+            }
+        }
+    }
+
     func reveal(_ link: ReaderLink) {
         _ = Self.takeQueuedLink(for: link.path)
         guard let session else {
@@ -125,25 +139,44 @@ final class ReaderDocument: NSDocument {
         }
     }
 
+    /// Autosave writes the sidecar only. The book file is never replaced.
     override func save(to url: URL, ofType typeName: String, for saveOperation: NSDocument.SaveOperationType, completionHandler: @escaping (Error?) -> Void) {
+        // May be invoked off the main thread during autosave. AppKit work and
+        // the completion handler must run on the main thread. If we are already
+        // on the main thread, complete synchronously — dispatching async here
+        // deadlocks performActivityWithSynchronousWaiting.
+        let clearEdited = saveOperation != .saveToOperation
+        let finish: (Error?) -> Void = { error in
+            completionHandler(error)
+        }
+        if Thread.isMainThread {
+            persistSidecarOrVault(clearEdited: clearEdited, completion: finish)
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.persistSidecarOrVault(clearEdited: clearEdited, completion: finish) ?? finish(nil)
+            }
+        }
+    }
+
+    private func persistSidecarOrVault(clearEdited: Bool, completion: @escaping (Error?) -> Void) {
         if session?.usesVault == true {
-            session?.onVaultFlush?()
-            if saveOperation != .saveToOperation {
+            session?.onVaultSave?()
+            if clearEdited {
                 updateChangeCount(.changeCleared)
             }
-            completionHandler(nil)
+            completion(nil)
             return
         }
         do {
             try session?.persistSidecar()
-            // This override replaces NSDocument's save, which is what normally
+            // This path replaces NSDocument's save, which is what normally
             // clears the edited flag. Without this, " — Edited" stays after ⌘S.
-            if saveOperation != .saveToOperation {
+            if clearEdited {
                 updateChangeCount(.changeCleared)
             }
-            completionHandler(nil)
+            completion(nil)
         } catch {
-            completionHandler(error)
+            completion(error)
         }
     }
 

@@ -58,6 +58,7 @@ final class PDFContainerViewController: NSViewController {
         findBar.placeholderString = "Find"
         findBar.target = self
         findBar.action = #selector(findFromBar)
+        (findBar.cell as? NSActionCell)?.sendsActionOnEndEditing = false
         findBar.isHidden = true
         view.addSubview(findBar)
         let findConstraint = findBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8)
@@ -338,11 +339,11 @@ final class PDFContainerViewController: NSViewController {
         }
     }
 
-    func search(_ query: String) {
+    func search(_ query: String, explicitAdvance: Bool = true) {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let hasMatches = !matches.isEmpty && matches.first?.string?.localizedCaseInsensitiveContains(trimmed) == true
-        let command = FindQuery.command(query: trimmed, previous: lastFindQuery, hasMatches: hasMatches, committed: findCommitted)
+        let command = FindQuery.command(query: trimmed, previous: lastFindQuery, hasMatches: hasMatches, committed: findCommitted, explicitAdvance: explicitAdvance)
         findBar.stringValue = trimmed
         session.findQuery = trimmed
         switch command {
@@ -408,7 +409,7 @@ final class PDFContainerViewController: NSViewController {
     }
 
     @objc private func findFromBar() {
-        search(findBar.stringValue.isEmpty ? session.findQuery : findBar.stringValue)
+        search(findBar.stringValue.isEmpty ? session.findQuery : findBar.stringValue, explicitAdvance: FindCommit.isExplicitAdvance())
     }
     func findNext() { stepMatch(forward: true) }
     func findPrevious() { stepMatch(forward: false) }

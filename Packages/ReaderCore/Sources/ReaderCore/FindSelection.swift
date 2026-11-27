@@ -31,11 +31,12 @@ public enum FindQuery {
     /// Live search calls this on every edit and again when Return is pressed.
     /// The first Return after a query already has matches stays put. Only a Return after that advances.
     /// `committed` is true once Return has accepted this exact query.
-    public static func command(query: String, previous: String, hasMatches: Bool, committed: Bool) -> FindCommand {
+    /// `explicitAdvance` is false when the field only resigned first responder (Add Note, a click in the page). That must not step.
+    public static func command(query: String, previous: String, hasMatches: Bool, committed: Bool, explicitAdvance: Bool = true) -> FindCommand {
         if query != previous || !hasMatches {
             return .begin
         }
-        if !committed {
+        if !committed || !explicitAdvance {
             return .stay
         }
         return .step
