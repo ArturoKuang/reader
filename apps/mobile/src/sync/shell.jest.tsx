@@ -1,6 +1,8 @@
 import { describe, expect, it, jest } from "@jest/globals";
 import { fireEvent, render, screen } from "@testing-library/react-native";
+import { StyleSheet } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
+import { tokens } from "../ui/tokens";
 import { SyncChrome } from "./SyncStatusChip";
 import type { OpenConflict } from "./wire";
 
@@ -136,5 +138,46 @@ describe("sync chrome mounted in the library", () => {
     expect(onOpenConflict).toHaveBeenCalledTimes(1);
     expect(onOpenConflict).toHaveBeenCalledWith(conflict);
     expect(screen.queryByLabelText("sync sheet")).toBeNull();
+  });
+});
+
+describe("pairing sheet polish", () => {
+  const unpaired = {
+    state: "unpaired" as const,
+    pendingCount: 0,
+    conflictCount: 0,
+    pausedBookIds: [] as string[],
+    lastSyncedAt: null,
+  };
+
+  async function openSheet() {
+    await render(
+      <SafeAreaProvider
+        initialMetrics={{
+          frame: { x: 0, y: 0, width: 390, height: 844 },
+          insets: { top: 0, left: 0, right: 0, bottom: 0 },
+        }}
+      >
+        <SyncChrome status={unpaired} conflicts={[]} />
+      </SafeAreaProvider>,
+    );
+    await fireEvent.press(screen.getByLabelText("sync unpaired"));
+  }
+
+  it("drops the redundant Pair heading and keeps Connect to your Mac", async () => {
+    await openSheet();
+    expect(screen.getByText("Connect to your Mac")).toBeTruthy();
+    expect(screen.getAllByText("Pair")).toHaveLength(1);
+    expect(screen.getByLabelText("Pair")).toBeTruthy();
+  });
+
+  it("keeps Scan code as the only primary button and styles Pair as secondary", async () => {
+    await openSheet();
+    const scan = StyleSheet.flatten(screen.getByTestId("pair-scan").props.style);
+    const pair = StyleSheet.flatten(screen.getByTestId("pair-submit").props.style);
+    expect(scan.backgroundColor).toBe(tokens.ink);
+    expect(pair.backgroundColor).toBe(tokens.paper);
+    expect(pair.borderWidth).toBe(1);
+    expect(screen.getByLabelText("Scan code")).toBeTruthy();
   });
 });

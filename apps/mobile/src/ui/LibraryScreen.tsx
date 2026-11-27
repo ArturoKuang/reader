@@ -152,7 +152,7 @@ export function LibraryScreen({
             >
               <View style={styles.cover} />
               <View style={styles.meta}>
-                <Text style={styles.heading}>{book.title}</Text>
+                <Text style={styles.heading} numberOfLines={2} ellipsizeMode="tail">{book.title}</Text>
                 <Text style={styles.caption}>{librarySubtitle(book)}</Text>
                 {book.waitingForSpace ? (
                   <Text style={styles.badge}>{tokens.syncStatus.storageFull.badge}</Text>

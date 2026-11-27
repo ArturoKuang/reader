@@ -125,7 +125,7 @@ export function NotebookScreen({
                 <Text style={styles.quote} numberOfLines={2}>
                   {item.quote}
                 </Text>
-                {item.note ? <Text style={styles.note}>Note: {item.note}</Text> : null}
+                {item.note ? <Text style={styles.note}>{item.note}</Text> : null}
                 {item.locationLabel ? <Text style={styles.caption}>{item.locationLabel}</Text> : null}
               </View>
             </Pressable>

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Modal, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { conflictVersionsLabel, tokens } from "../ui/tokens";
 import type { SyncStatus } from "./status";
@@ -85,7 +85,10 @@ export function SyncChrome({
     <View>
       <SyncStatusChip status={status} onPress={toggleSheet} />
       <Modal transparent animationType="slide" visible={open} onRequestClose={closeSheet}>
-        <View style={styles.modalRoot}>
+        <KeyboardAvoidingView
+          style={styles.modalRoot}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+        >
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Dismiss sync sheet"
@@ -98,8 +101,10 @@ export function SyncChrome({
             accessibilityLabel="sync sheet"
             style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}
           >
-            <View style={styles.handle} accessibilityLabel="Dismiss handle" />
-            <Text style={styles.heading}>{unpaired ? "Pair" : "Sync"}</Text>
+            <Pressable onPress={() => Keyboard.dismiss()} accessibilityLabel="Dismiss handle">
+              <View style={styles.handle} />
+            </Pressable>
+            {unpaired ? null : <Text style={styles.heading}>Sync</Text>}
             {unpaired ? (
               <View style={styles.block}>
                 <Text style={styles.title}>Connect to your Mac</Text>
@@ -143,9 +148,9 @@ export function SyncChrome({
                   accessibilityLabel="Pair"
                   testID="pair-submit"
                   onPress={() => onPair?.(url.trim())}
-                  style={styles.button}
+                  style={styles.buttonSecondary}
                 >
-                  <Text style={styles.buttonLabel}>Pair</Text>
+                  <Text style={styles.buttonLabelDark}>Pair</Text>
                 </Pressable>
                 {pairingError ? <Text style={styles.error}>{pairingError}</Text> : null}
               </View>
@@ -209,7 +214,7 @@ export function SyncChrome({
               </View>
             ) : null}
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
     </View>
   );
