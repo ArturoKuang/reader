@@ -1,0 +1,57 @@
+# Highlight smoke for Reader QA.
+# Android application id: com.reader
+#
+# longPressOn point "28%,21%" is the visible "Ishmael" glyphs on page 1 of
+# the sample PDF at 1080x2400. "28%,29%" is "Ishmael" on the sample EPUB.
+# The sheet is dismissed by Remove (no bottom Close button).
+# Selectors: library-pdf, library-epub, reader-surface, highlight-sheet,
+# highlight-color-1 … highlight-color-6, remove-highlight, reader-library.
+appId: com.reader
+---
+- launchApp
+- assertVisible:
+    id: library-pdf
+- tapOn:
+    id: library-pdf
+- extendedWaitUntil:
+    visible:
+      id: reader-surface
+    timeout: 30000
+- longPressOn:
+    point: "28%,21%"
+- extendedWaitUntil:
+    visible:
+      id: highlight-sheet
+    timeout: 10000
+- tapOn:
+    id: highlight-color-2
+- tapOn:
+    id: remove-highlight
+- assertNotVisible:
+    id: highlight-sheet
+- tapOn:
+    id: reader-library
+- assertVisible:
+    id: library-epub
+- tapOn:
+    id: library-epub
+- extendedWaitUntil:
+    visible:
+      id: reader-surface
+    timeout: 30000
+- longPressOn:
+    point: "28%,29%"
+- extendedWaitUntil:
+    visible:
+      id: highlight-sheet
+    timeout: 10000
+- tapOn:
+    id: highlight-color-3
+- tapOn:
+    id: remove-highlight
+- assertNotVisible:
+    id: highlight-sheet
+- tapOn:
+    id: reader-library
+- assertVisible:
+    id: library-pdf

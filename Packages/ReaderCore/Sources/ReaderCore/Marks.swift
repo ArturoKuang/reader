@@ -190,10 +190,37 @@ public struct MarkListLine: Equatable, Sendable, Identifiable {
     }
 }
 
+public struct MarkListSection: Equatable, Sendable, Identifiable {
+    public var id: String
+    public var title: String
+    public var lines: [MarkListLine]
+
+    public init(id: String, title: String, lines: [MarkListLine]) {
+        self.id = id
+        self.title = title
+        self.lines = lines
+    }
+}
+
 public enum MarkList {
     /// Local marks first, then global marks. Each line is the letter, a page, and one snippet.
     public static func lines(local: [MarkEntry], global: [MarkEntry]) -> [MarkListLine] {
-        sidebarSorted(local).map { line($0, global: false) } + sidebarSorted(global).map { line($0, global: true) }
+        sections(local: local, global: global).flatMap(\.lines)
+    }
+
+    /// "This book" holds lowercase (local) marks. "Other books" holds uppercase
+    /// (global) marks, with the book name on the location line.
+    public static func sections(local: [MarkEntry], global: [MarkEntry]) -> [MarkListSection] {
+        var sections: [MarkListSection] = []
+        let thisBook = sidebarSorted(local).map { line($0, global: false) }
+        let otherBooks = sidebarSorted(global).map { line($0, global: true) }
+        if !thisBook.isEmpty {
+            sections.append(MarkListSection(id: "this-book", title: "This book", lines: thisBook))
+        }
+        if !otherBooks.isEmpty {
+            sections.append(MarkListSection(id: "other-books", title: "Other books", lines: otherBooks))
+        }
+        return sections
     }
 
     private static func sidebarSorted(_ marks: [MarkEntry]) -> [MarkEntry] {
@@ -201,13 +228,16 @@ public enum MarkList {
     }
 
     private static func line(_ mark: MarkEntry, global: Bool) -> MarkListLine {
-        let location = mark.position.page.map { "p. \($0)" } ?? mark.position.section ?? "—"
+        let page = mark.position.page.map { "p. \($0)" }
+        let location: String
+        if global, let book = mark.documentTitle, !book.isEmpty {
+            location = page.map { "\(book) · \($0)" } ?? (mark.position.section.map { "\(book) · \($0)" } ?? book)
+        } else {
+            location = page ?? mark.position.section ?? "—"
+        }
         let quote = mark.position.quote?.split(whereSeparator: \.isNewline).first.map { String($0).trimmingCharacters(in: .whitespaces) } ?? ""
         let section = mark.position.section ?? ""
         var snippet = quote.isEmpty ? section : quote
-        if global, let book = mark.documentTitle, !book.isEmpty {
-            snippet = snippet.isEmpty ? book : "\(book) — \(snippet)"
-        }
         if snippet.count > 80 { snippet = String(snippet.prefix(79)) + "…" }
         return MarkListLine(id: mark.id, symbol: mark.symbol, global: global, location: location, snippet: snippet)
     }

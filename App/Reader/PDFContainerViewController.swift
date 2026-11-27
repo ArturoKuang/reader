@@ -32,6 +32,9 @@ final class PDFContainerViewController: NSViewController {
     private var didFinishOpeningLayout = false
     private var applyingJump = false
     private var stickJump: PDFJump?
+    /// 1-based page from a mark/link reveal. Kept until PDFKit reports that page
+    /// so a closed-book jump to body page 3 cannot show "Page 2" in the subtitle.
+    private var pinnedRevealPage: Int?
     private var suppressScaleSave = false
     private var lastFitSize: CGSize = .zero
 
@@ -98,9 +101,14 @@ final class PDFContainerViewController: NSViewController {
         pdfView.onMouseUp = { [weak self] in self?.captureSelection() }
         pdfView.highlightIDAt = { [weak self] point in self?.highlightID(atViewPoint: point) }
         pdfView.onRemoveHighlight = { [weak self] id in self?.session.deleteHighlight(id: id) }
-        pdfView.onOpenHighlight = { [weak self] id in
-            self?.session.lastAnnotationHit = id
-            self?.session.openAnnotation(id)
+        pdfView.onOpenHighlight = { [weak self] id, option in
+            guard let self else { return }
+            if option {
+                (self.view.window?.windowController as? ReaderWindowController)?.openInPane(id: id)
+                return
+            }
+            self.session.lastAnnotationHit = id
+            self.session.openAnnotation(id)
         }
         pdfView.conceptAt = { [weak self] point in self?.conceptID(atViewPoint: point) }
         pdfView.onConcept = { [weak self] id in self?.presentConcept(id) }
@@ -170,6 +178,13 @@ final class PDFContainerViewController: NSViewController {
         guard view.window != nil else { return }
         let bounds = pdfView.bounds
         guard bounds.width > 160, bounds.height > 160, pdfView.document != nil else { return }
+        // Restore a pending mark (or saved place) before capturing the destination
+        // used to hold the page across a scale change. Otherwise the pre-restore
+        // page 1 (or a 0-based neighbor) is fitted back into view and the subtitle
+        // shows the wrong page.
+        if session.pendingMarkReveal != nil || !didRestorePosition {
+            restorePositionOnce()
+        }
         let anchored = pdfView.currentDestination
         let mode: FitMode = {
             if !publishesPosition, let lockedFit { return lockedFit }
@@ -239,6 +254,7 @@ final class PDFContainerViewController: NSViewController {
             session.pendingMarkReveal = nil
             didRestorePosition = true
             reveal(pending)
+            pinPageFromMark(pending)
             session.finishViewRestore()
             return
         }
@@ -657,6 +673,31 @@ final class PDFContainerViewController: NSViewController {
         }
     }
 
+    /// Prefer the 1-based page stored on the mark, not PDFKit's 0-based index or
+    /// the left page of a two-page spread, so the window subtitle stays correct.
+    private func pinPageFromMark(_ position: ReadingPosition) {
+        guard let page = position.page else { return }
+        let number = max(page, 1)
+        pinnedRevealPage = number
+        if publishesPosition {
+            let count = pdfView.document?.pageCount ?? session.pageCount
+            session.updatePage(number, count: max(count, 1), section: position.section ?? session.sectionTitle)
+        }
+        refreshPaneTitle()
+        // Hold through PDFKit's follow-up pageChanged, then allow normal updates.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if self.pinnedRevealPage == number {
+                if self.publishesPosition {
+                    let count = self.pdfView.document?.pageCount ?? self.session.pageCount
+                    self.session.updatePage(number, count: max(count, 1), section: position.section ?? self.session.sectionTitle)
+                    self.refreshPaneTitle()
+                }
+                self.pinnedRevealPage = nil
+            }
+        }
+    }
+
     func reveal(_ position: ReadingPosition) {
         guard let document = pdfView.document else { return }
         let index = min(max((position.page ?? 1) - 1, 0), max(document.pageCount - 1, 0))
@@ -671,6 +712,7 @@ final class PDFContainerViewController: NSViewController {
         // the page where it is when that corner is already barely on screen.
         let destination = PDFDestination(page: page, at: NSPoint(x: position.pdfX ?? bounds.minX, y: y))
         pdfView.go(to: destination)
+        pinPageFromMark(position)
     }
 
     /// Scrolls this pane only and flashes the quote for about a second.
@@ -830,10 +872,25 @@ final class PDFContainerViewController: NSViewController {
         overlay.needsLayout = true
         refreshPaneTitle()
         guard publishesPosition else { return }
+        // A mark or vault-link restore is still waiting; keep the 1-based page
+        // already written onto the session so the subtitle does not flash the
+        // document's initial page.
+        if session.pendingMarkReveal != nil { return }
         guard let page = pdfView.currentPage, let document = pdfView.document else { return }
         let index = document.index(for: page)
         guard index != NSNotFound else { return }
         let number = index + 1
+        if let pinned = pinnedRevealPage {
+            if number == pinned {
+                pinnedRevealPage = nil
+            } else {
+                // PDFKit often reports the left page of a spread, or a neighbor
+                // still on screen after go(to:). Hold the 1-based mark page.
+                session.updatePage(pinned, count: document.pageCount, section: session.sectionTitle)
+                refreshPaneTitle()
+                return
+            }
+        }
         let section = session.outline.last { ($0.page ?? 0) <= number }?.title
         session.updatePage(number, count: document.pageCount, section: section)
         session.rememberScroll(currentPosition())
@@ -894,7 +951,7 @@ final class ReaderPDFView: PDFView {
     var onMouseUp: (() -> Void)?
     var highlightIDAt: ((NSPoint) -> String?)?
     var onRemoveHighlight: ((String) -> Void)?
-    var onOpenHighlight: ((String) -> Void)?
+    var onOpenHighlight: ((String, Bool) -> Void)?
     var conceptAt: ((NSPoint) -> String?)?
     var onConcept: ((String) -> Void)?
     var prepareSelection: (() -> Void)?
@@ -904,7 +961,7 @@ final class ReaderPDFView: PDFView {
         super.mouseUp(with: event)
         let point = convert(event.locationInWindow, from: nil)
         if let id = highlightIDAt?(point) {
-            onOpenHighlight?(id)
+            onOpenHighlight?(id, event.modifierFlags.contains(.option))
             return
         }
         if let id = conceptAt?(point) {
@@ -1139,6 +1196,11 @@ final class NoteOverlay: NSView {
 
     @objc private func open(_ sender: NSClickGestureRecognizer) {
         guard let id = (sender.view as? NSImageView)?.identifier?.rawValue else { return }
+        let option = NSEvent.modifierFlags.contains(.option) || NSApp.currentEvent?.modifierFlags.contains(.option) == true
+        if option {
+            (window?.windowController as? ReaderWindowController)?.openInPane(id: id)
+            return
+        }
         session?.lastAnnotationHit = id
         session?.openAnnotation(id)
     }

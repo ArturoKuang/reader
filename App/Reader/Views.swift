@@ -114,30 +114,40 @@ struct MarkJumpOverlay: View {
     var close: () -> Void
 
     var body: some View {
-        let lines = MarkList.lines(local: session.marks, global: session.globalMarks)
+        let sections = MarkList.sections(local: session.marks, global: session.globalMarks)
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Marks").font(.headline)
                 Spacer()
                 Button("Close", action: close).buttonStyle(.borderless)
             }
-            if lines.isEmpty {
+            if sections.isEmpty {
                 Text("Press m and a letter to set a mark.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(lines) { line in
-                    Button {
-                        let mark = session.marks.first { $0.id == line.id } ?? session.globalMarks.first { $0.id == line.id }
-                        if let mark { jump(mark) }
-                    } label: {
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Text(line.symbol).font(.body.monospaced().weight(.semibold)).frame(width: 22, alignment: .leading)
-                            Text(line.location).font(.callout)
-                            Text(line.snippet).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                ForEach(sections) { section in
+                    Text(section.title)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.top, section.id == sections.first?.id ? 0 : 6)
+                    ForEach(section.lines) { line in
+                        Button {
+                            let mark = session.marks.first { $0.id == line.id } ?? session.globalMarks.first { $0.id == line.id }
+                            if let mark { jump(mark) }
+                        } label: {
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text(line.symbol).font(.body.monospaced().weight(.semibold)).frame(width: 22, alignment: .leading)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(line.location).font(.callout)
+                                    if !line.snippet.isEmpty {
+                                        Text(line.snippet).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                    }
+                                }
+                            }
                         }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
         }
@@ -179,6 +189,7 @@ struct SidebarView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .controlSize(.small)
+            .background(ClearSegmentSelection(clear: session.sidebar == .highlightsAndNotes))
             .padding(.horizontal, 8)
             .padding(.top, 8)
             .padding(.bottom, 4)
@@ -296,23 +307,29 @@ struct SidebarView: View {
     }
 
     private var marksList: some View {
-        let lines = MarkList.lines(local: session.marks, global: session.globalMarks)
+        let sections = MarkList.sections(local: session.marks, global: session.globalMarks)
         return Group {
-            if lines.isEmpty {
+            if sections.isEmpty {
                 ContentUnavailableView("No marks", systemImage: "bookmark", description: Text("Press m and a letter to set a mark."))
             } else {
-                List(lines, selection: $markSelection) { line in
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(line.symbol).font(.body.monospaced().weight(.semibold)).frame(width: 22, alignment: .leading)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(line.location).font(.callout)
-                            if !line.snippet.isEmpty {
-                                Text(line.snippet).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                List(selection: $markSelection) {
+                    ForEach(sections) { section in
+                        Section(section.title) {
+                            ForEach(section.lines) { line in
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    Text(line.symbol).font(.body.monospaced().weight(.semibold)).frame(width: 22, alignment: .leading)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(line.location).font(.callout)
+                                        if !line.snippet.isEmpty {
+                                            Text(line.snippet).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                        }
+                                    }
+                                }
+                                .contentShape(Rectangle())
+                                .tag(line.id)
                             }
                         }
                     }
-                    .contentShape(Rectangle())
-                    .tag(line.id)
                 }
                 .listStyle(.sidebar)
                 .onChange(of: markSelection) { _, id in
@@ -1120,5 +1137,49 @@ struct ShortcutsView: View {
         }
         .padding()
         .frame(minWidth: 480, minHeight: 560)
+    }
+}
+
+/// SwiftUI's segmented picker keeps the last selected segment filled when the
+/// binding is nil. When Highlights/Notes is open, clear that fill so two sidebar
+/// modes don't look selected at once.
+private struct ClearSegmentSelection: NSViewRepresentable {
+    var clear: Bool
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        view.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        view.setContentHuggingPriority(.defaultLow, for: .vertical)
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async {
+            guard let control = Self.segmentedControl(from: view) else { return }
+            if clear {
+                if control.selectedSegment != -1 {
+                    control.selectedSegment = -1
+                }
+            }
+        }
+    }
+
+    private static func segmentedControl(from view: NSView) -> NSSegmentedControl? {
+        var current: NSView? = view
+        while let host = current {
+            if let match = findSegmented(in: host) { return match }
+            current = host.superview
+        }
+        return nil
+    }
+
+    private static func findSegmented(in view: NSView) -> NSSegmentedControl? {
+        if let control = view as? NSSegmentedControl, control.segmentCount == 3 {
+            return control
+        }
+        for child in view.subviews {
+            if let found = findSegmented(in: child) { return found }
+        }
+        return nil
     }
 }
