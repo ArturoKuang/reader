@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        SyncController.shared.start()
         if NSDocumentController.shared.documents.isEmpty {
             showWelcome(nil)
         }
@@ -88,10 +89,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let host = NSHostingController(rootView: SettingsView())
             let window = NSWindow(contentViewController: host)
             window.title = "Reader Settings"
-            window.setContentSize(NSSize(width: 560, height: 640))
             window.styleMask = [.titled, .closable]
             window.toolbarStyle = .preference
-            window.setContentSize(NSSize(width: 500, height: 560))
+            window.setContentSize(NSSize(width: 520, height: 600))
             settingsWindow = window
         }
         settingsWindow?.center()

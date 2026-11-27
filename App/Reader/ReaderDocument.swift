@@ -132,6 +132,19 @@ final class ReaderDocument: NSDocument {
         session.undoManager = undoManager
         controller.attachHostDocument()
         refreshSubtitle()
+        Task { @MainActor in
+            SyncController.shared.register(session)
+            SyncController.shared.applyOpeningPosition(to: session)
+        }
+    }
+
+    override func close() {
+        if let session {
+            Task { @MainActor in
+                SyncController.shared.unregister(session)
+            }
+        }
+        super.close()
     }
 
     static func openMark(path: String, position: ReadingPosition) {
