@@ -91,6 +91,7 @@ final class ReaderSession: ObservableObject {
     var onAnnotationsChanged: (() -> Void)?
     private var annotationObservers: [ObjectIdentifier: () -> Void] = [:]
     var onToast: ((String?) -> Void)?
+    var pendingMarkReveal: ReadingPosition?
     weak var undoManager: UndoManager?
     /// True when `state.json` already existed. A first open fits the page width.
     let hasSavedViewState: Bool
@@ -102,6 +103,8 @@ final class ReaderSession: ObservableObject {
     private var runner = ProcessCommandRunner()
     private var toastTimer: Timer?
     private var viewStateTimer: Timer?
+    private let globalObserver = UUID()
+    private let globalHub = GlobalMarkHub.shared
 
     var isPDF: Bool { bookURL.pathExtension.lowercased() == "pdf" }
 
@@ -153,13 +156,24 @@ final class ReaderSession: ObservableObject {
         self.outline = []
         self.settings = SettingsStore.load()
         self.provider = SettingsStore.load().defaultProvider
-        self.globalMarks = GlobalMarks.load(applicationSupport: AppPaths.support, fs: LocalFileSystem())
+        let fs = LocalFileSystem()
+        globalHub.ensureLoaded(applicationSupport: AppPaths.support, fs: fs)
+        globalHub.observe(globalObserver) { [weak self] marks in
+            guard let self else { return }
+            self.globalMarks = marks
+            self.objectWillChange.send()
+        }
+        self.globalMarks = globalHub.marks
         if isPDF {
             loadPDF()
         } else {
             loadEPUB()
         }
         prepareBookText()
+    }
+
+    deinit {
+        globalHub.unobserve(globalObserver)
     }
 
     func dismissNotice() {
@@ -204,7 +218,20 @@ final class ReaderSession: ObservableObject {
         package.marks.frontMatter = package.notes.frontMatter.withKind("marks")
         let fs = LocalFileSystem()
         try package.write(to: directory, fs: fs)
-        try GlobalMarks.save(globalMarks, applicationSupport: AppPaths.support, fs: fs)
+        globalHub.publish(globalMarks, source: globalObserver, applicationSupport: AppPaths.support, fs: fs)
+    }
+
+    /// Vault books have no sidecar. Local marks live under Application Support, next to the global file.
+    func persistVaultMarks() {
+        let fs = LocalFileSystem()
+        try? BookMarks.save(
+            package.marks.marks,
+            applicationSupport: AppPaths.support,
+            fingerprint: fingerprint,
+            document: bookURL.lastPathComponent,
+            fs: fs
+        )
+        globalHub.publish(globalMarks, source: globalObserver, applicationSupport: AppPaths.support, fs: fs)
     }
 
     func finishViewRestore() {
@@ -699,8 +726,10 @@ final class ReaderSession: ObservableObject {
     private func dirty() {
         captureState()
         if usesVault {
+            persistVaultMarks()
             onVaultFlush?()
         } else {
+            globalHub.publish(globalMarks, source: globalObserver, applicationSupport: AppPaths.support, fs: LocalFileSystem())
             onDirty?()
         }
         objectWillChange.send()
@@ -1188,10 +1217,37 @@ extension ReaderSession {
         package.marks.marks = store.local
         globalMarks = store.global
         if changed { dirty() }
-        if let toast = result.toast { showToast(toast) }
+        if result.effect == .showList { setSidebar(.marks) }
+        if let toast = result.toast, result.effect != .showList { showToast(toast) }
         if let jump = result.jump, jump.openOtherBook, let path = jump.bookPath {
             return (!result.passThrough && result.effect != .none, jump.position, URL(fileURLWithPath: path))
         }
         return (!result.passThrough && result.effect != .none, result.jump?.position, nil)
+    }
+
+    func removeMark(id: String) {
+        var store = MarkStore(local: package.marks.marks, global: globalMarks)
+        let previousLocal = package.marks.marks
+        let previousGlobal = globalMarks
+        guard store.remove(id: id) else { return }
+        package.marks.marks = store.local
+        globalMarks = store.global
+        undoManager?.registerUndo(withTarget: self) { session in
+            session.restoreMarks(local: previousLocal, global: previousGlobal)
+        }
+        undoManager?.setActionName("Delete Mark")
+        dirty()
+    }
+
+    private func restoreMarks(local: [MarkEntry], global: [MarkEntry]) {
+        let previousLocal = package.marks.marks
+        let previousGlobal = globalMarks
+        package.marks.marks = local
+        globalMarks = global
+        undoManager?.registerUndo(withTarget: self) { session in
+            session.restoreMarks(local: previousLocal, global: previousGlobal)
+        }
+        undoManager?.setActionName("Delete Mark")
+        dirty()
     }
 }

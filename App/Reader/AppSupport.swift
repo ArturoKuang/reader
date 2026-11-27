@@ -178,7 +178,8 @@ enum ShortcutCatalog {
         var rows: [ShortcutRow] = []
         if let menu = NSApp.mainMenu { walk(menu, into: &rows) }
         rows.append(ShortcutRow(title: "Set a vim mark", keys: "m, then a key"))
-        rows.append(ShortcutRow(title: "Jump to a mark", keys: "`, then the key"))
+        rows.append(ShortcutRow(title: "Jump to a mark", keys: "` or ', then the key"))
+        rows.append(ShortcutRow(title: "Show marks", keys: "`, then ?"))
         rows.append(ShortcutRow(title: "Split the page", keys: "Ctrl-W, then v"))
         rows.append(ShortcutRow(title: "Close the pane", keys: "Ctrl-W, then q"))
         rows.append(ShortcutRow(title: "Jump back", keys: "`, then `"))
