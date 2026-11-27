@@ -231,8 +231,10 @@ export function pdfViewerHtml(): string {
   html, body { margin: 0; background: #f6f5f3; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
   #pages { padding: 12px 0 120px; }
   .page { position: relative; margin: 0 auto 16px; background: white; box-shadow: 0 1px 4px rgba(0,0,0,.12); }
-  .textLayer { position: absolute; inset: 0; overflow: hidden; line-height: 1; z-index: 2; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
-  .textLayer span { color: transparent; position: absolute; white-space: pre; transform-origin: 0 0; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  .page > canvas { display: block; width: 100%; height: 100%; }
+  /* pdf.js 4.10 sizes spans as calc(var(--scale-factor) * Npx) and then scale(1/minFontSize). --scale-factor is the viewport scale, set on each page. */
+  .textLayer { position: absolute; text-align: initial; inset: 0; overflow: hidden; line-height: 1; -webkit-text-size-adjust: none; text-size-adjust: none; transform-origin: 0 0; z-index: 2; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  .textLayer :is(span, br) { color: transparent; position: absolute; white-space: pre; transform-origin: 0% 0%; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
   .marks { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
   .mark { position: absolute; border-radius: 2px; }
 </style>
@@ -366,9 +368,13 @@ async function openPdf(base64, workerSource) {
     element.className = "page";
     element.style.width = viewport.width + "px";
     element.style.height = viewport.height + "px";
+    element.style.setProperty("--scale-factor", String(viewport.scale));
     const canvas = document.createElement("canvas");
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
+    const pixelRatio = window.devicePixelRatio || 1;
+    canvas.width = Math.floor(viewport.width * pixelRatio);
+    canvas.height = Math.floor(viewport.height * pixelRatio);
+    canvas.style.width = viewport.width + "px";
+    canvas.style.height = viewport.height + "px";
     element.append(canvas);
     const textLayer = document.createElement("div");
     textLayer.className = "textLayer";
@@ -377,7 +383,9 @@ async function openPdf(base64, workerSource) {
     marks.className = "marks";
     element.append(marks);
     host.append(element);
-    await pdfPage.render({ canvasContext: canvas.getContext("2d"), viewport, canvas }).promise;
+    const renderContext = { canvasContext: canvas.getContext("2d"), viewport, canvas };
+    if (pixelRatio !== 1) renderContext.transform = [pixelRatio, 0, 0, pixelRatio, 0, 0];
+    await pdfPage.render(renderContext).promise;
     const content = await pdfPage.getTextContent();
     await new pdfjs.TextLayer({ textContentSource: content, container: textLayer, viewport }).render();
     const text = plainText(textLayer);
