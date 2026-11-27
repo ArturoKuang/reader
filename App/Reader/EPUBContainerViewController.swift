@@ -17,6 +17,9 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     private var spineLoaded = false
     private var acceptSpineReports = false
     private var pendingFlash: String?
+    private var lastFindQuery = ""
+    private var findCommitted = false
+    private var didFindQuery = false
 
     init(session: ReaderSession) {
         self.session = session
@@ -39,6 +42,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         findBar.placeholderString = "Find"
         findBar.target = self
         findBar.action = #selector(submitFind)
+        (findBar.cell as? NSActionCell)?.sendsActionOnEndEditing = false
         findBar.isHidden = true
         view.addSubview(findBar)
         let findConstraint = findBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: -40)
@@ -147,18 +151,45 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             self.findBar.currentEditor()?.selectAll(nil)
         }
     }
-    func search(_ query: String) {
-        findBar.stringValue = query
-        session.findQuery = query
-        find(forward: true)
+    func search(_ query: String, explicitAdvance: Bool = true) {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let hasMatches = didFindQuery && trimmed == lastFindQuery
+        let command = FindQuery.command(query: trimmed, previous: lastFindQuery, hasMatches: hasMatches, committed: findCommitted, explicitAdvance: explicitAdvance)
+        findBar.stringValue = trimmed
+        session.findQuery = trimmed
+        switch command {
+        case .begin:
+            lastFindQuery = trimmed
+            findCommitted = false
+            didFindQuery = true
+            runFind(forward: true, fresh: true)
+        case .stay:
+            findCommitted = true
+        case .step:
+            runFind(forward: true, fresh: false)
+        }
     }
 
-    @objc private func submitFind() { find(forward: true) }
+    @objc private func submitFind() {
+        search(findBar.stringValue.isEmpty ? session.findQuery : findBar.stringValue, explicitAdvance: FindCommit.isExplicitAdvance())
+    }
+
     func find(forward: Bool) {
+        runFind(forward: forward, fresh: false)
+    }
+
+    /// `fresh` selects the first match at or after the caret. Find Next passes false so the current hit is not chosen again.
+    private func runFind(forward: Bool, fresh: Bool) {
         let query = findBar.stringValue.isEmpty ? session.findQuery : findBar.stringValue
         session.findQuery = query
-        let escaped = query.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
-        webView?.evaluateJavaScript("window.find('\(escaped)', false, \(!forward), true)")
+        guard !query.isEmpty else { return }
+        let escaped = query
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+        webView?.evaluateJavaScript("window.readerFind && window.readerFind('\(escaped)', \(forward), \(fresh))")
     }
 
     func captureSelection() {
@@ -356,12 +387,21 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     }
 
     private func highlightScript() -> String {
-        let items = session.highlights.compactMap { highlight -> String? in
-            let quote = highlight.quote.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-            guard !quote.isEmpty else { return nil }
-            return "{\"quote\":\"\(quote)\",\"color\":\(highlight.color)}"
+        let objects: [[String: Any]] = HighlightPaint.marks(for: session.highlights).map { mark in
+            var object: [String: Any] = [
+                "quote": mark.quote,
+                "color": mark.color,
+                "prefix": mark.prefix,
+                "suffix": mark.suffix,
+            ]
+            if let chapter = mark.chapter { object["chapter"] = chapter }
+            if let spine = mark.spineIndex { object["spine"] = spine }
+            return object
         }
-        return "[\(items.joined(separator: ","))]"
+        guard JSONSerialization.isValidJSONObject(objects),
+              let data = try? JSONSerialization.data(withJSONObject: objects),
+              let json = String(data: data, encoding: .utf8) else { return "[]" }
+        return json.replacingOccurrences(of: "<", with: "\\u003c")
     }
 
     private func epubAppearance() -> (font: String, line: String, margin: Int, background: String, foreground: String, align: String) {
@@ -525,25 +565,104 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
           }
           return -1;
         }
+        window.readerFind = function(query, forward, fresh) {
+          if (!query) return false;
+          const needle = query.toLowerCase();
+          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+          const hits = [];
+          while (walker.nextNode()) {
+            const node = walker.currentNode;
+            const hay = (node.nodeValue || "").toLowerCase();
+            let from = 0;
+            while (from < hay.length) {
+              const at = hay.indexOf(needle, from);
+              if (at < 0) break;
+              hits.push({node: node, at: at, end: at + needle.length});
+              from = at + needle.length;
+            }
+          }
+          if (!hits.length) return false;
+          const selection = window.getSelection();
+          const atStart = window.scrollY <= 8 && (!selection || !selection.rangeCount || selection.isCollapsed);
+          let index = forward ? 0 : hits.length - 1;
+          if (!(fresh && atStart) && selection && selection.rangeCount && selection.focusNode) {
+            const cursorNode = selection.focusNode;
+            const backEdge = Math.min(selection.anchorOffset || 0, selection.focusOffset || 0);
+            const forwardEdge = Math.max(selection.anchorOffset || 0, selection.focusOffset || 0);
+            const cursorOffset = fresh ? backEdge : (forward ? forwardEdge : backEdge);
+            const step = forward ? 1 : -1;
+            let found = -1;
+            for (let i = forward ? 0 : hits.length - 1; i >= 0 && i < hits.length; i += step) {
+              const hit = hits[i];
+              let take = false;
+              if (hit.node === cursorNode) {
+                take = forward ? hit.at >= cursorOffset : hit.end <= cursorOffset;
+              } else if (cursorNode.compareDocumentPosition) {
+                const position = cursorNode.compareDocumentPosition(hit.node);
+                take = forward
+                  ? (position & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+                  : (position & Node.DOCUMENT_POSITION_PRECEDING) !== 0;
+              }
+              if (take) { found = i; break; }
+            }
+            if (found >= 0) index = found;
+          }
+          const hit = hits[index];
+          const range = document.createRange();
+          range.setStart(hit.node, hit.at);
+          range.setEnd(hit.node, Math.min(hit.end, (hit.node.nodeValue || "").length));
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+          const holder = hit.node.parentElement;
+          if (holder && holder.scrollIntoView) holder.scrollIntoView({block: "center"});
+          return true;
+        };
         window.readerPaint = function(marks) {
+          document.querySelectorAll("span[class^='reader-hl-']").forEach(span => {
+            if (!span.parentNode) return;
+            span.parentNode.insertBefore(document.createTextNode(span.textContent || ""), span);
+            span.parentNode.removeChild(span);
+          });
+          if (document.body.normalize) document.body.normalize();
           (marks || []).forEach(mark => {
             if (!mark.quote) return;
             const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
             while (walker.nextNode()) {
               const node = walker.currentNode;
-              if (!node.nodeValue || !node.parentNode) continue;
-              if (node.parentNode.closest && node.parentNode.closest("[class*='reader-hl']")) continue;
-              const at = node.nodeValue.indexOf(mark.quote);
-              if (at < 0) continue;
-              const span = document.createElement("span");
-              span.className = "reader-hl-" + (mark.color || 1);
-              span.textContent = mark.quote;
-              const text = node.nodeValue;
-              node.parentNode.insertBefore(document.createTextNode(text.slice(0, at)), node);
-              node.parentNode.insertBefore(span, node);
-              node.parentNode.insertBefore(document.createTextNode(text.slice(at + mark.quote.length)), node);
-              node.parentNode.removeChild(node);
-              break;
+              const value = node.nodeValue;
+              if (!value || !node.parentNode) continue;
+              const section = node.parentElement && node.parentElement.closest && node.parentElement.closest("section[data-index]");
+              const spine = section && section.dataset.index !== "" ? Number(section.dataset.index) : null;
+              const chapterText = section ? (section.dataset.chapter || "") : "";
+              const chapter = chapterText === "" ? null : Number(chapterText);
+              const hasSpine = Object.prototype.hasOwnProperty.call(mark, "spine");
+              const hasChapter = Object.prototype.hasOwnProperty.call(mark, "chapter");
+              if (hasSpine && spine !== mark.spine) continue;
+              if (!hasSpine && hasChapter && chapter !== mark.chapter) continue;
+              let from = 0;
+              let painted = false;
+              while (from < value.length) {
+                const at = value.indexOf(mark.quote, from);
+                if (at < 0) break;
+                const before = value.slice(0, at);
+                const after = value.slice(at + mark.quote.length);
+                const prefixOK = !mark.prefix || before.endsWith(mark.prefix);
+                const suffixOK = !mark.suffix || after.startsWith(mark.suffix);
+                if (prefixOK && suffixOK) {
+                  const span = document.createElement("span");
+                  span.className = "reader-hl-" + (mark.color || 1);
+                  span.textContent = value.slice(at, at + mark.quote.length);
+                  node.parentNode.insertBefore(document.createTextNode(value.slice(0, at)), node);
+                  node.parentNode.insertBefore(span, node);
+                  node.parentNode.insertBefore(document.createTextNode(after), node);
+                  node.parentNode.removeChild(node);
+                  painted = true;
+                  break;
+                }
+                from = at + mark.quote.length;
+              }
+              if (painted) break;
             }
           });
         };

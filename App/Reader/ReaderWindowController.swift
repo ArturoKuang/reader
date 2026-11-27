@@ -90,6 +90,12 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         applyChrome()
     }
 
+    /// Lands a `reader://` link once the PDF or EPUB view can move.
+    func applyPendingLink() {
+        pdfController?.consumePendingJump()
+        epubController?.consumePendingJump()
+    }
+
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
@@ -330,6 +336,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             item.searchField.target = self
             item.searchField.action = #selector(submitSearch(_:))
             item.searchField.delegate = self
+            (item.searchField.cell as? NSActionCell)?.sendsActionOnEndEditing = false
             searchItem = item
             item.label = "Find"
             return item
@@ -724,8 +731,9 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     @objc func submitSearch(_ sender: Any?) {
         let query = searchItem?.searchField.stringValue ?? ""
         session.findQuery = query
-        pdfController?.search(query)
-        epubController?.search(query)
+        let advance = FindCommit.isExplicitAdvance()
+        pdfController?.search(query, explicitAdvance: advance)
+        epubController?.search(query, explicitAdvance: advance)
     }
 
     func showFindCount(_ index: Int, of total: Int) {
@@ -956,14 +964,26 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         let key = "reader.vaultOffer." + session.bookURL.path
         guard !UserDefaults.standard.bool(forKey: key) else { return }
         UserDefaults.standard.set(true, forKey: key)
+        // Never run a modal event loop from windowDidBecomeKey. That can leave
+        // NSDocument's open activity unfinished; a later ⌘S then waits forever
+        // on the serialization semaphore.
+        DispatchQueue.main.async { [weak self] in
+            self?.presentVaultSaveOffer()
+        }
+    }
+
+    private func presentVaultSaveOffer() {
+        guard session.usesVault, session.vaultLoose, !session.vaultEnabled else { return }
+        guard let window else { return }
         let alert = NSAlert()
         alert.messageText = "This file is in your Obsidian vault"
         alert.informativeText = "Save notes into \(session.bookFolder ?? "the book folder")?"
         alert.addButton(withTitle: "Save to Vault")
         alert.addButton(withTitle: "Not Now")
-        if alert.runModal() == .alertFirstButtonReturn {
-            session.vaultEnabled = true
-            session.onSaveVaultState?()
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.session.vaultEnabled = true
+            self?.session.onSaveVaultState?()
         }
     }
 

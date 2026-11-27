@@ -33,10 +33,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls where url.scheme == "reader" {
-            guard let link = ReaderLink.parse(url.absoluteString) else { continue }
-            let book = URL(fileURLWithPath: link.path)
+            guard let link = Self.readerLink(from: url) else { continue }
+            let book = URL(fileURLWithPath: link.path).standardizedFileURL
+            if let document = Self.openDocument(at: book) {
+                document.showWindows()
+                document.reveal(link)
+                continue
+            }
+            ReaderDocument.queue(link)
             NSDocumentController.shared.openDocument(withContentsOf: book, display: true) { document, _, _ in
                 (document as? ReaderDocument)?.reveal(link)
+            }
+        }
+    }
+
+    private static func readerLink(from url: URL) -> ReaderLink? {
+        if let link = ReaderLink.parse(url.absoluteString) { return link }
+        if let query = url.query, let link = ReaderLink.parse("reader://open?\(query)") { return link }
+        return nil
+    }
+
+    private static func openDocument(at book: URL) -> ReaderDocument? {
+        let path = book.standardizedFileURL.resolvingSymlinksInPath().path
+        return NSDocumentController.shared.documents.compactMap { $0 as? ReaderDocument }.first { document in
+            let candidates = [document.fileURL?.path, document.session?.bookURL.path].compactMap { $0 }
+            return candidates.contains { candidate in
+                URL(fileURLWithPath: candidate).standardizedFileURL.resolvingSymlinksInPath().path == path
             }
         }
     }

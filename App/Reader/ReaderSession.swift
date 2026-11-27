@@ -27,6 +27,8 @@ final class ReaderSession: ObservableObject {
     var tutorAvailable = false
     var claudeSessionID: String?
     var onVaultFlush: (() -> Void)?
+    /// Writes vault notes immediately (⌘S). `onVaultFlush` only schedules a short debounce.
+    var onVaultSave: (() -> Void)?
     /// AppKit/WebKit refresh the current passage, then run the action. PDF is synchronous.
     var onCaptureSelection: ((@escaping () -> Void) -> Void)?
     var onSaveVaultState: (() -> Void)?
