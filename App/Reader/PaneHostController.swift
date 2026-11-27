@@ -114,8 +114,10 @@ final class PaneHostController: NSViewController {
     private func showBorder() {
         let accent = panes.count > 1
         for (index, pane) in panes.enumerated() {
-            pane.view.layer?.borderWidth = accent && index == activeIndex ? 2 : 0
-            pane.view.layer?.borderColor = NSColor.controlAccentColor.cgColor
+            pane.view.layer?.borderWidth = 0
+            let ring = pane.view.subviews.first { $0.identifier == PaneFocusRing.identifier }
+            ring?.layer?.borderWidth = accent && index == activeIndex ? 2 : 0
+            ring?.layer?.borderColor = NSColor.controlAccentColor.cgColor
         }
     }
 }

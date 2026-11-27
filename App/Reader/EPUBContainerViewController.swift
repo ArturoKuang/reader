@@ -20,6 +20,9 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     private var spineLoaded = false
     private var displayedSpineIndex = 0
     private var acceptSpineReports = false
+    private var chapterIndex = 0
+    private var chapterScroll: Double = 0
+    private var pendingChapterScroll: Double?
     private var pendingFlash: String?
 
     init(session: ReaderSession) {
@@ -57,7 +60,17 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             webView.topAnchor.constraint(equalTo: titleStrip.bottomAnchor),
         ])
+        let ring = PaneFocusRing()
+        ring.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(ring)
+        NSLayoutConstraint.activate([
+            ring.topAnchor.constraint(equalTo: titleStrip.topAnchor),
+            ring.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            ring.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            ring.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
         fontScale = session.zoom
+        chapterIndex = max(session.page - 1, 0)
         session.watchAnnotations(self) { [weak self] in
             guard let self else { return }
             self.webView?.evaluateJavaScript("window.readerPaint && window.readerPaint(\(self.highlightScript()))")
@@ -233,11 +246,16 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     }
 
     func reveal(_ position: ReadingPosition) {
-        if let cfi = position.cfi, let parsed = EPUBCFI(value: cfi), let index = parsed.spineIndex {
-            showSpine(index: index)
+        let index: Int
+        if let cfi = position.cfi, let parsed = EPUBCFI(value: cfi), let spine = parsed.spineIndex {
+            index = spine
         } else if let page = position.page {
-            showSpine(index: page - 1)
+            index = page - 1
+        } else {
+            return
         }
+        pendingChapterScroll = position.scrollY
+        showSpine(index: index)
         if let quote = position.quote, !quote.isEmpty { flash(quote) }
     }
 
@@ -265,10 +283,21 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         spineLoaded = true
-        if session.pendingReaderLink != nil {
+        if let pending = session.pendingMarkReveal {
+            session.pendingMarkReveal = nil
+            pendingChapterScroll = pending.scrollY
+            if let cfi = pending.cfi, let parsed = EPUBCFI(value: cfi), let spine = parsed.spineIndex {
+                chapterIndex = spine
+            } else if let page = pending.page {
+                chapterIndex = max(page - 1, 0)
+            }
+        } else if session.pendingReaderLink != nil {
             consumePendingJump()
-        } else {
+        } else if pendingChapterScroll == nil {
             scrollToCurrentSpine()
+        }
+        if pendingChapterScroll != nil, let epub = session.epub, epub.spine.indices.contains(chapterIndex) {
+            scrollToSpine(epub.spine[chapterIndex].id)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
             self?.acceptSpineReports = true
@@ -277,8 +306,10 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     }
 
     func currentPosition() -> ReadingPosition {
-        let index = min(max(session.page - 1, 0), max((session.epub?.spine.count ?? 1) - 1, 0))
+        let index = chapterIndex
         return ReadingPosition(
+            page: index + 1,
+            scrollY: chapterScroll,
             zoom: fontScale,
             cfi: EPUBCFI.make(spineIndex: index, start: 0, end: 0).value,
             section: session.sectionTitle,
@@ -299,6 +330,11 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             }
             session.lastAnnotationHit = id
             session.openAnnotation(id)
+            return
+        }
+        if body["kind"] as? String == "scroll" {
+            if let fraction = body["scrollY"] as? Double { chapterScroll = fraction }
+            if let index = integer(body["index"]) { chapterIndex = index }
             return
         }
         if body["kind"] as? String == "spine" {
@@ -358,7 +394,19 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     private func scrollToSpine(_ id: String) {
         acceptSpineReports = false
         let escaped = id.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
-        webView?.evaluateJavaScript("document.getElementById('spine-\(escaped)')?.scrollIntoView({block:'start'})")
+        if let fraction = pendingChapterScroll {
+            pendingChapterScroll = nil
+            let script = """
+            (function() {
+              const el = document.getElementById('spine-\(escaped)');
+              const y = el ? el.offsetTop + el.offsetHeight * \(fraction) : document.body.scrollHeight * \(fraction);
+              window.scrollTo(0, y);
+            })();
+            """
+            webView?.evaluateJavaScript(script)
+        } else {
+            webView?.evaluateJavaScript("document.getElementById('spine-\(escaped)')?.scrollIntoView({block:'start'})")
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
             self?.acceptSpineReports = true
         }
@@ -370,6 +418,7 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         let placement = placements[index]
         let title = placement.title.isEmpty ? epub.spine[index].title : placement.title
         displayedSpineIndex = index
+        chapterIndex = index
         refreshPaneTitle()
         guard publishesPosition else { return }
         session.updatePage(index + 1, count: count, section: title)
@@ -540,8 +589,27 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
           }, { root: null, threshold: [0.2, 0.5] });
           sections.forEach(section => observer.observe(section));
         }
+        let reportScroll = () => {
+          const sections = [...document.querySelectorAll("section[id^='spine-']")];
+          const y = window.scrollY || 0;
+          let index = 0;
+          let scrollY = 0;
+          for (const section of sections) {
+            const top = section.offsetTop;
+            const height = section.offsetHeight || 1;
+            if (y + 8 >= top && y < top + height) {
+              index = Number(section.dataset.index || 0);
+              scrollY = Math.min(1, Math.max(0, (y - top) / height));
+              break;
+            }
+          }
+          if (window.webkit && window.webkit.messageHandlers.reader) {
+            window.webkit.messageHandlers.reader.postMessage({kind: "scroll", index, scrollY});
+          }
+        };
         document.addEventListener("scroll", () => {
           if (window.webkit && window.webkit.messageHandlers.reader) window.webkit.messageHandlers.reader.postMessage({kind: "dismiss-bar"});
+          reportScroll();
         }, true);
         document.addEventListener("mouseup", () => {
           const value = window.readerSelection();

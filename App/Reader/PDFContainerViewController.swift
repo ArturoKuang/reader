@@ -73,6 +73,15 @@ final class PDFContainerViewController: NSViewController {
             overlay.topAnchor.constraint(equalTo: pdfView.topAnchor),
             overlay.bottomAnchor.constraint(equalTo: pdfView.bottomAnchor),
         ])
+        let ring = PaneFocusRing()
+        ring.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(ring)
+        NSLayoutConstraint.activate([
+            ring.topAnchor.constraint(equalTo: titleStrip.topAnchor),
+            ring.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            ring.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            ring.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
         applyDisplayMode()
         // Do not scale here. bounds are still zero, and PDFView would stick at minScaleFactor (10%).
         NotificationCenter.default.addObserver(self, selector: #selector(pageChanged), name: .PDFViewPageChanged, object: pdfView)
@@ -200,6 +209,14 @@ final class PDFContainerViewController: NSViewController {
     }
 
     private func restorePositionOnce() {
+        if let pending = session.pendingMarkReveal {
+            guard pdfView.bounds.width > 160 else { return }
+            session.pendingMarkReveal = nil
+            didRestorePosition = true
+            reveal(pending)
+            session.finishViewRestore()
+            return
+        }
         guard publishesPosition else {
             didRestorePosition = true
             return
@@ -596,8 +613,10 @@ final class PDFContainerViewController: NSViewController {
         }
         let bounds = page.bounds(for: pdfView.displayBox)
         let y = position.pdfY ?? (bounds.maxY - (position.scrollY ?? 0) * bounds.height)
-        let rect = NSRect(x: position.pdfX ?? bounds.minX, y: y - 12, width: 12, height: 12)
-        pdfView.go(to: rect, on: page)
+        // A destination puts this point at the top of the view. go(to:rect:) leaves
+        // the page where it is when that corner is already barely on screen.
+        let destination = PDFDestination(page: page, at: NSPoint(x: position.pdfX ?? bounds.minX, y: y))
+        pdfView.go(to: destination)
     }
 
     /// Scrolls this pane only and flashes the quote for about a second.

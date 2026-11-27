@@ -174,6 +174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Table of Contents", #selector(ReaderWindowController.showContents(_:)), "3", [.command, .option]),
             item("Highlights and Notes", #selector(ReaderWindowController.showHighlightsAndNotes(_:)), "4", [.command, .option]),
             item("Bookmarks", #selector(ReaderWindowController.showBookmarks(_:)), "5", [.command, .option]),
+            item("Marks", #selector(ReaderWindowController.showMarks(_:)), "7", [.command, .option]),
             item("Contact Sheet", #selector(ReaderWindowController.showContactSheet(_:)), "6", [.command, .option]),
             separator(),
             item("Continuous Scroll", #selector(ReaderWindowController.toggleContinuous(_:)), "1", .command),
