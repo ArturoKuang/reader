@@ -444,6 +444,8 @@ final class PDFContainerViewController: NSViewController {
     private func runFind(forward: Bool) {
         let query = findBar.stringValue.isEmpty ? session.findQuery : findBar.stringValue
         session.findQuery = query
+        ownsFindSession = true
+        (view.window?.windowController as? ReaderWindowController)?.claimFindSession(from: self)
         guard !query.isEmpty, let document = pdfView.document else { return }
         if matches.isEmpty || matches.first?.string?.localizedCaseInsensitiveContains(query) != true {
             matches = []

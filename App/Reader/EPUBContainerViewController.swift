@@ -210,6 +210,8 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
     func find(forward: Bool) {
         let query = findBar.stringValue.isEmpty ? session.findQuery : findBar.stringValue
         session.findQuery = query
+        ownsFindSession = true
+        (view.window?.windowController as? ReaderWindowController)?.claimFindSession(from: self)
         let escaped = query.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
         webView?.evaluateJavaScript("window.find('\(escaped)', false, \(!forward), true)")
     }
