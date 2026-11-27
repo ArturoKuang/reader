@@ -1,5 +1,27 @@
 import AppKit
 
+/// Draws the active-pane outline starting at the title strip, so it does not climb into the toolbar.
+final class PaneFocusRing: NSView {
+    static let identifier = NSUserInterfaceItemIdentifier("pane-focus-ring")
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.borderColor = NSColor.controlAccentColor.cgColor
+        identifier = Self.identifier
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        layer?.borderColor = NSColor.controlAccentColor.cgColor
+    }
+}
+
 /// A 24-point strip at the top of a pane: book title, page, and, on the active pane, Find.
 final class PaneTitleStrip: NSView {
     let titleLabel = NSTextField(labelWithString: "")

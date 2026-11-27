@@ -60,6 +60,15 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             webView.topAnchor.constraint(equalTo: titleStrip.bottomAnchor),
         ])
+        let ring = PaneFocusRing()
+        ring.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(ring)
+        NSLayoutConstraint.activate([
+            ring.topAnchor.constraint(equalTo: titleStrip.topAnchor),
+            ring.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            ring.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            ring.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
         fontScale = session.zoom
         chapterIndex = max(session.page - 1, 0)
         session.watchAnnotations(self) { [weak self] in
