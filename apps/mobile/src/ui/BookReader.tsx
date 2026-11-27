@@ -22,7 +22,18 @@ import { epubBook, epubModule, pdfBook, pdfModule, sampleTitles } from "../reade
 import { emptyShelf, parseShelf, serializeShelf, shelfKey } from "../reader/shelf";
 import type { BookShelf } from "../reader/shelf";
 import { makeId } from "../reader/ids";
+import { SyncChrome } from "../sync/SyncStatusChip";
+import type { SyncStatus } from "../sync/status";
+import type { OpenConflict } from "../sync/wire";
 import { tokens } from "./tokens";
+
+const idleSync: SyncStatus = {
+  state: "synced",
+  pendingCount: 0,
+  conflictCount: 0,
+  pausedBookIds: [],
+  lastSyncedAt: null,
+};
 
 type Format = "pdf" | "epub";
 
@@ -46,7 +57,17 @@ function toViewer(highlight: HighlightRecord): ViewerHighlight {
   };
 }
 
-export function ReaderHome() {
+export function ReaderHome({
+  sync = idleSync,
+  conflicts = [],
+  onCheckAgain,
+  onRetry,
+}: {
+  sync?: SyncStatus;
+  conflicts?: readonly OpenConflict[];
+  onCheckAgain?: () => void;
+  onRetry?: () => void;
+} = {}) {
   const [format, setFormat] = useState<Format | null>(null);
   useEffect(() => {
     if (!format) return;
@@ -61,10 +82,7 @@ export function ReaderHome() {
       <View style={styles.home}>
         <View style={styles.header}>
           <Text style={styles.title}>Reader</Text>
-          <View style={styles.chip}>
-            <View style={styles.dot} />
-            <Text style={styles.chipLabel}>{tokens.syncStatus.offline.label}</Text>
-          </View>
+          <SyncChrome status={sync} conflicts={conflicts} onCheckAgain={onCheckAgain} onRetry={onRetry} />
         </View>
         <Text style={styles.heading}>Highlight</Text>
         <Text style={styles.caption}>
@@ -73,10 +91,16 @@ export function ReaderHome() {
         <Pressable onPress={() => setFormat("pdf")} style={styles.card}>
           <Text style={styles.cardHeading}>{sampleTitles.pdf}</Text>
           <Text style={styles.caption}>PDF · text layer · {pdfBook.fingerprint}</Text>
+          {sync.pausedBookIds.includes(pdfBook.fingerprint) ? (
+            <Text>{tokens.syncStatus.storageFull.badge}</Text>
+          ) : null}
         </Pressable>
         <Pressable onPress={() => setFormat("epub")} style={styles.card}>
           <Text style={styles.cardHeading}>{sampleTitles.epub}</Text>
           <Text style={styles.caption}>EPUB · foliate-js · {epubBook.epubId}</Text>
+          {sync.pausedBookIds.includes(epubBook.fingerprint) ? (
+            <Text>{tokens.syncStatus.storageFull.badge}</Text>
+          ) : null}
         </Pressable>
       </View>
     );

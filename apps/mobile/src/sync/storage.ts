@@ -59,7 +59,10 @@ export interface StoredPosition {
 export interface PersistedSync {
   serverId: string | null;
   cursor: number;
-  endpoint: { host: string; port: number } | null;
+  /** QR `url`, trailing slash already removed. */
+  baseUrl: string | null;
+  storageFull: boolean;
+  pausedBookIds: string[];
   books: LocalBook[];
   records: LocalRecord[];
   positions: StoredPosition[];
@@ -76,7 +79,9 @@ export function emptyPersisted(): PersistedSync {
   return {
     serverId: null,
     cursor: 0,
-    endpoint: null,
+    baseUrl: null,
+    storageFull: false,
+    pausedBookIds: [],
     books: [],
     records: [],
     positions: [],

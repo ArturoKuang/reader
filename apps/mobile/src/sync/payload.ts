@@ -47,7 +47,6 @@ export function noteToPayload(note: NoteRecord): JsonObject {
     created: note.created,
     updated: note.updated,
     provider: note.provider,
-    highlightId: note.highlightId,
   });
   return asJsonObject(payload);
 }

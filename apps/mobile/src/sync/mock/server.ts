@@ -82,6 +82,13 @@ interface StoredBatch {
   response: PushResponse;
 }
 
+function stripReaderPrefix(pathname: string): string {
+  const prefix = "/v1/reader";
+  if (pathname === prefix) return "/";
+  if (pathname.startsWith(`${prefix}/`)) return pathname.slice(prefix.length);
+  return pathname;
+}
+
 /** Kind is part of the key, so a note and its highlight may share an id. */
 function recordKey(bookId: string, kind: string, id: string): string {
   return `${bookId}\u0000${kind}\u0000${id}`;
@@ -103,6 +110,9 @@ export class MockSyncServer {
   seq = 0;
   /** When true, fetch fails before the handler runs. */
   offline = false;
+  /** PUT /v1/blobs returns HTTP 507. Record routes keep working. */
+  diskFull = false;
+  fullCode: "disk_full" | "quota_exceeded" = "disk_full";
   /** Completed requests whose Response is dropped. State changes stick. */
   loseResponses = 0;
   readonly seenRequests: { method: string; path: string; host: string }[] = [];
@@ -168,7 +178,7 @@ export class MockSyncServer {
   }
 
   private async route(request: Request, url: URL): Promise<Response> {
-    const path = url.pathname;
+    const path = stripReaderPrefix(url.pathname);
     if (request.method === "GET" && path === "/v1/health") return this.json(this.health());
     if (request.method === "POST" && path === "/v1/pairing/redeem") {
       return this.redeem(await this.readJson(request));
@@ -188,7 +198,7 @@ export class MockSyncServer {
       });
     }
     if (request.method === "GET" && path === "/v1/books") return this.json({ books: this.bookList() });
-    if (request.method === "POST" && path === "/v1/books") {
+    if (request.method === "POST" && (path === "/v1/books/register" || path === "/v1/books")) {
       return this.registerBook(device, await this.readJson(request));
     }
     if (request.method === "POST" && path === "/v1/changes") {
@@ -209,8 +219,16 @@ export class MockSyncServer {
       return this.resolveConflict(device, decodeURIComponent(resolve[1]));
     }
     const blob = path.match(/^\/v1\/blobs\/([0-9a-f]{64})$/);
+    if (request.method === "PUT" && blob) return this.writeBlob(blob[1], request);
     if (request.method === "GET" && blob) return this.readBlob(blob[1], request);
     return this.fail(404, "not_found", `no route ${request.method} ${path}`);
+  }
+
+  private async writeBlob(sha256: string, request: Request): Promise<Response> {
+    if (this.diskFull) return this.fail(507, this.fullCode, "the Mac mini has no room for this book");
+    const bytes = new Uint8Array(await request.arrayBuffer());
+    this.blobs.set(sha256, bytes);
+    return this.json({ ok: true, sha256 });
   }
 
   private health(): HealthResponse {
@@ -401,6 +419,9 @@ export class MockSyncServer {
       if (seenKeys.has(key)) return this.fail(400, "bad_request", "a batch may change each record once");
       seenKeys.add(key);
       parsed.push(change);
+    }
+    if (parsed.some((change) => change.kind === "book")) {
+      return this.fail(400, "use_register", "register books with POST /v1/books/register");
     }
     const request: PushRequest = { batchId: body.batchId, changes: parsed as ChangeInput[] };
     const canonical = canonicalJson(request);

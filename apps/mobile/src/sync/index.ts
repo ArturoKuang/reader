@@ -6,7 +6,7 @@ export { CREDENTIAL_KEY, MemoryCredentialStore, createSecureCredentialStore } fr
 export type { CredentialStore } from "./credentials";
 export { SyncEngine, epubChapterKey } from "./engine";
 export type { EngineDeps, ReadingPlace, ResumeOffer, SyncDevice } from "./engine";
-export { SYNC_PORT, endpointUrl, parsePairingUrl } from "./pairing";
+export { EMULATOR_BASE_URL, PRODUCTION_BASE_URL, joinBase, parsePairingUrl } from "./pairing";
 export { createAsyncSyncStorage } from "./asyncStorage";
 export type { KeyValueStore } from "./asyncStorage";
 export { MemorySyncStorage, emptyPersisted } from "./storage";

@@ -7,7 +7,7 @@
  * (and a read-only card). They become the chip state when the phone is
  * otherwise caught up.
  */
-export const SYNC_STATES = ["synced", "syncing", "offline", "conflict", "error"] as const;
+export const SYNC_STATES = ["synced", "syncing", "offline", "conflict", "error", "storageFull"] as const;
 
 export type SyncChipState = (typeof SYNC_STATES)[number];
 
@@ -15,6 +15,8 @@ export interface SyncStatus {
   state: SyncChipState;
   pendingCount: number;
   conflictCount: number;
+  /** Book ids whose blob upload is paused because the Mac mini is full. */
+  pausedBookIds: string[];
   /** ISO-8601 of the last successful push or pull. Null before the first. */
   lastSyncedAt: string | null;
 }
@@ -34,6 +36,9 @@ export interface StatusInput {
   inFlight: boolean;
   /** `clock.now()` when the current failure streak began, or null. */
   failureStartedAt: number | null;
+  /** HTTP 507 disk_full or quota_exceeded. Not a network failure. */
+  storageFull: boolean;
+  pausedBookIds: string[];
   now: number;
 }
 
@@ -43,12 +48,14 @@ export function deriveSyncStatus(input: StatusInput): SyncStatus {
   let state: SyncChipState;
   if (failingFor !== null && failingFor >= ERROR_AFTER_MS) {
     state = "error";
+  } else if (input.storageFull) {
+    state = "storageFull";
+  } else if (input.conflictCount > 0) {
+    state = "conflict";
   } else if (failingFor !== null) {
     state = "offline";
   } else if (input.inFlight || input.pendingCount > 0) {
     state = "syncing";
-  } else if (input.conflictCount > 0) {
-    state = "conflict";
   } else {
     state = "synced";
   }
@@ -56,6 +63,7 @@ export function deriveSyncStatus(input: StatusInput): SyncStatus {
     state,
     pendingCount: input.pendingCount,
     conflictCount: input.conflictCount,
+    pausedBookIds: input.pausedBookIds,
     lastSyncedAt: input.lastSyncedAt,
   };
 }

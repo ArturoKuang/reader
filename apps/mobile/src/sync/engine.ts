@@ -3,7 +3,7 @@ import { clone } from "./canonical";
 import type { Clock, TimerHandle } from "./clock";
 import { CREDENTIAL_KEY, type CredentialStore } from "./credentials";
 import { bookIdForSha, positionId } from "./ids";
-import { endpointUrl, parsePairingUrl } from "./pairing";
+import { parsePairingUrl } from "./pairing";
 import { highlightToPayload, lookupToPayload, noteToPayload, positionToPayload, wordToPayload } from "./payload";
 import {
   emptyPersisted,
@@ -138,6 +138,7 @@ export class SyncEngine {
   private errorTimer: TimerHandle | null = null;
   private flushTimer: TimerHandle | null = null;
   private positionTimer: TimerHandle | null = null;
+  private readonly pausedBytes = new Map<string, Uint8Array>();
 
   constructor(private readonly deps: EngineDeps) {}
 
@@ -157,6 +158,8 @@ export class SyncEngine {
       lastSyncedAt: this.state.lastSyncedAt,
       inFlight: this.flight > 0,
       failureStartedAt: this.state.failureStartedAt,
+      storageFull: this.state.storageFull,
+      pausedBookIds: this.state.pausedBookIds,
       now: this.deps.clock.now(),
     });
   }
@@ -187,7 +190,7 @@ export class SyncEngine {
 
   async pair(qr: string) {
     const parts = parsePairingUrl(qr);
-    this.deps.session.baseUrl = endpointUrl(parts.host, parts.port);
+    this.deps.session.baseUrl = parts.url;
     const redeemed = await this.deps.transport.redeem({
       token: parts.token,
       deviceId: this.deps.device.deviceId,
@@ -197,7 +200,7 @@ export class SyncEngine {
     });
     this.deps.session.credential = redeemed.credential;
     await this.deps.credentials.set(CREDENTIAL_KEY, redeemed.credential);
-    this.state.endpoint = { host: parts.host, port: parts.port };
+    this.state.baseUrl = parts.url;
     if (this.state.serverId && this.state.serverId !== redeemed.serverId) {
       this.resetForNewServer(redeemed.serverId);
     } else {
@@ -218,14 +221,13 @@ export class SyncEngine {
     const loaded = await this.deps.storage.load();
     if (loaded) this.state = loaded;
     this.deps.session.credential = await this.deps.credentials.get(CREDENTIAL_KEY);
-    if (this.state.endpoint) {
-      this.deps.session.baseUrl = endpointUrl(this.state.endpoint.host, this.state.endpoint.port);
-    }
+    if (this.state.baseUrl) this.deps.session.baseUrl = this.state.baseUrl;
     this.active = true;
     if (!this.deps.session.credential || !this.deps.session.baseUrl) {
       this.emit();
       return;
     }
+    await this.recheckStorage();
     await this.flush();
     await this.pull();
     this.armPull();
@@ -242,6 +244,7 @@ export class SyncEngine {
 
   async onForeground(): Promise<void> {
     this.active = true;
+    await this.recheckStorage();
     await this.flush();
     await this.pull();
     this.armPull();
@@ -251,6 +254,54 @@ export class SyncEngine {
     this.active = false;
     this.pullTimer?.cancel();
     await this.flushPositionNow();
+  }
+
+  /**
+   * Upload a book file. HTTP 507 disk_full or quota_exceeded pauses that book
+   * and does not retry. Record push, pull, and register keep running.
+   */
+  async uploadBook(bookId: string, bytes: Uint8Array): Promise<"uploaded" | "paused"> {
+    const book = this.state.books.find((item) => item.bookId === bookId);
+    if (!book) throw new SyncApiError(400, "unknown_book", `missing local book ${bookId}`);
+    this.pausedBytes.set(bookId, bytes);
+    try {
+      await this.deps.transport.uploadBlob(book.sha256, bytes);
+    } catch (error) {
+      if (!isStorageFull(error)) throw error;
+      this.state.storageFull = true;
+      if (!this.state.pausedBookIds.includes(bookId)) this.state.pausedBookIds.push(bookId);
+      await this.persist();
+      this.emit();
+      return "paused";
+    }
+    this.clearPaused(bookId);
+    await this.persist();
+    this.emit();
+    return "uploaded";
+  }
+
+  /** Try paused uploads again. A successful upload clears storageFull. */
+  async recheckStorage(): Promise<void> {
+    if (!this.state.storageFull && this.state.pausedBookIds.length === 0) return;
+    for (const bookId of [...this.state.pausedBookIds]) {
+      const bytes = this.pausedBytes.get(bookId);
+      const book = this.state.books.find((item) => item.bookId === bookId);
+      if (!bytes || !book) continue;
+      try {
+        await this.deps.transport.uploadBlob(book.sha256, bytes);
+        this.clearPaused(bookId);
+      } catch (error) {
+        if (isStorageFull(error)) {
+          this.state.storageFull = true;
+          continue;
+        }
+        if (isRetryable(error)) continue;
+        throw error;
+      }
+    }
+    if (this.state.pausedBookIds.length === 0) this.state.storageFull = false;
+    await this.persist();
+    this.emit();
   }
 
   /** Error-chip action. Sends the same outbox ids immediately. */
@@ -436,6 +487,24 @@ export class SyncEngine {
       if (depth < 4 && (this.state.pending?.changes.length ?? 0) > 0) await this.flushOnce(depth + 1);
     } catch (error) {
       if (this.flight > 0) this.flight -= 1;
+      if (error instanceof SyncApiError && error.code === "use_register" && error.status === 400) {
+        if (this.state.inflight) {
+          this.state.pending = this.state.inflight;
+          this.state.inflight = null;
+        }
+        await this.persist();
+        this.emit();
+        return;
+      }
+      if (error instanceof SyncApiError && error.code === "change_id_reused" && error.status === 422 && this.state.inflight) {
+        this.state.inflight = {
+          batchId: newId(),
+          changes: this.state.inflight.changes.map((change) => ({ ...change, changeId: newId() })),
+        };
+        await this.persist();
+        this.emit();
+        return;
+      }
       this.noteFailure(error);
       if (isRetryable(error)) this.scheduleBackoff();
       await this.persist();
@@ -472,6 +541,13 @@ export class SyncEngine {
         const book = this.state.books.find((item) => item.bookId === change.bookId);
         if (book) book.registeredForServerId = null;
         retry.push({ ...change, changeId: newId() });
+      } else if (result.status === "rejected" && result.error?.code === "change_id_reused") {
+        retry.push({ ...change, changeId: newId() });
+      } else if (
+        record &&
+        (result.error?.code === "bad_base" || result.error?.code === "not_owner" || result.error?.code === "bad_request")
+      ) {
+        record.heldGeneration = record.generation;
       } else if (record) {
         record.heldGeneration = record.generation;
       }
@@ -758,6 +834,12 @@ export class SyncEngine {
     this.state.devices.push(device);
   }
 
+  private clearPaused(bookId: string): void {
+    this.pausedBytes.delete(bookId);
+    this.state.pausedBookIds = this.state.pausedBookIds.filter((id) => id !== bookId);
+    if (this.state.pausedBookIds.length === 0) this.state.storageFull = false;
+  }
+
   private findRecord(bookId: string, kind: ClientKind, id: string): LocalRecord | undefined {
     return this.state.records.find((record) => record.bookId === bookId && record.kind === kind && record.id === id);
   }
@@ -817,6 +899,14 @@ export class SyncEngine {
     const status = this.status();
     for (const listener of this.listeners) listener(status);
   }
+}
+
+function isStorageFull(error: unknown): boolean {
+  return (
+    error instanceof SyncApiError &&
+    error.status === 507 &&
+    (error.code === "disk_full" || error.code === "quota_exceeded")
+  );
 }
 
 function toChangeInput(change: OutboxChange): ChangeInput {

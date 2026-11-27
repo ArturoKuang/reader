@@ -1,3 +1,4 @@
+import { joinBase } from "./pairing";
 import type {
   BooksResponse,
   ConflictsResponse,
@@ -48,10 +49,11 @@ export interface SyncTransport {
   books(): Promise<BooksResponse>;
   conflicts(bookId?: string): Promise<ConflictsResponse>;
   blob(sha256: string, range?: { start: number; end: number }, ifRange?: string): Promise<BlobPart>;
+  uploadBlob(sha256: string, bytes: Uint8Array): Promise<void>;
 }
 
 export interface HttpTransportOptions {
-  /** Pairing QR origin, for example `http://100.97.87.111:8788`. Null until paired. */
+  /** QR base URL, for example `https://arturos-mac-mini.tail8dc761.ts.net/v1/reader`. */
   baseUrl: () => string | null;
   credential: () => string | null;
   fetchImpl?: typeof fetch;
@@ -84,7 +86,7 @@ export class HttpTransport implements SyncTransport {
   }
 
   registerBook(body: RegisterBookRequest): Promise<RegisterBookResponse> {
-    return this.json("POST", "/v1/books", body);
+    return this.json("POST", "/v1/books/register", body);
   }
 
   books(): Promise<BooksResponse> {
@@ -94,6 +96,13 @@ export class HttpTransport implements SyncTransport {
   conflicts(bookId?: string): Promise<ConflictsResponse> {
     const query = bookId ? `?bookId=${encodeURIComponent(bookId)}` : "";
     return this.json("GET", `/v1/conflicts${query}`);
+  }
+
+  async uploadBlob(sha256: string, bytes: Uint8Array): Promise<void> {
+    const headers = new Headers();
+    headers.set("content-type", "application/octet-stream");
+    const response = await this.send("PUT", `/v1/blobs/${sha256}`, undefined, headers, true, bytes);
+    if (!response.ok) await this.raise(response);
   }
 
   async blob(sha256: string, range?: { start: number; end: number }, ifRange?: string): Promise<BlobPart> {
@@ -117,20 +126,35 @@ export class HttpTransport implements SyncTransport {
     return (await response.json()) as T;
   }
 
-  private async send(method: string, path: string, body: unknown, headers: Headers, authorize = true): Promise<Response> {
+  private async send(
+    method: string,
+    path: string,
+    body: unknown,
+    headers: Headers,
+    authorize = true,
+    raw?: Uint8Array,
+  ): Promise<Response> {
     const baseUrl = this.options.baseUrl();
     if (!baseUrl) throw new SyncNetworkError("not paired");
     if (authorize) {
       const credential = this.options.credential();
       if (credential) headers.set("authorization", `Bearer ${credential}`);
     }
-    if (body !== undefined) headers.set("content-type", "application/json");
+    let payload: BodyInit | undefined;
+    if (raw) {
+      const copy = new Uint8Array(raw.byteLength);
+      copy.set(raw);
+      payload = copy.buffer;
+    } else if (body !== undefined) {
+      headers.set("content-type", "application/json");
+      payload = JSON.stringify(body);
+    }
     try {
       const fetchImpl = this.options.fetchImpl ?? fetch;
-      return await fetchImpl(`${baseUrl}${path}`, {
+      return await fetchImpl(joinBase(baseUrl, path), {
         method,
         headers,
-        body: body === undefined ? undefined : JSON.stringify(body),
+        body: payload,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "network unavailable";

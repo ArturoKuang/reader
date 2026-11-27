@@ -6,7 +6,7 @@ import { FakeClock } from "./clock";
 import { MemoryCredentialStore } from "./credentials";
 import { SyncEngine, epubChapterKey } from "./engine";
 import { MockSyncServer } from "./mock/server";
-import { SYNC_PORT, parsePairingUrl } from "./pairing";
+import { EMULATOR_BASE_URL, parsePairingUrl } from "./pairing";
 import { MemorySyncStorage } from "./storage";
 import { deriveSyncStatus, ERROR_AFTER_MS, POSITION_TOAST_MS, SYNC_STATES } from "./status";
 import { HttpTransport } from "./transport";
@@ -15,8 +15,10 @@ import type { ChangeInput } from "./wire";
 const SHA = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 const BOOK = `sha256:${SHA}`;
 
-function qr(host: string, port: number, token: string, serverId: string): string {
-  return `readersync://pair?v=1&host=${host}&port=${port}&token=${token}&server=${serverId}`;
+const BASE = "http://sync.test/v1/reader";
+
+function qr(base: string, token: string, serverId: string): string {
+  return `readersync://pair?v=2&url=${encodeURIComponent(base)}&token=${encodeURIComponent(token)}&server=${encodeURIComponent(serverId)}`;
 }
 
 function highlight(id: string, quote: string): HighlightRecord {
@@ -54,9 +56,9 @@ function harness(pullLimit = 1000) {
   return { server, transport, storage, credentials, clock, engine, session };
 }
 
-async function pair(env: ReturnType<typeof harness>, port = SYNC_PORT): Promise<void> {
+async function pair(env: ReturnType<typeof harness>, base = BASE): Promise<void> {
   env.server.issueToken("tok");
-  await env.engine.pair(qr("100.97.87.111", port, "tok", env.server.serverId));
+  await env.engine.pair(qr(base, "tok", env.server.serverId));
 }
 
 async function track(env: ReturnType<typeof harness>): Promise<void> {
@@ -95,13 +97,15 @@ describe("sync engine", () => {
   });
 
   it("uses the documented port only as an example and dials the QR host and port", async () => {
-    expect(SYNC_PORT).toBe(8788);
-    expect(env.engine.origin()).toBe("http://100.97.87.111:8788");
+    expect(env.engine.origin()).toBe(BASE);
+    expect(env.server.seenRequests.some((request) => request.path.startsWith("/v1/reader/v1/"))).toBe(true);
     const other = harness();
-    await pair(other, 8791);
-    expect(other.engine.origin()).toBe("http://100.97.87.111:8791");
-    expect(other.server.seenRequests[0]?.host).toBe("100.97.87.111:8791");
-    expect(() => parsePairingUrl("readersync://pair?v=1&host=10.0.0.1&token=t&server=s")).toThrow();
+    await pair(other, EMULATOR_BASE_URL);
+    expect(other.engine.origin()).toBe(EMULATOR_BASE_URL);
+    expect(other.server.seenRequests[0]?.host).toBe("10.0.2.2:8789");
+    expect(() => parsePairingUrl("readersync://pair?v=1&host=10.0.0.1&port=8788&token=t&server=s")).toThrow(
+      /v=1/,
+    );
   });
 
   it("creates, fast-forwards, and noops", async () => {
@@ -256,7 +260,7 @@ describe("sync engine", () => {
     await env.engine.putHighlight(BOOK, highlight(next, "second"));
     await env.engine.flush();
     expect(env.server.record(BOOK, "highlight", next)?.payload.quote).toBe("second");
-    expect(env.server.seenRequests.filter((request) => request.path === "/v1/books").length).toBeGreaterThan(1);
+    expect(env.server.seenRequests.filter((request) => request.path.includes("/v1/books/register")).length).toBeGreaterThan(1);
   });
 
   it("pages until hasMore is false", async () => {
@@ -267,7 +271,7 @@ describe("sync engine", () => {
       await paged.engine.putHighlight(BOOK, highlight(`h_${index.toString(16).padStart(32, "0")}`, `q${index}`));
     }
     await paged.engine.flush();
-    const pulls = paged.server.seenRequests.filter((request) => request.path.startsWith("/v1/changes?"));
+    const pulls = paged.server.seenRequests.filter((request) => request.path.includes("/v1/changes?"));
     expect(pulls.length).toBeGreaterThan(1);
     expect(pulls.some((request) => request.path.includes("limit=2"))).toBe(true);
     const highlights = paged.engine.exportState().records.filter((record) => record.kind === "highlight");
@@ -381,7 +385,7 @@ describe("sync engine", () => {
     expect(opened?.toastDurationMs).toBe(POSITION_TOAST_MS);
     expect((await env.engine.openBook(BOOK, { page: 40 }))?.toast).toBeNull();
     expect((await env.engine.openBook(BOOK, { page: 41 }))?.toast).toBeNull();
-    expect(env.server.seenRequests.some((request) => request.path === "/v1/devices")).toBe(true);
+    expect(env.server.seenRequests.some((request) => request.path.includes("/v1/devices"))).toBe(true);
 
     const later = await pushRaw(env.server, mac, {
       changeId: crypto.randomUUID(),
@@ -449,10 +453,10 @@ describe("sync engine", () => {
   });
 
   it("pulls on foreground and again after 30s", async () => {
-    const before = env.server.seenRequests.filter((request) => request.path.startsWith("/v1/changes?")).length;
+    const before = env.server.seenRequests.filter((request) => request.path.includes("/v1/changes?")).length;
     await env.engine.onForeground();
     await env.clock.advance(30_000);
-    const pulls = env.server.seenRequests.filter((request) => request.path.startsWith("/v1/changes?")).length;
+    const pulls = env.server.seenRequests.filter((request) => request.path.includes("/v1/changes?")).length;
     expect(pulls - before).toBeGreaterThanOrEqual(2);
   });
 
@@ -514,8 +518,17 @@ describe("sync engine", () => {
 
 describe("status model", () => {
   it("is a derived value with five chip states", () => {
-    expect(SYNC_STATES).toEqual(["synced", "syncing", "offline", "conflict", "error"]);
-    const base = { pendingCount: 0, conflictCount: 0, lastSyncedAt: null, inFlight: false, failureStartedAt: null, now: 0 };
+    expect(SYNC_STATES).toEqual(["synced", "syncing", "offline", "conflict", "error", "storageFull"]);
+    const base = {
+      pendingCount: 0,
+      conflictCount: 0,
+      lastSyncedAt: null,
+      inFlight: false,
+      failureStartedAt: null,
+      storageFull: false,
+      pausedBookIds: [] as string[],
+      now: 0,
+    };
     expect(deriveSyncStatus(base).state).toBe("synced");
     expect(deriveSyncStatus({ ...base, inFlight: true }).state).toBe("syncing");
     expect(deriveSyncStatus({ ...base, pendingCount: 2 }).state).toBe("syncing");
@@ -523,8 +536,13 @@ describe("status model", () => {
       state: "conflict",
       pendingCount: 0,
       conflictCount: 1,
+      pausedBookIds: [],
       lastSyncedAt: "2026-01-01T00:00:00.000Z",
     });
+    expect(deriveSyncStatus({ ...base, storageFull: true, conflictCount: 2, pendingCount: 4 }).state).toBe("storageFull");
+    expect(
+      deriveSyncStatus({ ...base, storageFull: true, failureStartedAt: 0, now: ERROR_AFTER_MS }).state,
+    ).toBe("error");
     expect(deriveSyncStatus({ ...base, failureStartedAt: 0, now: ERROR_AFTER_MS - 1 }).state).toBe("offline");
     expect(deriveSyncStatus({ ...base, failureStartedAt: 0, now: ERROR_AFTER_MS, pendingCount: 3, conflictCount: 2 })).toMatchObject({
       state: "error",
@@ -544,7 +562,7 @@ describe("blobs", () => {
     const credential = server.pairDevice({ deviceId: "phone-1", name: "your phone", platform: "ios", kind: "phone" });
     const transport = new HttpTransport({
       fetchImpl: (input, init) => server.fetch(input, init),
-      baseUrl: () => "http://100.97.87.111:8788",
+      baseUrl: () => BASE,
       credential: () => credential,
     });
     await transport.registerBook({ sha256: sha, size: bytes.length, format: "pdf", title: "A", filename: "a.pdf", docId: "doc" });

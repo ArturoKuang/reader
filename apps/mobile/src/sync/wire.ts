@@ -46,7 +46,9 @@ export type ErrorCode =
   | "use_register"
   | "unknown_book"
   | "bad_base"
-  | "not_owner";
+  | "not_owner"
+  | "disk_full"
+  | "quota_exceeded";
 
 export interface ApiErrorBody {
   error: { code: ErrorCode | string; message: string };
@@ -70,7 +72,6 @@ export interface NotePayload extends PassageAnchor, ExtrasCarrier {
   provider?: string;
   scope: string;
   body: string;
-  highlightId?: string;
 }
 
 /** A word record does not embed lookups. Lookups are their own kind. */
@@ -307,9 +308,9 @@ export interface ConflictsResponse {
 }
 
 export interface PairingParts {
-  v: string;
-  host: string;
-  port: number;
+  v: "2";
+  /** Sync base URL, with no trailing slash. Paths are joined under it. */
+  url: string;
   token: string;
   serverId: string;
 }

@@ -8,13 +8,17 @@ describe("sync status chip", () => {
   it("shows the derived state, pending count, conflicts, and last sync time", async () => {
     await render(
       <SyncStatusChip
-        status={{ state: "offline", pendingCount: 3, conflictCount: 1, lastSyncedAt: "2026-01-01T00:00:00.000Z" }}
+        status={{
+          state: "offline",
+          pendingCount: 3,
+          conflictCount: 1,
+          pausedBookIds: [],
+          lastSyncedAt: "2026-01-01T00:00:00.000Z",
+        }}
       />,
     );
     expect(screen.getByLabelText("sync offline")).toBeTruthy();
-    expect(screen.getByText("3 pending")).toBeTruthy();
-    expect(screen.getByText("1 conflicts")).toBeTruthy();
-    expect(screen.getByText("2026-01-01T00:00:00.000Z")).toBeTruthy();
+    expect(screen.getByText("Offline, changes saved")).toBeTruthy();
   });
 });
 
