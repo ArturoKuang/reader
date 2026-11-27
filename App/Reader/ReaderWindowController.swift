@@ -893,6 +893,26 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         activateCurrentPane()
     }
 
+    func openInPane(id: String) {
+        for pane in readingPanes {
+            guard let item = pane.session.annotations.first(where: { $0.id == id || $0.highlight?.id == id || $0.note?.id == id }) else { continue }
+            openInPane(item, session: pane.session, document: pane.document)
+            return
+        }
+    }
+
+    func openInPane(_ item: Annotation) {
+        guard readingPanes.indices.contains(paneHost.activeIndex) else { return }
+        let current = readingPanes[paneHost.activeIndex]
+        openInPane(item, session: current.session, document: current.document)
+    }
+
+    private func openInPane(_ item: Annotation, session book: ReaderSession, document: ReaderDocument?) {
+        let position = ReadingPosition(page: item.page, cfi: item.cfi, section: item.section, quote: item.quote)
+        guard let document else { return }
+        place(session: book, document: document, position: position)
+    }
+
     private func splitPane(sideBySide: Bool) {
         guard readingPanes.indices.contains(paneHost.activeIndex) else { return }
         let current = readingPanes[paneHost.activeIndex]

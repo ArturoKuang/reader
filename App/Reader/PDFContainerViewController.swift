@@ -98,9 +98,14 @@ final class PDFContainerViewController: NSViewController {
         pdfView.onMouseUp = { [weak self] in self?.captureSelection() }
         pdfView.highlightIDAt = { [weak self] point in self?.highlightID(atViewPoint: point) }
         pdfView.onRemoveHighlight = { [weak self] id in self?.session.deleteHighlight(id: id) }
-        pdfView.onOpenHighlight = { [weak self] id in
-            self?.session.lastAnnotationHit = id
-            self?.session.openAnnotation(id)
+        pdfView.onOpenHighlight = { [weak self] id, option in
+            guard let self else { return }
+            if option {
+                (self.view.window?.windowController as? ReaderWindowController)?.openInPane(id: id)
+                return
+            }
+            self.session.lastAnnotationHit = id
+            self.session.openAnnotation(id)
         }
         pdfView.conceptAt = { [weak self] point in self?.conceptID(atViewPoint: point) }
         pdfView.onConcept = { [weak self] id in self?.presentConcept(id) }
@@ -894,7 +899,7 @@ final class ReaderPDFView: PDFView {
     var onMouseUp: (() -> Void)?
     var highlightIDAt: ((NSPoint) -> String?)?
     var onRemoveHighlight: ((String) -> Void)?
-    var onOpenHighlight: ((String) -> Void)?
+    var onOpenHighlight: ((String, Bool) -> Void)?
     var conceptAt: ((NSPoint) -> String?)?
     var onConcept: ((String) -> Void)?
     var prepareSelection: (() -> Void)?
@@ -904,7 +909,7 @@ final class ReaderPDFView: PDFView {
         super.mouseUp(with: event)
         let point = convert(event.locationInWindow, from: nil)
         if let id = highlightIDAt?(point) {
-            onOpenHighlight?(id)
+            onOpenHighlight?(id, event.modifierFlags.contains(.option))
             return
         }
         if let id = conceptAt?(point) {
@@ -1139,6 +1144,11 @@ final class NoteOverlay: NSView {
 
     @objc private func open(_ sender: NSClickGestureRecognizer) {
         guard let id = (sender.view as? NSImageView)?.identifier?.rawValue else { return }
+        let option = NSEvent.modifierFlags.contains(.option) || NSApp.currentEvent?.modifierFlags.contains(.option) == true
+        if option {
+            (window?.windowController as? ReaderWindowController)?.openInPane(id: id)
+            return
+        }
         session?.lastAnnotationHit = id
         session?.openAnnotation(id)
     }
