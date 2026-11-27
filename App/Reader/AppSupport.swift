@@ -212,3 +212,18 @@ enum ShortcutCatalog {
         return prefix + key.uppercased()
     }
 }
+
+/// Find's search field action also fires when the field resigns first responder.
+/// Only Return/Enter should advance to the next match.
+enum FindCommit {
+    static func isExplicitAdvance(_ event: NSEvent? = NSApp.currentEvent) -> Bool {
+        guard let event else { return false }
+        switch event.type {
+        case .keyDown, .keyUp:
+            return event.keyCode == 36 || event.keyCode == 76
+        default:
+            return false
+        }
+    }
+}
+

@@ -692,8 +692,11 @@ struct WordList: View {
         guard session.vaultEnabled, let root = session.vaultRoot, let folder = session.bookFolder else {
             return "Obsidian vault found · Not saving here"
         }
-        let relative = session.vaultVocabularyFile.isEmpty ? "learner/vocabulary.md" : session.vaultVocabularyFile
-        let absolute = relative.hasPrefix("/") ? relative : Paths.join(folder, relative)
+        let settings = VaultBookSettings(
+            notesFolder: session.vaultNotesFolder,
+            vocabularyFile: session.vaultVocabularyFile.isEmpty ? nil : session.vaultVocabularyFile
+        )
+        let absolute = VaultPaths.vocabularyFile(bookFolder: folder, settings: settings, fs: LocalFileSystem())
         return ObsidianLink.displayPath(vaultRoot: root, absolute: absolute)
     }
 
