@@ -68,6 +68,7 @@ public final class SyncEngine: @unchecked Sendable {
     public private(set) var appliedRecords: [RecordEnvelope] = []
 
     private let lock = NSLock()
+    private let pairingGate = PairingGate()
 
     public init(
         directory: URL,
@@ -123,6 +124,12 @@ public final class SyncEngine: @unchecked Sendable {
 
     @discardableResult
     public func ensureMacPaired() async throws -> RedeemResponse {
+        try await pairingGate.run {
+            try await self.performEnsureMacPaired()
+        }
+    }
+
+    private func performEnsureMacPaired() async throws -> RedeemResponse {
         if let credential = credentials.load(account: SyncKeychainAccount.credential) {
             http.credential = credential
             let deviceId = credentials.load(account: SyncKeychainAccount.deviceId) ?? store.deviceId
@@ -489,5 +496,21 @@ public final class SyncEngine: @unchecked Sendable {
                 return object
             },
         ]
+    }
+}
+
+/// Serializes Mac pairing so concurrent refreshDevices() / issuePhoneQR() / sync()
+/// calls share one in-flight pair instead of racing on meta writes or double-redeeming.
+private actor PairingGate {
+    private var inFlight: Task<RedeemResponse, Error>?
+
+    func run(_ operation: @escaping @Sendable () async throws -> RedeemResponse) async throws -> RedeemResponse {
+        if let inFlight {
+            return try await inFlight.value
+        }
+        let task = Task { try await operation() }
+        inFlight = task
+        defer { inFlight = nil }
+        return try await task.value
     }
 }

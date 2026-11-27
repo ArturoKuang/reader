@@ -65,10 +65,11 @@ final class AnnotationTests: XCTestCase {
         var package = SidecarPackage.empty(identity: FrontMatter(kind: "notes", document: "Book.pdf", fingerprint: "sha256:x"))
         let anchor = AnnotationAnchor(text: "hard to vary", page: 4, section: "Chapter 4")
         _ = AnnotationEdit.addNote(toSelection: anchor, color: 1, highlightID: "h1", noteID: "n1", now: "t", package: &package)
-        AnnotationEdit.updateNoteBody(id: "n1", body: "typed", now: "t2", package: &package)
-        AnnotationEdit.updateNoteBody(id: "n1", body: "typed more", now: "t3", package: &package)
+        AnnotationEdit.updateNoteBody(id: "h1", body: "typed", now: "t2", package: &package)
+        AnnotationEdit.updateNoteBody(id: "h1", body: "typed more", now: "t3", package: &package)
         XCTAssertEqual(package.highlights.highlights.map(\.id), ["h1"])
-        XCTAssertEqual(package.notes.notes.map(\.id), ["n1"])
+        XCTAssertEqual(package.notes.notes.map(\.id), ["h1"])
+        XCTAssertEqual(package.highlights.highlights.first?.noteID, "h1")
         XCTAssertEqual(AnnotationIndex.items(highlights: package.highlights.highlights, notes: package.notes.notes).map(\.id), ["h1"])
         var highlights = [HighlightEntry(id: "h1", color: 1, page: 4, quote: "hard to vary", noteID: "h1")]
         var notes = [
@@ -92,27 +93,63 @@ final class AnnotationTests: XCTestCase {
         var package = SidecarPackage.empty(identity: FrontMatter(kind: "notes", document: "Book.pdf", fingerprint: "sha256:x"))
         let selection = AnnotationAnchor(text: "hard to vary", page: 4, section: "Chapter 4", rects: [[1, 2, 3, 4]])
         let created = AnnotationEdit.addNote(toSelection: selection, color: 2, highlightID: "h1", noteID: "n1", now: "2026-10-13T00:00:00Z", package: &package)
-        XCTAssertEqual(created.highlight?.noteID, "n1")
+        XCTAssertEqual(created.highlight?.id, "h1")
+        XCTAssertEqual(created.note?.id, "h1")
+        XCTAssertEqual(created.highlight?.noteID, "h1")
         XCTAssertEqual(package.highlights.highlights.count, 1)
         XCTAssertEqual(package.notes.notes.count, 1)
         XCTAssertEqual(package.state.lastHighlightColor, 2)
-        AnnotationEdit.updateNoteBody(id: "n1", body: "  A real note  ", now: "2026-10-14T00:00:00Z", package: &package)
+        AnnotationEdit.updateNoteBody(id: "h1", body: "  A real note  ", now: "2026-10-14T00:00:00Z", package: &package)
         XCTAssertEqual(package.notes.notes.first?.body, "A real note")
         AnnotationEdit.recolor(id: "h1", color: 5, package: &package)
         XCTAssertEqual(package.highlights.highlights.first?.color, 5)
-        AnnotationEdit.updateNoteBody(id: "n1", body: "Write a note…", now: "2026-10-15T00:00:00Z", package: &package)
+        AnnotationEdit.updateNoteBody(id: "h1", body: "Write a note…", now: "2026-10-15T00:00:00Z", package: &package)
         XCTAssertTrue(package.notes.notes.isEmpty)
         XCTAssertNil(package.highlights.highlights.first?.noteID)
         XCTAssertEqual(package.highlights.highlights.count, 1)
         AnnotationEdit.addNote(toHighlight: "h1", noteID: "n2", now: "2026-10-16T00:00:00Z", package: &package)
-        XCTAssertEqual(package.highlights.highlights.first?.noteID, "n2")
-        AnnotationEdit.removeNote(id: "n2", package: &package)
+        XCTAssertEqual(package.highlights.highlights.first?.noteID, "h1")
+        XCTAssertEqual(package.notes.notes.first?.id, "h1")
+        AnnotationEdit.removeNote(id: "h1", package: &package)
         XCTAssertNil(package.highlights.highlights.first?.noteID)
         XCTAssertEqual(package.highlights.highlights.count, 1)
         AnnotationEdit.addNote(toHighlight: "h1", noteID: "n3", now: "2026-10-16T00:00:00Z", package: &package)
         AnnotationEdit.removeHighlightAndNote(id: "h1", package: &package)
         XCTAssertTrue(package.highlights.highlights.isEmpty)
         XCTAssertTrue(package.notes.notes.isEmpty)
+    }
+
+    func testNoteAttachedToHighlightReusesHighlightId() {
+        // Standalone notes keep their own id.
+        var package = SidecarPackage.empty(identity: FrontMatter(kind: "notes", document: "Book.pdf", fingerprint: "sha256:x"))
+        let pageNote = AnnotationEdit.addNote(toSelection: AnnotationAnchor(text: "Page note", page: 1), color: 1, highlightID: nil, noteID: "n-page", now: "t", package: &package)
+        XCTAssertNil(pageNote.highlight)
+        XCTAssertEqual(pageNote.note?.id, "n-page")
+
+        // Creating a highlight + note reuses the highlight id even if the caller passed a different noteID.
+        let anchor = AnnotationAnchor(text: "hard to vary", page: 4, section: "Chapter 4")
+        let created = AnnotationEdit.addNote(toSelection: anchor, color: 1, highlightID: "h1", noteID: "n-other", now: "t", package: &package)
+        XCTAssertEqual(created.highlight?.id, "h1")
+        XCTAssertEqual(created.note?.id, "h1")
+        XCTAssertEqual(created.highlight?.noteID, "h1")
+
+        // Highlight-first, then add a note (the Mac UI path Reader QA hit): reuse the existing highlight id,
+        // ignoring a freshly generated note/highlight id from the caller.
+        var existingPackage = SidecarPackage.empty(identity: FrontMatter(kind: "notes", document: "Book.pdf", fingerprint: "sha256:x"))
+        _ = AnnotationEdit.addHighlight(selection: anchor, color: 2, id: "h_existing", package: &existingPackage)
+        let linked = AnnotationEdit.addNote(toSelection: anchor, color: 2, highlightID: "h_fresh", noteID: "h_fresh", now: "t", package: &existingPackage)
+        XCTAssertEqual(existingPackage.highlights.highlights.map(\.id), ["h_existing"])
+        XCTAssertEqual(existingPackage.highlights.highlights.count, 1)
+        XCTAssertEqual(linked.highlight?.id, "h_existing")
+        XCTAssertEqual(linked.note?.id, "h_existing")
+        XCTAssertEqual(linked.highlight?.noteID, "h_existing")
+
+        // addNote(toHighlight:) also reuses the highlight id when the highlight has no note yet.
+        var toHighlight = SidecarPackage.empty(identity: FrontMatter(kind: "notes", document: "Book.pdf", fingerprint: "sha256:x"))
+        _ = AnnotationEdit.addHighlight(selection: anchor, color: 3, id: "h_ui", package: &toHighlight)
+        XCTAssertTrue(AnnotationEdit.addNote(toHighlight: "h_ui", noteID: "n_ignored", now: "t", package: &toHighlight))
+        XCTAssertEqual(toHighlight.notes.notes.first?.id, "h_ui")
+        XCTAssertEqual(toHighlight.highlights.highlights.first?.noteID, "h_ui")
     }
 
     func testCopyLinkAndHighlightPalette() {
@@ -137,18 +174,18 @@ final class AnnotationTests: XCTestCase {
         ]
         for (index, anchor) in anchors.enumerated() {
             _ = AnnotationEdit.addNote(toSelection: anchor, color: index + 1, highlightID: "h\(index + 1)", noteID: "n\(index + 1)", now: "2026-10-13T00:00:00Z", package: &package)
-            AnnotationEdit.updateNoteBody(id: "n\(index + 1)", body: "Note \(index + 1)", now: "2026-10-13T00:00:00Z", package: &package)
+            AnnotationEdit.updateNoteBody(id: "h\(index + 1)", body: "Note \(index + 1)", now: "2026-10-13T00:00:00Z", package: &package)
         }
         let originalHighlights = package.highlights.highlights
         let originalNotes = package.notes.notes
         AnnotationEdit.remove(ids: ["h1", "h3"], package: &package)
         XCTAssertEqual(package.highlights.highlights.map(\.id), ["h2"])
-        XCTAssertEqual(package.notes.notes.map(\.id), ["n2"])
+        XCTAssertEqual(package.notes.notes.map(\.id), ["h2"])
         XCTAssertEqual(package.highlights.highlights.first?.color, 2)
         AnnotationEdit.restore(highlights: originalHighlights, notes: originalNotes, package: &package)
         XCTAssertEqual(package.highlights.highlights.map(\.id), ["h1", "h2", "h3"])
         XCTAssertEqual(package.highlights.highlights.map(\.color), [1, 2, 3])
-        XCTAssertEqual(package.notes.notes.map(\.id), ["n1", "n2", "n3"])
+        XCTAssertEqual(package.notes.notes.map(\.id), ["h1", "h2", "h3"])
         XCTAssertEqual(package.notes.notes.map(\.body), ["Note 1", "Note 2", "Note 3"])
 
         let user = "freeform outline\n\t- a typo here\n"
@@ -184,10 +221,10 @@ final class AnnotationTests: XCTestCase {
         XCTAssertEqual(pageNote.note?.id, "n-page")
         AnnotationEdit.updateNoteBody(id: "n1", body: "", now: "t2", package: &package)
         _ = AnnotationEdit.addNote(toSelection: anchor, color: 2, highlightID: "h1", noteID: "n1", now: "t", package: &package)
-        AnnotationEdit.updateNoteBody(id: "n1", body: "   ", now: "t3", package: &package)
+        AnnotationEdit.updateNoteBody(id: "h1", body: "   ", now: "t3", package: &package)
         XCTAssertEqual(package.highlights.highlights.count, 1)
         XCTAssertNil(package.highlights.highlights.first?.noteID)
-        XCTAssertFalse(package.notes.notes.contains { $0.id == "n1" })
+        XCTAssertFalse(package.notes.notes.contains { $0.id == "h1" })
         XCTAssertTrue(Paths.isSafeRelative("notes"))
         XCTAssertTrue(Paths.isSafeRelative("learner/vocabulary.md"))
         XCTAssertFalse(Paths.isSafeRelative("../notes"))

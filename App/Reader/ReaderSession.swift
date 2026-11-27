@@ -962,7 +962,7 @@ final class ReaderSession: ObservableObject {
             }
             return
         }
-        let noteID = highlight.noteID ?? IDs.make("n")
+        let noteID = highlight.noteID ?? highlight.id
         AnnotationEdit.addNote(toHighlight: highlight.id, noteID: noteID, now: now, package: &package)
         AnnotationEdit.updateNoteBody(id: noteID, body: body, now: now, package: &package)
     }

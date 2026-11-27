@@ -36,7 +36,7 @@ public final class InMemoryCredentialStore: CredentialStoring, @unchecked Sendab
 public struct KeychainCredentialStore: CredentialStoring, Sendable {
     public var service: String
 
-    public init(service: String = "com.reader.Reader") {
+    public init(service: String = Bundle.main.bundleIdentifier ?? "com.reader.Reader") {
         self.service = service
     }
 
