@@ -1,14 +1,17 @@
 import { StatusBar } from "expo-status-bar";
-import { SafeAreaView, StyleSheet } from "react-native";
+import { StyleSheet } from "react-native";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { ReaderHome } from "./src/ui/BookReader";
 import { tokens } from "./src/ui/tokens";
 
 export default function App() {
   return (
-    <SafeAreaView style={styles.root}>
-      <StatusBar style="dark" />
-      <ReaderHome />
-    </SafeAreaView>
+    <SafeAreaProvider>
+      <SafeAreaView style={styles.root} edges={["top", "left", "right"]}>
+        <StatusBar style="dark" />
+        <ReaderHome />
+      </SafeAreaView>
+    </SafeAreaProvider>
   );
 }
 

@@ -4,18 +4,61 @@ function emit(message) {
   const raw = JSON.stringify(message);
   if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(raw);
 }
-function lastGraphemes(text, count) {
+function graphemeParts(text) {
+  if (typeof Intl !== "undefined" && typeof Intl.Segmenter === "function") {
+    try {
+      const parts = [];
+      for (const piece of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text)) {
+        parts.push(piece.segment);
+      }
+      return parts;
+    } catch (error) {
+      /* Chromium has Segmenter; keep the hand-written walk if it throws. */
+    }
+  }
+  const ZWJ = 0x200d;
+  const points = [];
+  for (let index = 0; index < text.length; ) {
+    const codePoint = text.codePointAt(index) || 0;
+    points.push(codePoint);
+    index += codePoint > 0xffff ? 2 : 1;
+  }
+  const regional = (codePoint) => codePoint >= 0x1f1e6 && codePoint <= 0x1f1ff;
+  const extendsCluster = (codePoint) =>
+    /\\p{M}/u.test(String.fromCodePoint(codePoint)) ||
+    (codePoint >= 0xfe00 && codePoint <= 0xfe0f) ||
+    (codePoint >= 0xe0100 && codePoint <= 0xe01ef) ||
+    (codePoint >= 0x1f3fb && codePoint <= 0x1f3ff);
   const parts = [];
-  for (const piece of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text)) parts.push(piece.segment);
+  let cursor = 0;
+  while (cursor < points.length) {
+    let end = cursor + 1;
+    if (regional(points[cursor]) && regional(points[cursor + 1])) end = cursor + 2;
+    else {
+      while (end < points.length) {
+        const current = points[end];
+        if (extendsCluster(current)) {
+          end += 1;
+          continue;
+        }
+        if (current === ZWJ && end + 1 < points.length) {
+          end += 2;
+          continue;
+        }
+        break;
+      }
+    }
+    parts.push(String.fromCodePoint.apply(null, points.slice(cursor, end)));
+    cursor = end;
+  }
+  return parts;
+}
+function lastGraphemes(text, count) {
+  const parts = graphemeParts(text);
   return parts.slice(Math.max(0, parts.length - count)).join("");
 }
 function firstGraphemes(text, count) {
-  const parts = [];
-  for (const piece of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text)) {
-    parts.push(piece.segment);
-    if (parts.length >= count) break;
-  }
-  return parts.join("");
+  return graphemeParts(text).slice(0, count).join("");
 }
 function plainText(root) {
   let text = "";
@@ -105,31 +148,71 @@ function wordRangeAt(doc, x, y) {
   range.setEnd(caret.startContainer, end);
   return range;
 }
+function suppressNativeSelection(doc) {
+  if (!doc || doc.__readerNoSelect) return;
+  doc.__readerNoSelect = true;
+  const style = doc.createElement("style");
+  style.textContent = "html,body,body *{-webkit-user-select:none !important;user-select:none !important;-webkit-touch-callout:none !important;}";
+  (doc.head || doc.documentElement).appendChild(style);
+  doc.addEventListener("contextmenu", (event) => event.preventDefault());
+  doc.addEventListener("selectstart", (event) => event.preventDefault());
+}
 function watchLongPress(doc, onRange) {
-  let started = 0;
+  suppressNativeSelection(doc);
+  let timer = 0;
   let x = 0;
   let y = 0;
+  let active = false;
+  function clear() {
+    active = false;
+    if (timer) {
+      clearTimeout(timer);
+      timer = 0;
+    }
+  }
+  function start(clientX, clientY) {
+    clear();
+    x = clientX;
+    y = clientY;
+    active = true;
+    timer = setTimeout(() => {
+      active = false;
+      timer = 0;
+      const word = wordRangeAt(doc, x, y);
+      if (word) onRange(word, x, y);
+    }, 500);
+  }
+  function move(clientX, clientY) {
+    if (!active) return;
+    if (Math.abs(clientX - x) > 10 || Math.abs(clientY - y) > 10) clear();
+  }
+  doc.addEventListener("touchstart", (event) => {
+    const touch = event.touches && event.touches[0];
+    if (!touch) return;
+    start(touch.clientX, touch.clientY);
+  }, { passive: true });
+  doc.addEventListener("touchmove", (event) => {
+    const touch = event.touches && event.touches[0];
+    if (!touch) return;
+    move(touch.clientX, touch.clientY);
+  }, { passive: true });
+  doc.addEventListener("touchend", clear);
+  doc.addEventListener("touchcancel", clear);
   doc.addEventListener("pointerdown", (event) => {
-    started = Date.now();
-    x = event.clientX;
-    y = event.clientY;
+    if (event.pointerType === "touch") return;
+    start(event.clientX, event.clientY);
   });
-  doc.addEventListener("contextmenu", (event) => event.preventDefault());
-  doc.addEventListener("pointerup", () => {
-    if (!started || Date.now() - started < 450) {
-      started = 0;
-      return;
-    }
-    started = 0;
-    const selection = doc.getSelection && doc.getSelection();
-    if (selection && !selection.isCollapsed && selection.toString().trim()) {
-      const range = selection.getRangeAt(0);
-      selection.removeAllRanges();
-      onRange(range, x, y);
-      return;
-    }
-    const word = wordRangeAt(doc, x, y);
-    if (word) onRange(word, x, y);
+  doc.addEventListener("pointermove", (event) => {
+    if (event.pointerType === "touch") return;
+    move(event.clientX, event.clientY);
+  });
+  doc.addEventListener("pointerup", (event) => {
+    if (event.pointerType === "touch") return;
+    clear();
+  });
+  doc.addEventListener("pointercancel", (event) => {
+    if (event.pointerType === "touch") return;
+    clear();
   });
 }
 function rgba(hex) {
@@ -145,20 +228,33 @@ export function pdfViewerHtml(): string {
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
-  html, body { margin: 0; background: #f6f5f3; }
+  html, body { margin: 0; background: #f6f5f3; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
   #pages { padding: 12px 0 120px; }
   .page { position: relative; margin: 0 auto 16px; background: white; box-shadow: 0 1px 4px rgba(0,0,0,.12); }
-  .textLayer { position: absolute; inset: 0; overflow: hidden; line-height: 1; z-index: 2; }
-  .textLayer span { color: transparent; position: absolute; white-space: pre; transform-origin: 0 0; cursor: text; }
+  .textLayer { position: absolute; inset: 0; overflow: hidden; line-height: 1; z-index: 2; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  .textLayer span { color: transparent; position: absolute; white-space: pre; transform-origin: 0 0; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
   .marks { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
   .mark { position: absolute; border-radius: 2px; }
 </style>
 </head>
 <body>
 <div id="pages"></div>
+<script>
+if (typeof Promise.try !== "function") {
+  Promise.try = function (callbackfn) {
+    "use strict";
+    if (typeof callbackfn !== "function") {
+      throw new TypeError("Promise.try requires a function");
+    }
+    var args = Array.prototype.slice.call(arguments, 1);
+    return new Promise(function (resolve) {
+      resolve(callbackfn.apply(undefined, args));
+    });
+  };
+}
+</script>
 <script type="module">
 import * as pdfjs from "./pdfjs/pdf.min.mjs";
-pdfjs.GlobalWorkerOptions.workerSrc = new URL("./pdfjs/pdf.worker.min.mjs", import.meta.url).href;
 ${shared}
 const pages = [];
 const highlights = new Map();
@@ -250,7 +346,9 @@ function selectionFrom(range) {
     rects,
   });
 }
-async function openPdf(base64) {
+async function openPdf(base64, workerSource) {
+  const blob = new Blob([workerSource], { type: "text/javascript" });
+  pdfjs.GlobalWorkerOptions.workerSrc = URL.createObjectURL(blob);
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
@@ -292,7 +390,7 @@ async function openPdf(base64) {
 window.__hostMessage = async (raw) => {
   const message = JSON.parse(raw);
   try {
-    if (message.type === "open-pdf") await openPdf(message.base64);
+    if (message.type === "open-pdf") await openPdf(message.base64, message.workerSource);
     else if (message.type === "restore") message.highlights.forEach(paint);
     else if (message.type === "paint") paint(message.highlight);
     else if (message.type === "remove") removeHighlight(message.id);
@@ -314,8 +412,8 @@ export function epubViewerHtml(): string {
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
-  html, body { margin: 0; height: 100%; background: #f6f5f3; }
-  foliate-view { display: block; width: 100%; height: 100%; --overlayer-highlight-opacity: 0.38; }
+  html, body, foliate-view { margin: 0; height: 100%; background: #f6f5f3; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  foliate-view { display: block; width: 100%; --overlayer-highlight-opacity: 0.38; }
 </style>
 </head>
 <body>

@@ -4,14 +4,13 @@
  *
  * Derived from Packages/ReaderCore/Sources/ReaderCore/Models.swift and
  * checked against the Mac record-to-markdown mapping. Wire names follow
- * that mapping (pdfId, epubId, noteId). Sidecar comment keys that differ
- * are applied in `sidecar.ts`, not by renaming the fields here.
+ * that mapping (pdfId, epubId). Sidecar comment keys that differ are
+ * applied in `sidecar.ts`, not by renaming the fields here.
  *
  * A book is `fingerprint` (`sha256:` + lowercase hex of the file bytes)
  * plus its PDF id or EPUB id. A highlight and its note are separate
- * records. The note points at its highlight with `highlightId`. The
- * sidecar still stores the inverse comment key `note` on the highlight
- * (`noteId` here).
+ * records keyed by book, kind, and id. The note reuses the highlight id.
+ * The highlight record does not carry a note id.
  */
 
 export type JsonValue =
@@ -79,23 +78,13 @@ export interface HighlightRecord extends PassageAnchor {
    * Empty for EPUB and for this text spike.
    */
   rects: number[][];
-  /**
-   * Points at a separate NoteRecord. The sidecar comment key is `note`,
-   * not `noteId`. Absent when the highlight has no note.
-   */
-  noteId?: string;
   /** Unknown comment keys, passed through untouched. */
   extras: { [key: string]: JsonValue };
 }
 
 export interface NoteRecord extends PassageAnchor {
-  /** Client-made `n_` + lowercase UUID without hyphens. */
+  /** The same id as the highlight this note belongs to. */
   id: string;
-  /**
-   * The highlight this note belongs to. Absent for a note that has no
-   * highlight. The note does not embed the highlight's color or rects.
-   */
-  highlightId?: string;
   /** ISO-8601 when the app set it. */
   created?: string;
   /** ISO-8601 when the app set it. */

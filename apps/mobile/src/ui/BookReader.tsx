@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ComponentType, type Ref } from "react
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   ActivityIndicator,
+  BackHandler,
   Pressable,
   StyleSheet,
   Text,
@@ -15,19 +16,15 @@ import { addHighlight, removeHighlight, saveNote } from "../highlight/store";
 import { applyLocated } from "../reader/applyLocated";
 import { parseViewerMessage } from "../reader/bridge";
 import type { HostToViewer, ViewerHighlight } from "../reader/bridge";
+import { File } from "expo-file-system";
 import { readAssetBase64, viewerRoot } from "../reader/installViewer";
 import { epubBook, epubModule, pdfBook, pdfModule, sampleTitles } from "../reader/samples";
 import { emptyShelf, parseShelf, serializeShelf, shelfKey } from "../reader/shelf";
 import type { BookShelf } from "../reader/shelf";
+import { makeId } from "../reader/ids";
 import { tokens } from "./tokens";
 
 type Format = "pdf" | "epub";
-
-function makeId(prefix: string): string {
-  const bytes = new Uint8Array(16);
-  globalThis.crypto.getRandomValues(bytes);
-  return `${prefix}_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-}
 
 function hexFor(color: number): string {
   return tokens.highlight.palette.find((swatch) => swatch.id === color)?.hex ?? "#F2C94C";
@@ -51,6 +48,14 @@ function toViewer(highlight: HighlightRecord): ViewerHighlight {
 
 export function ReaderHome() {
   const [format, setFormat] = useState<Format | null>(null);
+  useEffect(() => {
+    if (!format) return;
+    const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
+      setFormat(null);
+      return true;
+    });
+    return () => subscription.remove();
+  }, [format]);
   if (!format) {
     return (
       <View style={styles.home}>
@@ -86,13 +91,14 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
   const [shelf, setShelf] = useState<BookShelf>(emptyShelf());
   const [uri, setUri] = useState<string | null>(null);
   const [base64, setBase64] = useState<string | null>(null);
+  const [workerSource, setWorkerSource] = useState<string | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const active = shelf.highlights.find((highlight) => highlight.id === activeId) ?? null;
-  const activeNote = shelf.notes.find((note) => note.highlightId === active?.id);
+  const activeNote = shelf.notes.find((note) => note.id === active?.id);
 
   function send(message: HostToViewer) {
     const payload = JSON.stringify(message);
@@ -112,10 +118,13 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
         const saved = parseShelf(await AsyncStorage.getItem(shelfKey(book.fingerprint)));
         const root = await viewerRoot();
         const encoded = await readAssetBase64(format === "pdf" ? pdfModule : epubModule);
+        const worker =
+          format === "pdf" ? await new File(root, "pdfjs", "pdf.worker.min.mjs").text() : null;
         if (cancelled) return;
         shelfRef.current = saved;
         setShelf(saved);
         setBase64(encoded);
+        setWorkerSource(worker);
         setUri(fileUri(root.uri, format === "pdf" ? "pdf.html" : "epub.html"));
       } catch (cause) {
         if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
@@ -128,14 +137,20 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
 
   function openSheet(id: string, notes = shelfRef.current.notes) {
     setActiveId(id);
-    setDraft(notes.find((note) => note.highlightId === id)?.body ?? "");
+    setDraft(notes.find((note) => note.id === id)?.body ?? "");
   }
 
   function onViewerMessage(raw: string) {
     const message = parseViewerMessage(raw);
     if (!message) return;
     if (message.type === "ready") {
-      if (base64) send(format === "pdf" ? { type: "open-pdf", base64 } : { type: "open-epub", base64 });
+      if (!base64) return;
+      if (format === "pdf") {
+        if (!workerSource) return;
+        send({ type: "open-pdf", base64, workerSource });
+      } else {
+        send({ type: "open-epub", base64 });
+      }
       return;
     }
     if (message.type === "corpus") {
@@ -201,7 +216,7 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
 
   function saveActiveNote() {
     if (!active) return;
-    const saved = saveNote(shelf.highlights, shelf.notes, active.id, makeId("n"), draft, new Date().toISOString());
+    const saved = saveNote(shelf.highlights, shelf.notes, active.id, draft, new Date().toISOString());
     if (!saved) return;
     void commit({ ...shelf, highlights: saved.highlights, notes: saved.notes });
     setNotice(draft.trim() ? "Note saved as its own record" : "Note removed");
@@ -252,7 +267,7 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
       </View>
       <Text style={styles.caption}>Long-press a word. Color {shelf.lastColor} is applied at once.</Text>
       {error ? <Text style={styles.error}>{error}</Text> : null}
-      {uri && base64 ? (
+      {uri && base64 && (format === "epub" || workerSource) ? (
         <ReaderWeb
           style={styles.web}
           originWhitelist={["*"]}
@@ -274,7 +289,7 @@ function BookReader({ format, onBack }: { format: Format; onBack: () => void }) 
           <Text style={styles.quote}>“{active.quote}”</Text>
           <Text style={styles.caption}>
             {active.page ? `Page ${active.page}` : active.cfi ? "EPUB CFI" : "No location hint"}
-            {active.noteId ? " · note attached" : ""}
+            {activeNote ? " · note attached" : ""}
           </Text>
           <View style={styles.swatches}>
             {tokens.highlight.palette.map((swatch) => (

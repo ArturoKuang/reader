@@ -34,18 +34,16 @@ test("a second highlight of the same passage returns the existing record", () =>
   assert.equal(added.entry?.color, 1);
 });
 
-test("saving a note keeps it separate and points it at the highlight", () => {
-  const bare = { ...sampleHighlight, noteId: undefined };
-  const saved = saveNote([bare], [], bare.id, "n9", "A note of mine.", "2026-11-22T00:00:00Z");
+test("saving a note keeps it separate and reuses the highlight id", () => {
+  const saved = saveNote([sampleHighlight], [], sampleHighlight.id, "A note of mine.", "2026-11-22T00:00:00Z");
   assert.ok(saved);
-  assert.equal(saved.highlights[0]?.noteId, "n9");
+  assert.equal("noteId" in (saved.highlights[0] ?? {}), false);
   assert.equal(saved.notes.length, 1);
   const note = saved.notes[0];
   assert.ok(note);
-  assert.equal(note.id, "n9");
-  assert.equal(note.highlightId, bare.id);
+  assert.equal(note.id, sampleHighlight.id);
   assert.equal(note.body, "A note of mine.");
-  assert.equal(note.quote, bare.quote);
+  assert.equal(note.quote, sampleHighlight.quote);
   assert.equal("color" in note, false);
   assert.notEqual(note, saved.highlights[0]);
 });
@@ -76,8 +74,7 @@ test("reanchor moves a passage and leaves a missing quote unresolved", () => {
     samplePages,
   );
   assert.deepEqual(lost.unresolvedIDs, ["h1"]);
-  assert.equal(lost.notes[0]?.id, sampleNote.id);
-  assert.equal(lost.notes[0]?.highlightId, sampleHighlight.id);
+  assert.equal(lost.notes[0]?.id, sampleHighlight.id);
 });
 
 test("an empty lookup quote reanchors on the headword", () => {

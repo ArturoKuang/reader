@@ -23,19 +23,18 @@ test("the sample book is a sha256 fingerprint plus a pdf id", () => {
   assert.equal(records.book.fingerprint.startsWith("sha256:"), true);
 });
 
-test("a highlight and its note are separate records and the note points at the highlight", () => {
-  assert.equal(records.note.highlightId, records.highlight.id);
-  assert.equal(records.highlight.noteId, records.note.id);
-  assert.notEqual(records.highlight.id, records.note.id);
+test("a highlight and its note are separate records that share one id", () => {
+  assert.equal(records.note.id, records.highlight.id);
+  assert.equal("noteId" in records.highlight, false);
+  assert.equal("highlightId" in records.note, false);
   assert.equal("body" in records.highlight, false);
   assert.equal("color" in records.note, false);
   assert.equal(records.note.body.length > 0, true);
   assert.deepEqual(records.highlight.rects[0], [72, 188.3, 540.2, 230.9]);
 
   const highlightComment = highlightSidecarObject(records.highlight);
-  assert.equal(highlightComment.note, records.note.id);
+  assert.equal("note" in highlightComment, false);
   assert.equal("noteId" in highlightComment, false);
-  assert.equal("highlightId" in highlightComment, false);
   const rendered = readerComment(highlightComment);
   assert.equal(rendered.endsWith("-->"), true);
   assert.equal(rendered.slice(0, -3).includes("-->"), false);

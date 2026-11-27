@@ -1,21 +1,5 @@
 import { ANCHOR_CONTEXT } from "./locate";
-
-const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-
-function lastGraphemes(text: string, count: number): string {
-  const parts: string[] = [];
-  for (const piece of segmenter.segment(text)) parts.push(piece.segment);
-  return parts.slice(Math.max(0, parts.length - count)).join("");
-}
-
-function firstGraphemes(text: string, count: number): string {
-  const parts: string[] = [];
-  for (const piece of segmenter.segment(text)) {
-    parts.push(piece.segment);
-    if (parts.length >= count) break;
-  }
-  return parts.join("");
-}
+import { takeFirstGraphemes, takeLastGraphemes } from "./graphemes";
 
 export interface CapturedAnchor {
   quote: string;
@@ -36,8 +20,8 @@ export function captureAnchor(
 ): CapturedAnchor {
   return {
     quote: text.slice(start, end),
-    prefix: lastGraphemes(text.slice(0, start), ANCHOR_CONTEXT),
-    suffix: firstGraphemes(text.slice(end), ANCHOR_CONTEXT),
+    prefix: takeLastGraphemes(text.slice(0, start), ANCHOR_CONTEXT),
+    suffix: takeFirstGraphemes(text.slice(end), ANCHOR_CONTEXT),
     page,
     section,
     rects: [],
