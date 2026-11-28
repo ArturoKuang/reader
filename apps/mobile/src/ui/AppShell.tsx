@@ -83,9 +83,6 @@ export function AppShell() {
   );
 }
 
-/** @deprecated Use AppShell. Kept so existing imports keep working. */
-export const ReaderHome = AppShell;
-
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: tokens.canvas },
   error: { color: "#EB5757", paddingHorizontal: 14, paddingTop: 8 },
