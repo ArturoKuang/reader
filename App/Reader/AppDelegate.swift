@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import ReaderCore
 import SwiftUI
 import UniformTypeIdentifiers
@@ -8,6 +9,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
     private var wordsWindow: NSWindow?
     private var shortcutsWindow: NSWindow?
+    private var updateWindow: NSWindow?
+    private var updateMenuItem: NSMenuItem?
+    private var updaterCancellable: AnyCancellable?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         buildMenu()
@@ -15,6 +19,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         SyncController.shared.start()
+        Task { @MainActor in
+            self.bindUpdater()
+        }
         if NSDocumentController.shared.documents.isEmpty {
             showWelcome(nil)
         }
@@ -98,6 +105,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsWindow?.makeKeyAndOrderFront(nil)
     }
 
+    @objc func checkForUpdates(_ sender: Any?) {
+        Task { @MainActor in
+            let updater = AppUpdater.shared
+            showUpdateWindow()
+            if case .available = updater.state {
+                return
+            }
+            if !updater.state.isBusy {
+                updater.checkForUpdates(manual: true)
+            }
+        }
+    }
+
+    @MainActor
+    func showUpdateWindow() {
+        if updateWindow == nil {
+            let view = UpdateWindowView(
+                updater: AppUpdater.shared,
+                onInstall: { [weak self] release in
+                    self?.installUpdate(release)
+                },
+                onClose: { [weak self] in
+                    self?.updateWindow?.close()
+                }
+            )
+            let host = NSHostingController(rootView: view)
+            let window = NSWindow(contentViewController: host)
+            window.title = "Software Update"
+            window.styleMask = [.titled, .closable]
+            window.isReleasedWhenClosed = false
+            updateWindow = window
+        }
+        updateWindow?.center()
+        updateWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @MainActor
+    func installUpdate(_ release: UpdateRelease) {
+        AppUpdater.shared.installUpdate(
+            release,
+            beforeExit: { [weak self] in
+                self?.prepareForUpdateExit()
+            },
+            terminate: {
+                NSApp.terminate(nil)
+            }
+        )
+    }
+
+    @MainActor
+    private func bindUpdater() {
+        let updater = AppUpdater.shared
+        updaterCancellable = updater.$state.sink { [weak self] state in
+            guard let self else { return }
+            switch state {
+            case .available(let release):
+                self.updateMenuItem?.title = "Install Update (main.\(release.buildNumber))…"
+            case .downloading(let release, _):
+                self.updateMenuItem?.title = "Downloading Update (\(release.shortSHA))…"
+            case .installing:
+                self.updateMenuItem?.title = "Installing Update…"
+            default:
+                self.updateMenuItem?.title = "Check for Updates…"
+            }
+        }
+    }
+
+    @MainActor
+    private func prepareForUpdateExit() {
+        SyncController.shared.stop()
+        for document in NSDocumentController.shared.documents {
+            if let readerDoc = document as? ReaderDocument {
+                readerDoc.save(nil)
+            }
+        }
+    }
+
     @objc func showWords(_ sender: Any?) {
         let books = LibraryIndex.load(from: AppPaths.indexFile, fs: LocalFileSystem()).documents
         let host = NSHostingController(rootView: WordsBrowser(books: books))
@@ -151,8 +236,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildMenu() {
         let main = NSMenu()
+        let checkUpdatesItem = item("Check for Updates…", #selector(checkForUpdates(_:)))
+        updateMenuItem = checkUpdatesItem
         main.addItem(menu("Reader", items: [
             item("About Reader", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
+            checkUpdatesItem,
             separator(),
             item("Settings…", #selector(showSettings(_:)), ",", .command),
             separator(),

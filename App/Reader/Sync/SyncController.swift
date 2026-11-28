@@ -68,6 +68,11 @@ final class SyncController: ObservableObject {
         Task { await syncNow() }
     }
 
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+
     func register(_ session: ReaderSession) {
         openSessions[ObjectIdentifier(session)] = WeakSession(session: session)
         let existing = session.onSyncNeeded

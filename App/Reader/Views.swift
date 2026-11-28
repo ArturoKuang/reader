@@ -850,6 +850,7 @@ struct LookupCard: View {
 }
 
 struct SettingsView: View {
+    @ObservedObject private var updater = AppUpdater.shared
     @State private var settings = SettingsStore.load()
     @State private var openAIKey = KeychainStore.load(account: "openai") ?? ""
     @State private var anthropicKey = KeychainStore.load(account: "anthropic") ?? ""
@@ -867,6 +868,33 @@ struct SettingsView: View {
                     .onChange(of: openInspector) { _, value in
                         UserDefaults.standard.set(value, forKey: "reader.openInspector")
                     }
+            }
+            Section("Updates") {
+                Toggle("Automatically check for releases on main", isOn: $updater.autoCheckEnabled)
+                LabeledContent("Current version") {
+                    HStack(spacing: 8) {
+                        Text(updater.currentBuild.version)
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        if let release = updater.state.availableRelease {
+                            Button("Update & Restart") {
+                                (NSApp.delegate as? AppDelegate)?.installUpdate(release)
+                            }
+                            .disabled(updater.state.isBusy)
+                        } else {
+                            Button("Check for Updates") {
+                                updater.checkForUpdates(manual: true)
+                            }
+                            .disabled(updater.state.isBusy)
+                        }
+                    }
+                }
+                if let summary = updateStatusSummary {
+                    Text(summary)
+                        .font(.caption)
+                        .foregroundStyle(isUpdateError ? .red : .secondary)
+                }
             }
         }
         .formStyle(.grouped)
@@ -948,6 +976,33 @@ struct SettingsView: View {
         }
         .padding()
         .frame(width: 520, height: 600)
+    }
+
+    private var isUpdateError: Bool {
+        if case .error = updater.state { return true }
+        return false
+    }
+
+    private var updateStatusSummary: String? {
+        switch updater.state {
+        case .idle:
+            return nil
+        case .checking:
+            return "Checking GitHub Releases…"
+        case .upToDate:
+            return "You are on the latest release (\(updater.currentBuild.shortSHA))."
+        case .available(let release):
+            return "New build available: \(release.version)"
+        case .downloading(let release, let fraction):
+            if let fraction {
+                return "Downloading \(release.shortSHA) (\(Int(fraction * 100))%)…"
+            }
+            return "Downloading \(release.shortSHA)…"
+        case .installing(let release):
+            return "Installing \(release.shortSHA) and restarting…"
+        case .error(let message):
+            return message
+        }
     }
 
     private var aiReady: Bool {

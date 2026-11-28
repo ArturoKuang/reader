@@ -1,0 +1,197 @@
+name: Release main
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "spec/**"
+      - "apps/mobile/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    runs-on: [self-hosted, macOS, ARM64, macmini-ci]
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure toolchain PATH
+        run: |
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+
+      - name: Run Swift unit tests
+        run: |
+          (cd Packages/ReaderCore && swift test)
+          (cd Packages/ReaderSync && swift test)
+
+      - name: Compute release metadata
+        id: meta
+        run: |
+          build_number=$(git rev-list --count HEAD)
+          commit_sha=$(git rev-parse HEAD)
+          short_sha=$(printf '%s' "$commit_sha" | cut -c1-7)
+          built_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          base_version=$(awk -F'"' '/MARKETING_VERSION:/{print $2; exit}' project.yml)
+          if [ -z "$base_version" ]; then
+            base_version="1.0"
+          fi
+          version="${base_version}-main.${build_number}+${short_sha}"
+          tag="main-${build_number}"
+
+          prev_tag=$(git tag --list 'main-*' --sort=-v:refname | grep -v '^main-latest$' | head -n 1 || true)
+          if [ -n "$prev_tag" ] && git rev-parse "$prev_tag" >/dev/null 2>&1; then
+            notes=$(git log --no-merges --pretty=format:'- %s (%h)' "${prev_tag}..HEAD" | head -n 20)
+          else
+            notes=$(git log --no-merges -n 10 --pretty=format:'- %s (%h)')
+          fi
+          if [ -z "$notes" ]; then
+            notes="- $(git log -1 --pretty=format:'%s (%h)')"
+          fi
+
+          {
+            echo "build_number=${build_number}"
+            echo "commit_sha=${commit_sha}"
+            echo "short_sha=${short_sha}"
+            echo "built_at=${built_at}"
+            echo "base_version=${base_version}"
+            echo "version=${version}"
+            echo "tag=${tag}"
+            echo "notes<<EOF"
+            echo "${notes}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Package macOS Reader.app
+        env:
+          READER_CHANNEL: main
+          READER_BUILD_NUMBER: ${{ steps.meta.outputs.build_number }}
+          READER_COMMIT_SHA: ${{ steps.meta.outputs.commit_sha }}
+          READER_BUILT_AT: ${{ steps.meta.outputs.built_at }}
+          READER_BASE_VERSION: ${{ steps.meta.outputs.base_version }}
+          READER_DIST_DIR: ${{ runner.temp }}/release-dist
+        run: |
+          chmod +x Scripts/package-macos.sh Scripts/sign-manifest.swift Scripts/install-macos-app.sh
+          ./Scripts/package-macos.sh
+
+      - name: Build and sign release manifest
+        env:
+          READER_UPDATE_SIGNING_KEY: ${{ secrets.READER_UPDATE_SIGNING_KEY }}
+          RELEASE_DIR: ${{ runner.temp }}/release-dist
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          BUILD_NUMBER: ${{ steps.meta.outputs.build_number }}
+          COMMIT_SHA: ${{ steps.meta.outputs.commit_sha }}
+          SHORT_SHA: ${{ steps.meta.outputs.short_sha }}
+          BUILT_AT: ${{ steps.meta.outputs.built_at }}
+          NOTES: ${{ steps.meta.outputs.notes }}
+        run: |
+          /usr/bin/python3 - <<'PY'
+          import hashlib, json, os, pathlib
+
+          release_dir = pathlib.Path(os.environ["RELEASE_DIR"])
+          repo = os.environ["REPO"]
+          tag = os.environ["TAG"]
+          short_sha = os.environ["SHORT_SHA"]
+          base_dl = f"https://github.com/{repo}/releases/download/{tag}"
+
+          zip_path = release_dir / f"Reader-macos-arm64-{short_sha}.zip"
+          assert zip_path.is_file(), f"missing macOS app artifact at {zip_path}"
+
+          h = hashlib.sha256()
+          with zip_path.open("rb") as fh:
+              for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                  h.update(chunk)
+
+          manifest = {
+              "schema_version": 1,
+              "channel": "main",
+              "version": os.environ["VERSION"],
+              "build_number": int(os.environ["BUILD_NUMBER"]),
+              "commit_sha": os.environ["COMMIT_SHA"],
+              "published_at": os.environ["BUILT_AT"],
+              "release_url": f"https://github.com/{repo}/releases/tag/{tag}",
+              "notes": os.environ["NOTES"].strip(),
+              "artifacts": {
+                  "macos-app-arm64": {
+                      "url": f"{base_dl}/{zip_path.name}",
+                      "sha256": h.hexdigest(),
+                      "size": zip_path.stat().st_size,
+                  }
+              },
+          }
+          manifest_path = release_dir / "manifest.json"
+          manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          PY
+
+          swift Scripts/sign-manifest.swift \
+            --manifest "${{ runner.temp }}/release-dist/manifest.json" \
+            --output "${{ runner.temp }}/release-dist/manifest.json.sig"
+
+          swift Scripts/sign-manifest.swift \
+            --verify \
+            --manifest "${{ runner.temp }}/release-dist/manifest.json" \
+            --signature "${{ runner.temp }}/release-dist/manifest.json.sig" \
+            --public-key "vu0lKVXUkj0Mwdq+MxQSlshl9UFc+vMZwrFbMj5SLd8="
+
+      - name: Publish immutable release and update main-latest pointer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_DIR: ${{ runner.temp }}/release-dist
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          SHORT_SHA: ${{ steps.meta.outputs.short_sha }}
+          NOTES: ${{ steps.meta.outputs.notes }}
+        run: |
+          assets=(
+            "$RELEASE_DIR/Reader-macos-arm64-${SHORT_SHA}.zip"
+            "$RELEASE_DIR/manifest.json"
+            "$RELEASE_DIR/manifest.json.sig"
+          )
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$TAG" "${assets[@]}" \
+              --target "$GITHUB_SHA" \
+              --title "Reader ${VERSION}" \
+              --notes "$NOTES"
+          fi
+
+          # Atomically update the rolling main-latest pointer AFTER immutable assets exist.
+          git tag -f main-latest "$GITHUB_SHA"
+          git push -f origin main-latest
+          if gh release view main-latest >/dev/null 2>&1; then
+            gh release edit main-latest \
+              --title "Reader main (latest: ${VERSION})" \
+              --notes "$NOTES"
+            gh release upload main-latest \
+              "$RELEASE_DIR/manifest.json" \
+              "$RELEASE_DIR/manifest.json.sig" \
+              --clobber
+          else
+            gh release create main-latest \
+              "$RELEASE_DIR/manifest.json" \
+              "$RELEASE_DIR/manifest.json.sig" \
+              --title "Reader main (latest: ${VERSION})" \
+              --notes "$NOTES"
+          fi
+
+          # Retain the 10 most recent immutable main-<N> releases for rollback.
+          old_tags=$(gh release list --limit 50 --json tagName --jq '.[].tagName' \
+            | grep -E '^main-[0-9]+$' \
+            | sort -t- -k2 -nr \
+            | tail -n +11 || true)
+          for old_tag in $old_tags; do
+            gh release delete "$old_tag" --yes --cleanup-tag || true
+          done
