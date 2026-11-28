@@ -4,10 +4,14 @@ import ReaderCore
 import SwiftUI
 
 struct WelcomeView: View {
+    @ObservedObject private var updater = AppUpdater.shared
     @State private var selection: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
+            if updater.shouldShowBanner, let release = updater.state.availableRelease {
+                WelcomeUpdateBanner(updater: updater, release: release)
+            }
             Text("Reader").font(.largeTitle.weight(.semibold))
             Text("Open a PDF or EPUB. Drop a book here, or press Return on a recent one.")
                 .foregroundStyle(.secondary)
@@ -50,6 +54,81 @@ struct WelcomeView: View {
 
     private func openRecent(_ url: URL) {
         NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { _, _, _ in }
+    }
+}
+
+private struct WelcomeUpdateBanner: View {
+    @ObservedObject var updater: AppUpdater
+    var release: UpdateRelease
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: updater.state.stagedAppURL != nil ? "arrow.triangle.2.circlepath.circle.fill" : "arrow.down.circle.fill")
+                .foregroundStyle(Color.accentColor)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.callout.weight(.medium))
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if case .downloading(_, let fraction) = updater.state {
+                if let fraction {
+                    ProgressView(value: fraction)
+                        .frame(width: 72)
+                } else {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            } else {
+                Button("Details") {
+                    (NSApp.delegate as? AppDelegate)?.showUpdateWindow(activateApp: true)
+                }
+                .controlSize(.small)
+                Button(updater.state.stagedAppURL != nil ? "Restart to Update" : "Update & Restart") {
+                    (NSApp.delegate as? AppDelegate)?.installUpdate(release)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                Button {
+                    updater.dismissBanner()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .help("Dismiss")
+            }
+        }
+        .padding(10)
+        .background(Color.accentColor.opacity(0.1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.accentColor.opacity(0.25)))
+    }
+
+    private var title: String {
+        switch updater.state {
+        case .readyToInstall:
+            return "Reader \(release.version) is ready"
+        case .downloading:
+            return "Downloading Reader \(release.shortSHA)…"
+        default:
+            return "Update available: \(release.version)"
+        }
+    }
+
+    private var subtitle: String {
+        switch updater.state {
+        case .readyToInstall:
+            return updater.autoInstallOnQuit
+                ? "Will install automatically when you quit, or restart now."
+                : "Verified and ready to install."
+        case .downloading(_, let fraction):
+            return fraction.map { "\(Int($0 * 100))% downloaded" } ?? "Downloading in background…"
+        default:
+            return "Signed release from main."
+        }
     }
 }
 
@@ -871,6 +950,7 @@ struct SettingsView: View {
             }
             Section("Updates") {
                 Toggle("Automatically check for releases on main", isOn: $updater.autoCheckEnabled)
+                Toggle("Download updates in background and install on quit", isOn: $updater.autoInstallOnQuit)
                 LabeledContent("Current version") {
                     HStack(spacing: 8) {
                         Text(updater.currentBuild.version)
@@ -878,7 +958,7 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                         Spacer()
                         if let release = updater.state.availableRelease {
-                            Button("Update & Restart") {
+                            Button(updater.state.stagedAppURL != nil ? "Restart to Update" : "Update & Restart") {
                                 (NSApp.delegate as? AppDelegate)?.installUpdate(release)
                             }
                             .disabled(updater.state.isBusy)
@@ -998,6 +1078,10 @@ struct SettingsView: View {
                 return "Downloading \(release.shortSHA) (\(Int(fraction * 100))%)…"
             }
             return "Downloading \(release.shortSHA)…"
+        case .readyToInstall(let release, _):
+            return updater.autoInstallOnQuit
+                ? "Ready: \(release.version) — will install when you quit, or restart now."
+                : "Ready: \(release.version) — click Restart to Update."
         case .installing(let release):
             return "Installing \(release.shortSHA) and restarting…"
         case .error(let message):

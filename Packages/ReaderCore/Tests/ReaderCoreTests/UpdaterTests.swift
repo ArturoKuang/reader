@@ -210,5 +210,14 @@ final class UpdaterTests: XCTestCase {
         XCTAssertTrue(script.contains("TARGET='/Users/O'\"'\"'Brien/My Applications/Reader.app'"))
         XCTAssertTrue(script.contains("LAUNCH=1"))
         XCTAssertTrue(script.contains("restore_backup"))
+
+        let silentScript = UpdateSwapScript.build(
+            parentPid: 99,
+            targetAppPath: "/Users/arturo/Applications/Reader.app",
+            stagedAppPath: "/tmp/stage/Reader.app",
+            backupAppPath: "/Users/arturo/Applications/.Reader.app.backup",
+            launchUpdated: false
+        )
+        XCTAssertTrue(silentScript.contains("LAUNCH=0"))
     }
 }

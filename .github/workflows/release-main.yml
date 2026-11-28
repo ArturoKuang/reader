@@ -78,6 +78,7 @@ jobs:
           READER_COMMIT_SHA: ${{ steps.meta.outputs.commit_sha }}
           READER_BUILT_AT: ${{ steps.meta.outputs.built_at }}
           READER_BASE_VERSION: ${{ steps.meta.outputs.base_version }}
+          READER_CODESIGN_IDENTITY: ${{ vars.READER_CODESIGN_IDENTITY || '-' }}
           READER_DIST_DIR: ${{ runner.temp }}/release-dist
         run: |
           chmod +x Scripts/package-macos.sh Scripts/sign-manifest.swift Scripts/install-macos-app.sh

@@ -39,6 +39,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool { false }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            SyncController.shared.stop()
+            AppUpdater.shared.applyStagedUpdateOnQuitIfNeeded()
+        }
+    }
+
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls where url.scheme == "reader" {
             guard let link = Self.readerLink(from: url) else { continue }
@@ -108,18 +115,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func checkForUpdates(_ sender: Any?) {
         Task { @MainActor in
             let updater = AppUpdater.shared
-            showUpdateWindow()
-            if case .available = updater.state {
+            showUpdateWindow(activateApp: true)
+            switch updater.state {
+            case .available, .readyToInstall:
                 return
-            }
-            if !updater.state.isBusy {
-                updater.checkForUpdates(manual: true)
+            default:
+                if !updater.state.isBusy {
+                    updater.checkForUpdates(manual: true)
+                }
             }
         }
     }
 
     @MainActor
-    func showUpdateWindow() {
+    func showUpdateWindow(activateApp: Bool = true) {
         if updateWindow == nil {
             let view = UpdateWindowView(
                 updater: AppUpdater.shared,
@@ -138,8 +147,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             updateWindow = window
         }
         updateWindow?.center()
-        updateWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if activateApp {
+            updateWindow?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } else {
+            updateWindow?.orderFront(nil)
+        }
     }
 
     @MainActor
@@ -158,11 +171,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     private func bindUpdater() {
         let updater = AppUpdater.shared
+        updater.onPromptForUpdate = { [weak self] _ in
+            self?.showUpdateWindow(activateApp: false)
+        }
         updaterCancellable = updater.$state.sink { [weak self] state in
             guard let self else { return }
             switch state {
             case .available(let release):
                 self.updateMenuItem?.title = "Install Update (main.\(release.buildNumber))…"
+            case .readyToInstall(let release, _):
+                self.updateMenuItem?.title = "Restart to Update (main.\(release.buildNumber))…"
             case .downloading(let release, _):
                 self.updateMenuItem?.title = "Downloading Update (\(release.shortSHA))…"
             case .installing:

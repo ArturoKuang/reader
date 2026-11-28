@@ -10,16 +10,27 @@ enum UpdateState: Equatable {
     case upToDate
     case available(UpdateRelease)
     case downloading(UpdateRelease, Double?)
+    case readyToInstall(UpdateRelease, URL)
     case installing(UpdateRelease)
     case error(String)
 
     var availableRelease: UpdateRelease? {
         switch self {
-        case .available(let release), .downloading(let release, _), .installing(let release):
+        case .available(let release),
+             .downloading(let release, _),
+             .readyToInstall(let release, _),
+             .installing(let release):
             return release
         default:
             return nil
         }
+    }
+
+    var stagedAppURL: URL? {
+        if case .readyToInstall(_, let url) = self {
+            return url
+        }
+        return nil
     }
 
     var isBusy: Bool {
@@ -151,7 +162,9 @@ final class AppUpdater: ObservableObject {
     static let shared = AppUpdater()
 
     static let autoCheckDefaultsKey = "reader.autoCheckUpdates"
+    static let autoInstallOnQuitDefaultsKey = "reader.autoInstallOnQuit"
     static let skippedBuildDefaultsKey = "reader.skippedUpdateBuild"
+    static let lastPromptedBuildDefaultsKey = "reader.lastPromptedUpdateBuild"
     static let defaultManifestURL = "https://github.com/ArturoKuang/reader/releases/download/main-latest/manifest.json"
     static let defaultPublicKeyBase64 = "vu0lKVXUkj0Mwdq+MxQSlshl9UFc+vMZwrFbMj5SLd8="
     static let checkIntervalSeconds: TimeInterval = 4 * 60 * 60
@@ -168,18 +181,31 @@ final class AppUpdater: ObservableObject {
 
     @Published private(set) var state: UpdateState = .idle
     @Published private(set) var currentBuild: AppBuildInfo
+    @Published var bannerDismissedBuild: Int = 0
     @Published var autoCheckEnabled: Bool {
         didSet {
             defaults.set(autoCheckEnabled, forKey: Self.autoCheckDefaultsKey)
             rescheduleBackgroundChecks()
         }
     }
+    @Published var autoInstallOnQuit: Bool {
+        didSet {
+            defaults.set(autoInstallOnQuit, forKey: Self.autoInstallOnQuitDefaultsKey)
+            if autoInstallOnQuit, case .available(let release) = state, Self.canSelfUpdate() {
+                stageUpdateInBackground(release)
+            }
+        }
+    }
+
+    /// Invoked once per newly discovered build when a background update check finds an update.
+    var onPromptForUpdate: ((UpdateRelease) -> Void)?
 
     private let defaults: UserDefaults
     private let manifestURLString: String
     private let publicKeyBase64: String
     private var initialTimer: Timer?
     private var periodicTimer: Timer?
+    private var hasSpawnedSwapScript = false
 
     init(
         defaults: UserDefaults = .standard,
@@ -196,6 +222,11 @@ final class AppUpdater: ObservableObject {
         } else {
             self.autoCheckEnabled = defaults.bool(forKey: Self.autoCheckDefaultsKey)
         }
+        if defaults.object(forKey: Self.autoInstallOnQuitDefaultsKey) == nil {
+            self.autoInstallOnQuit = true
+        } else {
+            self.autoInstallOnQuit = defaults.bool(forKey: Self.autoInstallOnQuitDefaultsKey)
+        }
 
         Self.cleanupStaleArtifacts()
         if startBackgroundChecks {
@@ -206,6 +237,18 @@ final class AppUpdater: ObservableObject {
     deinit {
         initialTimer?.invalidate()
         periodicTimer?.invalidate()
+    }
+
+    var shouldShowBanner: Bool {
+        guard let release = state.availableRelease else { return false }
+        if case .installing = state { return false }
+        return bannerDismissedBuild != release.buildNumber
+    }
+
+    func dismissBanner() {
+        if let release = state.availableRelease {
+            bannerDismissedBuild = release.buildNumber
+        }
     }
 
     func checkForUpdates(manual: Bool) {
@@ -253,7 +296,18 @@ final class AppUpdater: ObservableObject {
                     if !manual && skippedBuild == release.buildNumber {
                         return
                     }
+                    if case .readyToInstall(let staged, let stagedURL) = self.state,
+                       staged.buildNumber == release.buildNumber,
+                       staged.commitSHA == release.commitSHA,
+                       FileManager.default.fileExists(atPath: stagedURL.path) {
+                        return
+                    }
                     self.state = .available(release)
+                    if !manual && self.autoInstallOnQuit && Self.canSelfUpdate() {
+                        self.stageUpdateInBackground(release)
+                    } else if !manual {
+                        self.notifyOnceIfNeeded(for: release)
+                    }
                 case .failure(let error):
                     if manual {
                         self.state = .error(error.localizedDescription)
@@ -265,7 +319,46 @@ final class AppUpdater: ObservableObject {
 
     func skipRelease(_ release: UpdateRelease) {
         defaults.set(release.buildNumber, forKey: Self.skippedBuildDefaultsKey)
+        if case .readyToInstall(_, let stagedApp) = state {
+            try? FileManager.default.removeItem(at: stagedApp.deletingLastPathComponent().deletingLastPathComponent())
+        }
         state = .idle
+    }
+
+    /// Downloads, verifies, and extracts a release in the background so it is ready to install on quit or instant restart.
+    private func stageUpdateInBackground(_ release: UpdateRelease) {
+        guard !state.isBusy else { return }
+        state = .downloading(release, nil)
+        let cacheRoot = Self.updatesCacheDirectory()
+
+        Task.detached(priority: .utility) { [weak self] in
+            do {
+                let stagedApp = try await Self.downloadAndStage(release: release, cacheRoot: cacheRoot) { fraction in
+                    Task { @MainActor [weak self] in
+                        self?.state = .downloading(release, fraction)
+                    }
+                }
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.state = .readyToInstall(release, stagedApp)
+                    self.notifyOnceIfNeeded(for: release)
+                }
+            } catch {
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    // Fall back quietly to `.available` so background failures never alarm the user.
+                    self.state = .available(release)
+                    self.notifyOnceIfNeeded(for: release)
+                }
+            }
+        }
+    }
+
+    private func notifyOnceIfNeeded(for release: UpdateRelease) {
+        let lastPrompted = defaults.integer(forKey: Self.lastPromptedBuildDefaultsKey)
+        guard release.buildNumber > lastPrompted else { return }
+        defaults.set(release.buildNumber, forKey: Self.lastPromptedBuildDefaultsKey)
+        onPromptForUpdate?(release)
     }
 
     func installUpdate(
@@ -275,78 +368,55 @@ final class AppUpdater: ObservableObject {
         terminate: @escaping @MainActor () -> Void
     ) {
         guard !state.isBusy else { return }
-        guard bundleURL.pathExtension == "app" else {
-            state = .error(AppUpdaterError.notAppBundle(bundleURL).localizedDescription)
+        do {
+            try Self.ensureWritableBundle(bundleURL)
+        } catch {
+            state = .error(error.localizedDescription)
             return
         }
-        let parentDir = bundleURL.deletingLastPathComponent()
-        guard FileManager.default.isWritableFile(atPath: parentDir.path) else {
-            state = .error(AppUpdaterError.directoryNotWritable(parentDir).localizedDescription)
+
+        // Fast path: already downloaded, verified, and staged in background.
+        if case .readyToInstall(let stagedRelease, let stagedApp) = state,
+           stagedRelease.buildNumber == release.buildNumber,
+           stagedRelease.commitSHA == release.commitSHA,
+           FileManager.default.fileExists(atPath: stagedApp.path) {
+            state = .installing(release)
+            do {
+                try launchSwap(
+                    stagedApp: stagedApp,
+                    bundleURL: bundleURL,
+                    launchUpdated: true,
+                    beforeExit: beforeExit,
+                    terminate: terminate
+                )
+            } catch {
+                state = .error(error.localizedDescription)
+            }
             return
         }
 
         state = .downloading(release, nil)
         let cacheRoot = Self.updatesCacheDirectory()
-        let pid = ProcessInfo.processInfo.processIdentifier
 
         Task.detached(priority: .userInitiated) { [weak self] in
             do {
-                let stageDir = cacheRoot.appendingPathComponent(
-                    "\(release.shortSHA)-\(UUID().uuidString.prefix(8))",
-                    isDirectory: true
-                )
-                try FileManager.default.createDirectory(at: stageDir, withIntermediateDirectories: true)
-                let archiveURL = stageDir.appendingPathComponent("Reader.zip")
-                guard let downloadURL = URL(string: release.artifact.url) else {
-                    throw UpdatePolicyError.invalidArtifactURL(release.artifact.url)
-                }
-
-                var request = URLRequest(url: downloadURL)
-                request.cachePolicy = .reloadIgnoringLocalCacheData
-                request.setValue("Reader/\(release.version)", forHTTPHeaderField: "User-Agent")
-
-                let delegate = DownloadDelegate(destination: archiveURL) { fraction in
+                let stagedApp = try await Self.downloadAndStage(release: release, cacheRoot: cacheRoot) { fraction in
                     Task { @MainActor [weak self] in
                         self?.state = .downloading(release, fraction)
                     }
                 }
-                _ = try await delegate.start(request: request)
-
-                await MainActor.run { [weak self] in
-                    self?.state = .installing(release)
-                }
-
-                let actualSHA = try Self.sha256Hex(ofFileAt: archiveURL)
-                guard actualSHA == release.artifact.sha256.lowercased() else {
-                    throw AppUpdaterError.checksumMismatch(expected: release.artifact.sha256, actual: actualSHA)
-                }
-
-                let extractDir = stageDir.appendingPathComponent("extracted", isDirectory: true)
-                try FileManager.default.createDirectory(at: extractDir, withIntermediateDirectories: true)
-                try Self.extractZip(archiveURL, to: extractDir)
-
-                let stagedApp = extractDir.appendingPathComponent("Reader.app", isDirectory: true)
-                Self.clearQuarantine(at: stagedApp)
-                try Self.validateAppBundle(at: stagedApp, expectedBundleID: Self.expectedBundleID)
-
-                let backupApp = parentDir.appendingPathComponent(".\(bundleURL.lastPathComponent).backup")
-                let scriptURL = stageDir.appendingPathComponent("swap-and-relaunch.sh")
-                let script = UpdateSwapScript.build(
-                    parentPid: pid,
-                    targetAppPath: bundleURL.path,
-                    stagedAppPath: stagedApp.path,
-                    backupAppPath: backupApp.path,
-                    launchUpdated: true
-                )
-                try script.write(to: scriptURL, atomically: true, encoding: .utf8)
-                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
 
                 await MainActor.run { [weak self] in
                     guard let self else { return }
-                    beforeExit()
+                    self.state = .installing(release)
                     do {
-                        try Self.spawnDetachedScript(scriptURL)
-                        terminate()
+                        try self.launchSwap(
+                            stagedApp: stagedApp,
+                            bundleURL: bundleURL,
+                            launchUpdated: true,
+                            beforeExit: beforeExit,
+                            terminate: terminate
+                        )
                     } catch {
                         self.state = .error(error.localizedDescription)
                     }
@@ -357,6 +427,61 @@ final class AppUpdater: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Called from `NSApplicationDelegate.applicationWillTerminate(_:)` to silently swap a staged update on quit.
+    func applyStagedUpdateOnQuitIfNeeded(bundleURL: URL = Bundle.main.bundleURL) {
+        guard !hasSpawnedSwapScript, autoInstallOnQuit else { return }
+        guard case .readyToInstall(_, let stagedApp) = state else { return }
+        guard FileManager.default.fileExists(atPath: stagedApp.path) else { return }
+        guard (try? Self.ensureWritableBundle(bundleURL)) != nil else { return }
+
+        do {
+            let parentDir = bundleURL.deletingLastPathComponent()
+            let backupApp = parentDir.appendingPathComponent(".\(bundleURL.lastPathComponent).backup")
+            let stageDir = stagedApp.deletingLastPathComponent().deletingLastPathComponent()
+            let scriptURL = stageDir.appendingPathComponent("swap-on-quit.sh")
+            let script = UpdateSwapScript.build(
+                parentPid: ProcessInfo.processInfo.processIdentifier,
+                targetAppPath: bundleURL.path,
+                stagedAppPath: stagedApp.path,
+                backupAppPath: backupApp.path,
+                launchUpdated: false
+            )
+            try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+            hasSpawnedSwapScript = true
+            try Self.spawnDetachedScript(scriptURL)
+        } catch {
+            // Never block or crash app termination if silent swap fails.
+        }
+    }
+
+    private func launchSwap(
+        stagedApp: URL,
+        bundleURL: URL,
+        launchUpdated: Bool,
+        beforeExit: @escaping @MainActor () -> Void,
+        terminate: @escaping @MainActor () -> Void
+    ) throws {
+        let parentDir = bundleURL.deletingLastPathComponent()
+        let backupApp = parentDir.appendingPathComponent(".\(bundleURL.lastPathComponent).backup")
+        let stageDir = stagedApp.deletingLastPathComponent().deletingLastPathComponent()
+        let scriptURL = stageDir.appendingPathComponent("swap-and-relaunch.sh")
+        let script = UpdateSwapScript.build(
+            parentPid: ProcessInfo.processInfo.processIdentifier,
+            targetAppPath: bundleURL.path,
+            stagedAppPath: stagedApp.path,
+            backupAppPath: backupApp.path,
+            launchUpdated: launchUpdated
+        )
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+
+        beforeExit()
+        hasSpawnedSwapScript = true
+        try Self.spawnDetachedScript(scriptURL)
+        terminate()
     }
 
     private func rescheduleBackgroundChecks() {
@@ -381,6 +506,58 @@ final class AppUpdater: ObservableObject {
         }
         RunLoop.main.add(periodic, forMode: .common)
         periodicTimer = periodic
+    }
+
+    nonisolated static func canSelfUpdate(bundleURL: URL = Bundle.main.bundleURL) -> Bool {
+        (try? ensureWritableBundle(bundleURL)) != nil
+    }
+
+    nonisolated static func ensureWritableBundle(_ bundleURL: URL) throws {
+        guard bundleURL.pathExtension == "app" else {
+            throw AppUpdaterError.notAppBundle(bundleURL)
+        }
+        let parentDir = bundleURL.deletingLastPathComponent()
+        guard FileManager.default.isWritableFile(atPath: parentDir.path) else {
+            throw AppUpdaterError.directoryNotWritable(parentDir)
+        }
+    }
+
+    private nonisolated static func downloadAndStage(
+        release: UpdateRelease,
+        cacheRoot: URL,
+        onProgress: @escaping @Sendable (Double?) -> Void
+    ) async throws -> URL {
+        let stageDir = cacheRoot.appendingPathComponent(
+            "\(release.shortSHA)-\(UUID().uuidString.prefix(8))",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: stageDir, withIntermediateDirectories: true)
+        let archiveURL = stageDir.appendingPathComponent("Reader.zip")
+        guard let downloadURL = URL(string: release.artifact.url) else {
+            throw UpdatePolicyError.invalidArtifactURL(release.artifact.url)
+        }
+
+        var request = URLRequest(url: downloadURL)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("Reader/\(release.version)", forHTTPHeaderField: "User-Agent")
+
+        let delegate = DownloadDelegate(destination: archiveURL, onProgress: onProgress)
+        _ = try await delegate.start(request: request)
+
+        let actualSHA = try sha256Hex(ofFileAt: archiveURL)
+        guard actualSHA == release.artifact.sha256.lowercased() else {
+            throw AppUpdaterError.checksumMismatch(expected: release.artifact.sha256, actual: actualSHA)
+        }
+
+        let extractDir = stageDir.appendingPathComponent("extracted", isDirectory: true)
+        try FileManager.default.createDirectory(at: extractDir, withIntermediateDirectories: true)
+        try extractZip(archiveURL, to: extractDir)
+
+        let stagedApp = extractDir.appendingPathComponent("Reader.app", isDirectory: true)
+        clearQuarantine(at: stagedApp)
+        try validateAppBundle(at: stagedApp, expectedBundleID: expectedBundleID)
+        try? FileManager.default.removeItem(at: archiveURL)
+        return stagedApp
     }
 
     nonisolated static func fetchData(from urlString: String) async throws -> Data {
