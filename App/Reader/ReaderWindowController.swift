@@ -64,6 +64,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     /// The selection playback last started from, so a new one jumps instead of closing.
     private var ttsStartSelection: String?
     private var appearanceObservation: NSKeyValueObservation?
+    /// This book's vault settings, shown as a sheet from Tools and the toolbar's vault menu.
+    private var vaultSettingsSheet: NSWindow?
 
     init(session: ReaderSession) {
         let pane = Self.makePane(session: session, document: nil, publishes: true)
@@ -1360,14 +1362,6 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             }
             self.revealObsidian(id: id)
         }
-        let previousRevealVocab = session.onRevealVocabularyInObsidian
-        session.onRevealVocabularyInObsidian = { [weak self] in
-            guard let self, self.session === session else {
-                previousRevealVocab?()
-                return
-            }
-            self.revealVocabularyInObsidian()
-        }
         let previousDismiss = session.onDismissNoteEditors
         session.onDismissNoteEditors = { [weak self] tokens in
             previousDismiss?(tokens)
@@ -1604,6 +1598,24 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         }
     }
 
+    @objc func revealVocabulary(_ sender: Any?) {
+        revealVocabularyInObsidian()
+    }
+
+    @objc func showVaultSettings(_ sender: Any?) {
+        guard session.usesVault, let window, vaultSettingsSheet == nil else { return }
+        let host = NSHostingController(rootView: VaultBookSettingsForm(session: session) { [weak self] in
+            guard let self, let sheet = self.vaultSettingsSheet else { return }
+            self.window?.endSheet(sheet)
+        })
+        host.sizingOptions = .preferredContentSize
+        let sheet = NSWindow(contentViewController: host)
+        vaultSettingsSheet = sheet
+        window.beginSheet(sheet) { [weak self] _ in
+            self?.vaultSettingsSheet = nil
+        }
+    }
+
     func revealVocabularyInObsidian() {
         guard session.usesVault, let vault = session.vaultName, let root = session.vaultRoot, let folder = session.bookFolder else { return }
         if session.vaultEnabled {
@@ -1656,7 +1668,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         case #selector(toggleReadAloud(_:)): menuItem.state = isTTSPresented ? .on : .off
         case #selector(delete(_:)):
             return !session.annotationSelection.isEmpty || !session.wordSelection.isEmpty || !session.markSelection.isEmpty
-        case #selector(revealInObsidian(_:)), #selector(openVaultFolder(_:)), #selector(pauseVault(_:)):
+        case #selector(revealInObsidian(_:)), #selector(revealVocabulary(_:)), #selector(openVaultFolder(_:)), #selector(pauseVault(_:)), #selector(showVaultSettings(_:)):
             if menuItem.action == #selector(pauseVault(_:)) {
                 menuItem.title = session.vaultEnabled ? "Pause Saving to Vault" : "Resume Saving to Vault"
             }
@@ -1743,10 +1755,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     private func vaultMenu() -> NSMenu {
         let menu = NSMenu()
         menu.addItem(withTitle: "Reveal Chapter", action: #selector(revealInObsidian(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Reveal Vocabulary", action: #selector(revealVocabulary(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Open Vault Folder", action: #selector(openVaultFolder(_:)), keyEquivalent: "")
         menu.addItem(withTitle: session.vaultEnabled ? "Pause Saving" : "Resume Saving", action: #selector(pauseVault(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: "Vault Settings", action: #selector(AppDelegate.showSettings(_:)), keyEquivalent: "")
-        for item in menu.items where item.action != #selector(AppDelegate.showSettings(_:)) {
+        menu.addItem(withTitle: "Vault Settings…", action: #selector(showVaultSettings(_:)), keyEquivalent: "")
+        for item in menu.items {
             item.target = self
         }
         return menu

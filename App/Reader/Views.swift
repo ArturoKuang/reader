@@ -916,18 +916,6 @@ struct WordList: View {
     @State private var hoveredWordID: String?
     @State private var expandedWords: Set<String> = []
 
-    private var vocabularyCaption: String {
-        guard session.vaultEnabled, let root = session.vaultRoot, let folder = session.bookFolder else {
-            return "Obsidian vault found · Not saving here"
-        }
-        let settings = VaultBookSettings(
-            notesFolder: session.vaultNotesFolder,
-            vocabularyFile: session.vaultVocabularyFile.isEmpty ? nil : session.vaultVocabularyFile
-        )
-        let absolute = VaultPaths.vocabularyFile(bookFolder: folder, settings: settings, fs: LocalFileSystem())
-        return ObsidianLink.displayPath(vaultRoot: root, absolute: absolute)
-    }
-
     var body: some View {
         let rows = ordered
         VStack(alignment: .leading, spacing: 8) {
@@ -1058,28 +1046,6 @@ struct WordList: View {
                     return .ignored
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-            if session.usesVault {
-                HStack {
-                    if session.vaultEnabled {
-                        Button(vocabularyCaption) { session.onRevealVocabularyInObsidian?() }
-                            .buttonStyle(.borderless)
-                            .font(.caption)
-                            .lineLimit(1)
-                            .help("Open \(vocabularyCaption) in Obsidian")
-                        Spacer()
-                        Button("Reveal") { session.onRevealVocabularyInObsidian?() }
-                            .buttonStyle(.borderless)
-                            .help("Open vocabulary file in Obsidian")
-                    } else {
-                        Text(vocabularyCaption)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                }
-                .padding(.horizontal, 12)
-                .padding(.bottom, 8)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

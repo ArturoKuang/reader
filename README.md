@@ -139,7 +139,8 @@ If the book lives inside an Obsidian vault (a parent folder contains `.obsidian`
 - Words go to `learner/vocabulary.md` when that file exists, otherwise `words.md`. The heading is `# Vocabulary — <title>`, then `## Chapter N` and `### Word` with Meaning, Book context, and Added. In plain language and Example are omitted when empty. Hand-written entries are shown in the Words tab and are not rewritten.
 - Marks and view state live in hidden `.reader-state.json` (notes folder, vocab path, Claude session id, concept-marker toggle).
 - Reader watches the book folder and reloads external edits after about a quarter second. Its own writes are ignored. If the same Reader block changed on both sides, both copies are kept and flagged.
-- `reader://open?path=&loc=&id=` opens the book and can scroll to the passage. Tools → Reveal in Obsidian opens `obsidian://open`.
+- `reader://open?path=&loc=&id=` opens the book and can scroll to the passage. Tools → Reveal in Obsidian opens `obsidian://open`; Tools → Reveal Vocabulary in Obsidian opens the vocabulary file.
+- Tools → Vault Settings… (also in the toolbar's vault menu) turns saving into the vault on or off for this book and sets its notes folder and vocabulary file. Settings → Vault lists every vault book.
 - `curriculum/concepts.md` supplies `[[wikilinks]]`, find-terms, and Claim/Trap. Missing concept stubs can be created under `concepts/` and are never overwritten. View → Concept Markers underlines those terms; badge color comes from `learner/mastery.json` and is grey when a concept is absent.
 - If `CLAUDE.md` is in the book folder, Ask AI can run Claude Code with that folder as the working directory, `--resume` / `--continue` (not a one-shot ephemeral session), and write access limited to `learner/`, `learning/`, and `reviews/`. Learn, Review, and Wrap send `/learn`, `/review`, and `/wrap`. Reader appends a `reader_passage_question` line to `learning/events.jsonl` without the passage text.
 
