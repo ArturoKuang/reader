@@ -4,7 +4,7 @@ from referencing import Registry, Resource
 from openapi_spec_validator import validate
 from openapi_spec_validator.readers import read_from_filename
 
-SPEC = sys.argv[1] if len(sys.argv) > 1 else "/workspace/reader-sync/spec"
+SPEC = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "spec")
 schemas = {}
 for p in sorted(glob.glob(f"{SPEC}/schemas/*.schema.json")):
     s = json.load(open(p)); Draft202012Validator.check_schema(s); schemas[os.path.basename(p)] = s
