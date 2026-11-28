@@ -5,8 +5,7 @@ import SwiftUI
 struct AnnotationBrowser: View {
     @ObservedObject var session: ReaderSession
     var onJump: (Annotation) -> Void
-    @State private var editing: String?
-    @State private var drafts: [String: String] = [:]
+    @State private var editing: InlineEdit?
     @State private var vaultSettings = false
     @State private var suppressJump = false
     @State private var conceptCache = ConceptLabelCache()
@@ -42,7 +41,7 @@ struct AnnotationBrowser: View {
             if session.annotationSelection.count > 1 {
                 selectionStrip
             }
-            if session.visibleAnnotations.isEmpty {
+            if listed.isEmpty {
                 Group {
                     if session.annotationQuery.isEmpty && session.annotationFilter == "all" {
                         VStack(spacing: 8) {
@@ -65,7 +64,7 @@ struct AnnotationBrowser: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List(selection: $session.annotationSelection) {
-                    ForEach(AnnotationIndex.grouped(session.visibleAnnotations)) { group in
+                    ForEach(AnnotationIndex.grouped(listed)) { group in
                         Section(group.title) {
                             ForEach(group.items) { item in
                                 row(item)
@@ -75,6 +74,7 @@ struct AnnotationBrowser: View {
                     }
                 }
                 .onChange(of: session.annotationSelection) { _, ids in
+                    if let editing = activeEdit, !ids.contains(editing.itemID) { finishEditing(editing.token) }
                     guard !suppressJump, ids.count == 1, let id = ids.first, let item = session.visibleAnnotations.first(where: { $0.id == id }) else { return }
                     if NSEvent.modifierFlags.contains(.option) {
                         ReaderWindowController.controller(for: session)?.openInPane(item)
@@ -87,9 +87,8 @@ struct AnnotationBrowser: View {
                     return [NSItemProvider(object: session.annotationMarkdown(chosen) as NSString)]
                 }
                 .onExitCommand {
-                    if let editing {
-                        self.editing = nil
-                        session.endNoteEdit(id: editing)
+                    if let editing = activeEdit {
+                        finishEditing(editing.token)
                     } else {
                         session.annotationSelection = []
                     }
@@ -101,8 +100,13 @@ struct AnnotationBrowser: View {
                     if NSEvent.modifierFlags.contains(.option) { return }
                     beginEditing(item)
                 })
-                .onDeleteCommand { session.deleteSelectedAnnotations() }
+                .onDeleteCommand {
+                    guard activeEdit == nil else { return }
+                    session.deleteSelectedAnnotations()
+                }
                 .onKeyPress(phases: .down) { press in
+                    // While a note is being typed, every key belongs to the text editor.
+                    guard activeEdit == nil else { return .ignored }
                     if press.key == KeyEquivalent("a"), press.modifiers.contains(.command), !press.modifiers.contains(.shift) {
                         session.annotationSelection = Set(session.visibleAnnotations.map(\.id))
                         return .handled
@@ -125,6 +129,25 @@ struct AnnotationBrowser: View {
             }
             DispatchQueue.main.async { suppressJump = false }
         }
+        .onDisappear {
+            if let editing { finishEditing(editing.token) }
+        }
+    }
+
+    /// The row being typed in, unless another editor or an outside change has taken its note.
+    private var activeEdit: InlineEdit? {
+        guard let editing, session.isNoteEditActive(editing.token) else { return nil }
+        return editing
+    }
+
+    /// While a row is edited the list keeps its order and keeps that row, whatever the sort and filter say.
+    private var listed: [Annotation] {
+        var items = session.visibleAnnotations
+        guard let editing = activeEdit else { return items }
+        if !items.contains(where: { $0.id == editing.itemID }), let item = session.annotation(matching: editing.itemID) {
+            items.append(item)
+        }
+        return AnnotationIndex.holding(items, order: editing.order)
     }
 
     private var filterTitle: String {
@@ -141,17 +164,13 @@ struct AnnotationBrowser: View {
                 .frame(width: 3)
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.quote).font(.callout).foregroundStyle(.secondary).lineLimit(3)
-                if isEditing(item) {
-                    let key = noteKey(item)
-                    NoteDraftEditor(initial: drafts[key] ?? item.body) { text in
-                        drafts[key] = text
-                        session.queueNoteBody(id: key, body: text)
+                if let editing = activeEdit, editing.itemID == item.id {
+                    NoteDraftEditor(initial: item.body) { text in
+                        session.queueNoteBody(editing.token, body: text)
                     } finish: {
-                        drafts[key] = nil
-                        editing = nil
-                        session.endNoteEdit(id: key)
+                        finishEditing(editing.token)
                     }
-                    .id(key)
+                    .id(editing.token)
                 } else if !item.body.isEmpty {
                     Text(item.body).font(.body)
                 }
@@ -173,19 +192,17 @@ struct AnnotationBrowser: View {
         .contentShape(Rectangle())
     }
 
-    private func noteKey(_ item: Annotation) -> String {
-        item.note?.id ?? item.highlight?.noteID ?? item.id
-    }
-
-    private func isEditing(_ item: Annotation) -> Bool {
-        guard let editing else { return false }
-        return editing == item.id || editing == item.note?.id || editing == item.highlight?.noteID
-    }
-
     private func beginEditing(_ item: Annotation) {
-        let key = noteKey(item)
-        editing = key
-        session.beginNoteEdit(id: key)
+        if activeEdit?.itemID == item.id { return }
+        let order = listed.map(\.id)
+        if let editing { finishEditing(editing.token) }
+        guard let token = session.beginNoteEdit(id: item.id) else { return }
+        editing = InlineEdit(itemID: item.id, token: token, order: order)
+    }
+
+    private func finishEditing(_ token: NoteEditToken) {
+        if editing?.token == token { editing = nil }
+        session.endNoteEdit(token)
     }
 
     @ViewBuilder private func selectionMenu(_ ids: Set<String>) -> some View {
@@ -309,41 +326,49 @@ struct AnnotationBrowser: View {
     }
 }
 
+private struct InlineEdit {
+    var itemID: String
+    var token: NoteEditToken
+    var order: [String]
+}
+
 /// The note text lives here, not in the list row, so a later save cannot rebuild the field and drop the caret.
+/// Only the user's own changes are sent on, so a stale field never overwrites a newer note.
 private struct NoteDraftEditor: View {
-    var initial: String
-    var commit: (String) -> Void
+    var change: (String) -> Void
     var finish: () -> Void
-    @State private var draft = ""
-    @State private var loaded = false
-    @State private var closed = false
+    @State private var draft: String
+    @State private var sent: String
     @FocusState private var focused: Bool
+
+    init(initial: String, change: @escaping (String) -> Void, finish: @escaping () -> Void) {
+        self.change = change
+        self.finish = finish
+        _draft = State(initialValue: initial)
+        _sent = State(initialValue: initial)
+    }
 
     var body: some View {
         TextEditor(text: $draft)
             .font(.body)
             .frame(minHeight: 64)
             .focused($focused)
-            .onAppear {
-                guard !loaded else { return }
-                loaded = true
-                draft = initial
-                DispatchQueue.main.async { focused = true }
-            }
-            .onChange(of: draft) { _, text in
-                guard loaded, text != initial else { return }
-                commit(text)
-            }
+            .onAppear { DispatchQueue.main.async { focused = true } }
+            .onChange(of: draft) { _, text in send(text) }
             .onChange(of: focused) { wasFocused, isFocused in
                 if wasFocused && !isFocused { close() }
             }
             .onExitCommand { close() }
     }
 
+    private func send(_ text: String) {
+        guard text != sent else { return }
+        sent = text
+        change(text)
+    }
+
     private func close() {
-        guard !closed else { return }
-        closed = true
-        commit(draft)
+        send(draft)
         finish()
     }
 }

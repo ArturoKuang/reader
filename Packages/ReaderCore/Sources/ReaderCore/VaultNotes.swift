@@ -107,6 +107,8 @@ public enum VaultNoteFile {
         var prose: [String] = []
         var link = ReaderLink(path: "", id: id)
         var inQuote = false
+        // The quote is the first block; a later `>` line belongs to the note.
+        var quoteEnded = false
         for line in body.components(separatedBy: "\n") {
             if line.hasPrefix("> [!quote]") {
                 let name = line.dropFirst("> [!quote]".count).trimmingCharacters(in: .whitespaces)
@@ -114,7 +116,7 @@ public enum VaultNoteFile {
                 inQuote = true
                 continue
             }
-            if line.hasPrefix(">") {
+            if line.hasPrefix(">"), !quoteEnded {
                 var text = String(line.dropFirst())
                 if text.hasPrefix(" ") { text.removeFirst() }
                 quoteLines.append(text)
@@ -130,8 +132,10 @@ public enum VaultNoteFile {
             if line.hasPrefix("^") { continue }
             if line.isEmpty && inQuote {
                 inQuote = false
+                quoteEnded = true
                 continue
             }
+            quoteEnded = quoteEnded || !line.isEmpty
             prose.append(line)
         }
         while prose.last?.isEmpty == true { prose.removeLast() }

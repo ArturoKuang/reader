@@ -522,6 +522,10 @@ public struct AISettings: Codable, Equatable, Sendable {
     public var suggestedNotes: Bool
     /// The small bar above a text selection. Preview-style reading can turn it off.
     public var showSelectionBar: Bool
+    /// Read-aloud speed; 1.0 is the normal speaking rate.
+    public var ttsRateMultiplier: Double
+    /// nil uses the system voice.
+    public var ttsVoiceIdentifier: String?
 
     public init(
         defaultProvider: ProviderID = .openai,
@@ -534,7 +538,9 @@ public struct AISettings: Codable, Equatable, Sendable {
         lookupUsesDefault: Bool = true,
         lookupProvider: ProviderID = .openai,
         suggestedNotes: Bool = false,
-        showSelectionBar: Bool = true
+        showSelectionBar: Bool = true,
+        ttsRateMultiplier: Double = 1.0,
+        ttsVoiceIdentifier: String? = nil
     ) {
         self.defaultProvider = defaultProvider
         self.openAIModel = openAIModel
@@ -547,11 +553,14 @@ public struct AISettings: Codable, Equatable, Sendable {
         self.lookupProvider = lookupProvider
         self.suggestedNotes = suggestedNotes
         self.showSelectionBar = showSelectionBar
+        self.ttsRateMultiplier = ttsRateMultiplier
+        self.ttsVoiceIdentifier = ttsVoiceIdentifier
     }
 
     private enum CodingKeys: String, CodingKey {
         case defaultProvider, openAIModel, anthropicModel, openAIContextTokens, anthropicContextTokens
         case claudeCLIPath, codexCLIPath, lookupUsesDefault, lookupProvider, suggestedNotes, showSelectionBar
+        case ttsRateMultiplier, ttsVoiceIdentifier
     }
 
     public init(from decoder: Decoder) throws {
@@ -567,6 +576,8 @@ public struct AISettings: Codable, Equatable, Sendable {
         lookupProvider = try container.decodeIfPresent(ProviderID.self, forKey: .lookupProvider) ?? .openai
         suggestedNotes = try container.decodeIfPresent(Bool.self, forKey: .suggestedNotes) ?? false
         showSelectionBar = try container.decodeIfPresent(Bool.self, forKey: .showSelectionBar) ?? true
+        ttsRateMultiplier = try container.decodeIfPresent(Double.self, forKey: .ttsRateMultiplier) ?? 1.0
+        ttsVoiceIdentifier = try container.decodeIfPresent(String.self, forKey: .ttsVoiceIdentifier)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -582,6 +593,8 @@ public struct AISettings: Codable, Equatable, Sendable {
         try container.encode(lookupProvider, forKey: .lookupProvider)
         try container.encode(suggestedNotes, forKey: .suggestedNotes)
         try container.encode(showSelectionBar, forKey: .showSelectionBar)
+        try container.encode(ttsRateMultiplier, forKey: .ttsRateMultiplier)
+        try container.encodeIfPresent(ttsVoiceIdentifier, forKey: .ttsVoiceIdentifier)
     }
 
     public static let `default` = AISettings()

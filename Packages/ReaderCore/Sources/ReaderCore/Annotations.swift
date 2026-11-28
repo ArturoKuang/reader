@@ -88,7 +88,7 @@ public enum PassageIdentity {
 
 public enum AnnotationIndex {
     public static func items(highlights: [HighlightEntry], notes: [NoteEntry]) -> [Annotation] {
-        var notesByID = Dictionary(uniqueKeysWithValues: notes.map { ($0.id, $0) })
+        let notesByID = Dictionary(notes.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var usedNotes = Set<String>()
         var joined: [Annotation] = []
         for highlight in highlights {
@@ -170,21 +170,72 @@ public enum AnnotationIndex {
         return best
     }
 
-    /// The highlight already covering this exact passage, if any.
-    public static func highlight(matchingQuote quote: String, page: Int?, cfi: String?, in highlights: [HighlightEntry]) -> HighlightEntry? {
-        highlights.first { $0.quote == quote && $0.page == page && $0.cfi == cfi }
+    /// The annotation an id refers to: a highlight id, a standalone note id, or a linked note id.
+    public static func resolve(id: String, highlights: [HighlightEntry], notes: [NoteEntry]) -> Annotation? {
+        let all = items(highlights: highlights, notes: notes)
+        return all.first { $0.id == id } ?? all.first { $0.note?.id == id || $0.highlight?.noteID == id }
+    }
+
+    public static func resolve(id: String, in package: SidecarPackage) -> Annotation? {
+        resolve(id: id, highlights: package.highlights.highlights, notes: package.notes.notes)
+    }
+
+    /// `items` in the order of `ids`, so rows hold still while one of them is edited.
+    /// Items `ids` does not name follow in their own order.
+    public static func holding(_ items: [Annotation], order ids: [String]) -> [Annotation] {
+        let rank = Dictionary(ids.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
+        return items.enumerated().sorted { lhs, rhs in
+            (rank[lhs.element.id] ?? ids.count, lhs.offset) < (rank[rhs.element.id] ?? ids.count, rhs.offset)
+        }.map(\.element)
+    }
+
+    /// The highlight already covering this exact passage, if any. A quote can repeat on a page or in a
+    /// section, so line rects, and failing those the surrounding text, tell the occurrences apart.
+    /// Whatever either side lacks is not compared.
+    public static func highlight(matchingQuote quote: String, page: Int?, cfi: String?, rects: [[Double]] = [], prefix: String = "", suffix: String = "", in highlights: [HighlightEntry]) -> HighlightEntry? {
+        highlights.first { entry in
+            guard PassageIdentity.same(quote: entry.quote, page: entry.page, cfi: entry.cfi, otherQuote: quote, otherPage: page, otherCFI: cfi) else { return false }
+            if !rects.isEmpty, !entry.rects.isEmpty { return overlap(rects, entry.rects) }
+            // Markdown offsets already name one occurrence.
+            if cfi.flatMap({ MarkdownAnchor(value: $0) })?.startOffset != nil { return true }
+            return sameContext(entry.prefix, prefix, fromEnd: true) && sameContext(entry.suffix, suffix, fromEnd: false)
+        }
+    }
+
+    /// Rects are `[minX, minY, maxX, maxY]`. Neighboring lines may touch, so a sliver does not count.
+    private static func overlap(_ lhs: [[Double]], _ rhs: [[Double]]) -> Bool {
+        lhs.contains { a in
+            rhs.contains { b in
+                guard a.count >= 4, b.count >= 4 else { return false }
+                let width = min(a[2], b[2]) - max(a[0], b[0])
+                let height = min(a[3], b[3]) - max(a[1], b[1])
+                guard width > 0, height > 0 else { return false }
+                let smaller = min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1]))
+                return width * height > smaller * 0.25
+            }
+        }
+    }
+
+    /// Stored context can be longer than a fresh selection's, so the nearer text must agree.
+    private static func sameContext(_ lhs: String, _ rhs: String, fromEnd: Bool) -> Bool {
+        let a = lhs.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        let b = rhs.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        if a.isEmpty || b.isEmpty { return true }
+        return fromEnd ? a.hasSuffix(b) || b.hasSuffix(a) : a.hasPrefix(b) || b.hasPrefix(a)
     }
 
     private static func fold(_ text: String) -> String {
         text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
     }
 
-    /// Page, then top-of-page first (PDF y grows upward), then x. EPUB uses spine index and CFI offset.
+    /// Page, then top-of-page first (PDF y grows upward), then x. EPUB uses spine index and CFI offset;
+    /// Markdown uses section index and text offset.
     private static func positionKey(_ item: Annotation) -> (Int, Int, Int, Double, Double) {
         let cfi = item.cfi.flatMap { EPUBCFI(value: $0) }
+        let markdown = item.cfi.flatMap { MarkdownAnchor(value: $0) }
         let page = item.page ?? Int.max
-        let spine = cfi?.spineIndex ?? (item.page == nil ? Int.max : 0)
-        let offset = cfi?.startOffset ?? 0
+        let spine = cfi?.spineIndex ?? markdown?.sectionIndex ?? (item.page == nil ? Int.max : 0)
+        let offset = cfi?.startOffset ?? markdown?.startOffset ?? 0
         let rect = item.rects.first
         let top = rect.flatMap { $0.count > 3 ? $0[3] : nil } ?? 0
         let x = rect?.first ?? 0
@@ -198,7 +249,7 @@ public enum AnnotationEdit {
     @discardableResult
     public static func addHighlight(selection: AnnotationAnchor, color: Int, id: String, package: inout SidecarPackage) -> HighlightEntry? {
         guard HighlightPalette.isValid(color), !selection.text.isEmpty else { return nil }
-        if let existing = AnnotationIndex.highlight(matchingQuote: selection.text, page: selection.page, cfi: selection.cfi, in: package.highlights.highlights) {
+        if let existing = AnnotationIndex.highlight(matchingQuote: selection.text, page: selection.page, cfi: selection.cfi, rects: selection.rects, prefix: selection.prefix, suffix: selection.suffix, in: package.highlights.highlights) {
             return existing
         }
         let entry = HighlightEntry(
@@ -234,7 +285,7 @@ public enum AnnotationEdit {
             package.notes.notes.append(note)
             return Annotation(highlight: nil, note: note)
         }
-        if let existing = AnnotationIndex.highlight(matchingQuote: selection.text, page: selection.page, cfi: selection.cfi, in: package.highlights.highlights) {
+        if let existing = AnnotationIndex.highlight(matchingQuote: selection.text, page: selection.page, cfi: selection.cfi, rects: selection.rects, prefix: selection.prefix, suffix: selection.suffix, in: package.highlights.highlights) {
             // A note attached to a highlight always reuses the highlight's id (spec / Android).
             let linked = existing.noteID ?? existing.id
             addNote(toHighlight: existing.id, noteID: linked, now: now, package: &package)
@@ -302,18 +353,25 @@ public enum AnnotationEdit {
     /// Removes a note that repeats a highlight's passage after the note was saved under the highlight's id.
     public static func dropDuplicateNotes(highlights: inout [HighlightEntry], notes: inout [NoteEntry]) {
         notes.removeAll { note in
+            // With a repeated quote, the first matching passage may belong to another note.
+            if highlights.contains(where: { $0.noteID == note.id }) { return false }
             guard let highlight = highlights.first(where: {
                 PassageIdentity.same(quote: $0.quote, page: $0.page, cfi: $0.cfi, otherQuote: note.quote, otherPage: note.page, otherCFI: note.cfi)
             }) else { return false }
-            if highlight.noteID == note.id { return false }
             return highlight.noteID != nil
         }
+    }
+
+    /// Empty, whitespace, or only a placeholder.
+    public static func isBlankNote(_ body: String) -> Bool {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty || placeholders.contains(trimmed)
     }
 
     public static func updateNoteBody(id: String, body: String, now: String, package: inout SidecarPackage) {
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let index = package.notes.notes.firstIndex(where: { $0.id == id }) else { return }
-        if trimmed.isEmpty || placeholders.contains(trimmed) {
+        if isBlankNote(trimmed) {
             package.notes.notes.remove(at: index)
             for highlightIndex in package.highlights.highlights.indices where package.highlights.highlights[highlightIndex].noteID == id {
                 package.highlights.highlights[highlightIndex].noteID = nil
@@ -341,16 +399,31 @@ public enum AnnotationEdit {
         }
     }
 
+    /// Removes the note behind a highlight or note id. A highlight stays.
+    public static func removeNoteOnly(id: String, package: inout SidecarPackage) {
+        guard let note = AnnotationIndex.resolve(id: id, in: package)?.note else { return }
+        removeNote(id: note.id, package: &package)
+    }
+
+    /// Removes the highlight and note behind either one's id.
+    public static func removeAnnotation(id: String, package: inout SidecarPackage) {
+        remove(ids: [id], package: &package)
+    }
+
     /// Drops every selected annotation. Remaining highlights and notes keep their relative order.
     /// A highlight takes its linked note with it. Passing the previous arrays to `restore` puts the batch back.
     public static func remove(ids: Set<String>, package: inout SidecarPackage) {
         guard !ids.isEmpty else { return }
-        var linkedNotes = Set<String>()
-        for highlight in package.highlights.highlights where ids.contains(highlight.id) {
-            if let noteID = highlight.noteID { linkedNotes.insert(noteID) }
+        var highlightIDs = Set<String>()
+        var noteIDs = ids
+        for id in ids {
+            guard let item = AnnotationIndex.resolve(id: id, in: package) else { continue }
+            if let highlight = item.highlight { highlightIDs.insert(highlight.id) }
+            if let noteID = item.highlight?.noteID { noteIDs.insert(noteID) }
+            if let noteID = item.note?.id { noteIDs.insert(noteID) }
         }
-        package.highlights.highlights.removeAll { ids.contains($0.id) }
-        package.notes.notes.removeAll { ids.contains($0.id) || linkedNotes.contains($0.id) }
+        package.highlights.highlights.removeAll { highlightIDs.contains($0.id) }
+        package.notes.notes.removeAll { noteIDs.contains($0.id) }
     }
 
     public static func restore(highlights: [HighlightEntry], notes: [NoteEntry], package: inout SidecarPackage) {
@@ -360,16 +433,18 @@ public enum AnnotationEdit {
 
     public static func recolor(ids: Set<String>, color: Int, package: inout SidecarPackage) {
         guard HighlightPalette.isValid(color) else { return }
-        for index in package.highlights.highlights.indices where ids.contains(package.highlights.highlights[index].id) {
+        let highlightIDs = Set(ids.compactMap { AnnotationIndex.resolve(id: $0, in: package)?.highlight?.id })
+        for index in package.highlights.highlights.indices where highlightIDs.contains(package.highlights.highlights[index].id) {
             package.highlights.highlights[index].color = color
         }
         package.state.lastHighlightColor = color
     }
 
+    /// `id` may be the highlight's or its note's. A standalone note has no color to change.
     public static func recolor(id: String, color: Int, package: inout SidecarPackage) {
-        guard HighlightPalette.isValid(color), let index = package.highlights.highlights.firstIndex(where: { $0.id == id }) else { return }
-        package.highlights.highlights[index].color = color
-        package.state.lastHighlightColor = color
+        guard HighlightPalette.isValid(color),
+              let highlightID = AnnotationIndex.resolve(id: id, in: package)?.highlight?.id else { return }
+        recolor(ids: [highlightID], color: color, package: &package)
     }
 }
 
@@ -483,7 +558,7 @@ public enum CopyLink {
 public enum VaultAnnotationSync {
     /// One block per highlight, using the highlight's id, with the linked note's body inside it.
     /// A note that has no highlight keeps its own id. `removeIDs` are Reader blocks to drop.
-    public static func render(existing: String, bookPath: String, annotations: [Annotation], removeIDs: Set<String> = []) -> String {
+    public static func render(existing: String, bookPath: String, annotations: [Annotation], removeIDs: Set<String> = [], updatingLocations: Bool = false) -> String {
         var blocks: [VaultNoteBlock] = []
         for item in annotations {
             if let highlight = item.highlight {
@@ -508,11 +583,61 @@ public enum VaultAnnotationSync {
                 ))
             }
         }
-        var text = VaultNoteFile.upsertPreservingLocations(existing, blocks: blocks)
+        var text = updatingLocations
+            ? blocks.reduce(existing) { VaultNoteFile.upsert($0, block: $1) }
+            : VaultNoteFile.upsertPreservingLocations(existing, blocks: blocks)
         for id in removeIDs where !blocks.contains(where: { $0.id == id }) {
             text = OwnedBlocks.remove(text, id: id)
         }
         return text
+    }
+
+    /// Three-way merge of one note file, block by block. `baseline` is the file as Reader last saw it,
+    /// `disk` is the file now, and `annotations` and `removeIDs` are Reader's side. A block changed on
+    /// one side takes that side. When both changed the note text, both texts are kept and the id is returned.
+    /// Blocks are keyed the way `render` writes them, so a linked note never gets a block of its own.
+    public static func merge(baseline: String, disk: String, bookPath: String, annotations: [Annotation], removeIDs: Set<String> = [], updatingLocations: Bool = false) -> (text: String, conflicts: [String]) {
+        let mine = render(existing: baseline, bookPath: bookPath, annotations: annotations, removeIDs: removeIDs, updatingLocations: updatingLocations)
+        if disk == baseline { return (mine, []) }
+        func blocks(_ text: String) -> [String: VaultNoteBlock] {
+            Dictionary(VaultNoteFile.blocks(text).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        }
+        let before = blocks(baseline)
+        let theirs = blocks(disk)
+        let ours = blocks(mine)
+        var output = disk
+        var conflicts: [String] = []
+        for id in annotations.map(\.id) {
+            guard let ourBlock = ours[id] else { continue }
+            let base = before[id]
+            if ourBlock == base { continue }
+            let rendered = OwnedBlocks.body(id: id, in: mine) ?? ourBlock.markdown()
+            guard let theirBlock = theirs[id] else {
+                // Deleted outside Reader while Reader changed it: keep Reader's text.
+                output = OwnedBlocks.upsert(output, id: id, body: rendered)
+                continue
+            }
+            if theirBlock == base {
+                output = OwnedBlocks.upsert(output, id: id, body: rendered)
+                continue
+            }
+            var combined = theirBlock
+            if ourBlock.color != base?.color { combined.color = ourBlock.color }
+            if ourBlock.body != base?.body, ourBlock.body != theirBlock.body {
+                if theirBlock.body == base?.body {
+                    combined.body = ourBlock.body
+                } else {
+                    combined.body = [ourBlock.body, "**Also changed outside Reader:**", theirBlock.body]
+                        .filter { !$0.isEmpty }.joined(separator: "\n\n")
+                    conflicts.append(id)
+                }
+            }
+            if combined != theirBlock { output = OwnedBlocks.upsert(output, id: id, body: combined.markdown()) }
+        }
+        for id in removeIDs where ours[id] == nil && theirs[id] == before[id] {
+            output = OwnedBlocks.remove(output, id: id)
+        }
+        return (output, conflicts)
     }
 
     /// Adds sidecar notes that are not already in the file. Existing block ids are left untouched.

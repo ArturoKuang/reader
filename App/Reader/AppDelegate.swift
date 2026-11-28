@@ -40,6 +40,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool { false }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Write every open note before sync stops and a staged update replaces the app.
+        for case let document as ReaderDocument in NSDocumentController.shared.documents {
+            document.flushForTermination()
+        }
         MainActor.assumeIsolated {
             SyncController.shared.stop()
             AppUpdater.shared.applyStagedUpdateOnQuitIfNeeded()
@@ -359,6 +363,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Ask AI…", #selector(ReaderWindowController.askAI(_:)), "k", .command),
             item("Explain Simply", #selector(ReaderWindowController.explainSimply(_:))),
             item("Summarize Section", #selector(ReaderWindowController.summarizeSection(_:))),
+            separator(),
+            item("Read Aloud", #selector(ReaderWindowController.toggleReadAloud(_:)), "r", [.command, .option]),
+            item("Read Aloud from Selection", #selector(ReaderWindowController.readAloudFromSelection(_:))),
             separator(),
             item("Bookmark This Page", #selector(ReaderWindowController.bookmarkPage(_:)), "d", .command),
             item("Reveal in Obsidian", #selector(ReaderWindowController.revealInObsidian(_:))),

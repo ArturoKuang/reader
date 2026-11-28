@@ -13,11 +13,18 @@ final class PDFContainerViewController: NSViewController {
     var ownsFindSession = false
     private var lockedFit: FitMode?
     private var lockedZoom: Double?
-    private let pdfView = ReaderPDFView()
+    let pdfView = ReaderPDFView()
     private let overlay = NoteOverlay()
     private let titleStrip = PaneTitleStrip()
     private var findBar: NSSearchField { titleStrip.findField }
     private var stripTop: NSLayoutConstraint?
+    let ttsOverlay = PDFTTSOverlay()
+    var onManualScrollDuringTTS: (() -> Void)?
+    /// The player is open, so scrolls the user makes detach follow-text.
+    var ttsSessionActive = false
+    var ttsProgrammaticUntil = Date.distantPast
+    var ttsSentenceCache: (pageIndex: Int, range: NSRange, rects: [NSRect])?
+    private var observesLiveScroll = false
     private var matches: [PDFSelection] = []
     private var matchIndex = 0
     private var pickInitialMatch = false
@@ -60,6 +67,10 @@ final class PDFContainerViewController: NSViewController {
         pdfView.document = PDFDocument(data: session.bookData) ?? session.pdfDocument
         applyDisplayedRotations()
         view.addSubview(pdfView)
+        // Below the note overlay so glyphs and cards stay on top of the spoken sentence.
+        ttsOverlay.pdfView = pdfView
+        ttsOverlay.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(ttsOverlay)
         overlay.pdfView = pdfView
         overlay.session = session
         overlay.translatesAutoresizingMaskIntoConstraints = false
@@ -81,6 +92,10 @@ final class PDFContainerViewController: NSViewController {
             pdfView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             pdfView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             pdfView.topAnchor.constraint(equalTo: titleStrip.bottomAnchor),
+            ttsOverlay.leadingAnchor.constraint(equalTo: pdfView.leadingAnchor),
+            ttsOverlay.trailingAnchor.constraint(equalTo: pdfView.trailingAnchor),
+            ttsOverlay.topAnchor.constraint(equalTo: pdfView.topAnchor),
+            ttsOverlay.bottomAnchor.constraint(equalTo: pdfView.bottomAnchor),
             overlay.leadingAnchor.constraint(equalTo: pdfView.leadingAnchor),
             overlay.trailingAnchor.constraint(equalTo: pdfView.trailingAnchor),
             overlay.topAnchor.constraint(equalTo: pdfView.topAnchor),
@@ -103,7 +118,6 @@ final class PDFContainerViewController: NSViewController {
         NotificationCenter.default.addObserver(self, selector: #selector(scaleChanged), name: .PDFViewScaleChanged, object: pdfView)
         pdfView.onMouseUp = { [weak self] in self?.captureSelection() }
         pdfView.highlightIDAt = { [weak self] point in self?.highlightID(atViewPoint: point) }
-        pdfView.onRemoveHighlight = { [weak self] id in self?.session.deleteHighlight(id: id) }
         pdfView.onOpenHighlight = { [weak self] id, option in
             guard let self else { return }
             if option {
@@ -131,8 +145,11 @@ final class PDFContainerViewController: NSViewController {
 
     override func viewDidLayout() {
         super.viewDidLayout()
+        // A resize re-flows the clip view; that is not the user scrolling.
+        if ttsSessionActive { beginTTSProgrammaticScroll(0.3) }
         placePDFBelowToolbar()
         applyFittingScale()
+        ttsOverlay.needsDisplay = true
     }
 
     /// The PDF scroll view fills the full-height pane, which runs under the toolbar.
@@ -173,6 +190,10 @@ final class PDFContainerViewController: NSViewController {
         guard let clip = enclosingScrollClip(in: pdfView) else { return }
         clip.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(scrolled), name: NSView.boundsDidChangeNotification, object: clip)
+        if !observesLiveScroll, let scroll = clip.enclosingScrollView {
+            observesLiveScroll = true
+            NotificationCenter.default.addObserver(self, selector: #selector(userBeganScrolling), name: NSScrollView.willStartLiveScrollNotification, object: scroll)
+        }
     }
 
     /// Fit modes track the view size, the way Preview's Zoom to Fit does.
@@ -327,6 +348,7 @@ final class PDFContainerViewController: NSViewController {
         contactHost = nil
         pdfView.isHidden = visible
         overlay.isHidden = visible
+        ttsOverlay.isHidden = visible
         guard visible, let document = session.pdfDocument else { return }
         let host = NSHostingController(rootView: ContactSheetView(document: document, session: session) { [weak self] page in
             self?.session.setSidebar(.thumbnails)
@@ -560,6 +582,10 @@ final class PDFContainerViewController: NSViewController {
         showCurrentMatch()
     }
 
+    var hasActiveSelection: Bool {
+        pdfView.currentSelection?.string?.contains { !$0.isWhitespace } ?? false
+    }
+
     func captureSelection(showBar: Bool = true) {
         guard let selection = pdfView.currentSelection, let text = selection.string?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return }
         let page = selection.pages.first
@@ -757,13 +783,24 @@ final class PDFContainerViewController: NSViewController {
     var noteHostView: NSView { pdfView }
 
     func noteRect(for id: String) -> NSRect? {
-        guard let item = session.annotations.first(where: { $0.id == id || $0.highlight?.id == id || $0.note?.id == id }),
+        guard let item = session.annotation(matching: id),
               let pageNumber = item.page,
               let page = pdfView.document?.page(at: pageNumber - 1) else { return nil }
+        // The stored line rects name this occurrence exactly; a text search finds only the first.
+        let stored = item.rects.filter { $0.count >= 4 }
+        if !stored.isEmpty {
+            let union = stored.dropFirst().reduce(Self.pageRect(stored[0])) { $0.union(Self.pageRect($1)) }
+            return pdfView.convert(union, from: page)
+        }
         if let string = page.string, let range = string.range(of: item.quote), let selection = page.selection(for: NSRange(range, in: string)) {
             return pdfView.convert(selection.bounds(for: page), from: page)
         }
         return pdfView.convert(page.bounds(for: pdfView.displayBox), from: page)
+    }
+
+    /// A stored rect is `[minX, minY, maxX, maxY]` in page space.
+    private static func pageRect(_ rect: [Double]) -> NSRect {
+        NSRect(x: rect[0], y: rect[1], width: rect[2] - rect[0], height: rect[3] - rect[1])
     }
 
     func consumePendingJump() {
@@ -919,14 +956,26 @@ final class PDFContainerViewController: NSViewController {
         let section = session.outline.last { ($0.page ?? 0) <= number }?.title
         session.updatePage(number, count: document.pageCount, section: section)
         session.rememberScroll(currentPosition())
+        overlay.needsLayout = true
+        ttsOverlay.needsDisplay = true
     }
 
     @objc private func scrolled() {
         if publishesPosition { session.rememberScroll(currentPosition()) }
+        overlay.needsLayout = true
         (view.window?.windowController as? ReaderWindowController)?.dismissSelectionBar()
+        ttsOverlay.needsDisplay = true
+        reportUserScrollIfNeeded()
+    }
+
+    /// Trackpad and wheel gestures are always the user's, even inside the bridge's own scroll window.
+    @objc private func userBeganScrolling() {
+        reportUserScrollIfNeeded(always: true)
     }
 
     @objc private func scaleChanged() {
+        ttsOverlay.needsDisplay = true
+        if ttsSessionActive { beginTTSProgrammaticScroll(0.4) }
         guard !suppressScaleSave else { return }
         guard pdfView.bounds.width > 160, pdfView.bounds.height > 160 else { return }
         overlay.needsLayout = true
@@ -952,7 +1001,7 @@ final class PDFContainerViewController: NSViewController {
         return nil
     }
 
-    private func enclosingScrollClip(in view: NSView) -> NSClipView? {
+    func enclosingScrollClip(in view: NSView) -> NSClipView? {
         if let scroll = view as? NSScrollView { return scroll.contentView }
         for subview in view.subviews {
             if let found = enclosingScrollClip(in: subview) { return found }
@@ -972,24 +1021,37 @@ final class PDFContainerViewController: NSViewController {
 }
 
 final class ReaderPDFView: PDFView {
-    weak var session: ReaderSession?
+    weak var session: ReaderSession? {
+        didSet { highlightMenu.session = session }
+    }
     var onMouseUp: (() -> Void)?
     var highlightIDAt: ((NSPoint) -> String?)?
-    var onRemoveHighlight: ((String) -> Void)?
+    private static let clickSlop: CGFloat = 4
+    private var mouseDownPoint: NSPoint?
+    private let highlightMenu = HighlightContextMenuBuilder()
     var onOpenHighlight: ((String, Bool) -> Void)?
     var conceptAt: ((NSPoint) -> String?)?
     var onConcept: ((String) -> Void)?
     var prepareSelection: (() -> Void)?
     var beginFind: (() -> Void)?
 
+    override func mouseDown(with event: NSEvent) {
+        mouseDownPoint = convert(event.locationInWindow, from: nil)
+        super.mouseDown(with: event)
+    }
+
     override func mouseUp(with event: NSEvent) {
         super.mouseUp(with: event)
         let point = convert(event.locationInWindow, from: nil)
-        if let id = highlightIDAt?(point) {
+        defer { mouseDownPoint = nil }
+        // A drag that selected text is a selection, even when it began or ended on a highlight.
+        let dragged = mouseDownPoint.map { hypot(point.x - $0.x, point.y - $0.y) > Self.clickSlop } ?? false
+        let selecting = !(currentSelection?.string?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        if !dragged, !selecting, let id = highlightIDAt?(point) {
             onOpenHighlight?(id, event.modifierFlags.contains(.option))
             return
         }
-        if let id = conceptAt?(point) {
+        if !dragged, let id = conceptAt?(point) {
             onConcept?(id)
             return
         }
@@ -999,41 +1061,7 @@ final class ReaderPDFView: PDFView {
     override func rightMouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         if let id = highlightIDAt?(point) {
-            let menu = NSMenu()
-            let color = NSMenuItem(title: "Color", action: nil, keyEquivalent: "")
-            let colors = NSMenu()
-            for index in 1...6 {
-                let item = NSMenuItem(title: HighlightCallout.name(for: index).capitalized, action: #selector(recolorClicked(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = id
-                item.tag = index
-                colors.addItem(item)
-            }
-            color.submenu = colors
-            menu.addItem(color)
-            let note = NSMenuItem(title: "Add/Edit Note", action: #selector(noteClicked(_:)), keyEquivalent: "")
-            note.target = self
-            note.representedObject = id
-            menu.addItem(note)
-            let copy = NSMenuItem(title: "Copy", action: #selector(copyHighlightClicked(_:)), keyEquivalent: "")
-            copy.target = self
-            copy.representedObject = id
-            menu.addItem(copy)
-            let link = NSMenuItem(title: "Copy Link", action: #selector(copyLinkClicked(_:)), keyEquivalent: "")
-            link.target = self
-            link.representedObject = id
-            menu.addItem(link)
-            if session?.annotations.first(where: { $0.id == id })?.hasNote == true {
-                let removeNote = NSMenuItem(title: "Remove Note", action: #selector(removeNoteClicked(_:)), keyEquivalent: "")
-                removeNote.target = self
-                removeNote.representedObject = id
-                menu.addItem(removeNote)
-            }
-            let remove = NSMenuItem(title: "Remove Highlight & Note", action: #selector(removeHighlightClicked(_:)), keyEquivalent: "")
-            remove.target = self
-            remove.representedObject = id
-            menu.addItem(remove)
-            NSMenu.popUpContextMenu(menu, with: event, for: self)
+            NSMenu.popUpContextMenu(highlightMenu.menu(for: id), with: event, for: self)
             return
         }
         super.rightMouseDown(with: event)
@@ -1044,9 +1072,19 @@ final class ReaderPDFView: PDFView {
         let point = convert(event.locationInWindow, from: nil)
         if highlightIDAt?(point) != nil { return nil }
         prepareSelection?()
-        guard let session, let text = session.selection?.text, !text.isEmpty else { return super.menu(for: event) }
-        for title in ["Highlight", "Note", "Look Up", "Ask AI", "Copy"] {
-            let item = NSMenuItem(title: title, action: #selector(selectionMenu(_:)), keyEquivalent: "")
+        guard let session, let text = session.selection?.text, !text.isEmpty else {
+            // No selection: read from the word under the pointer.
+            let base = super.menu(for: event) ?? NSMenu()
+            if !base.items.isEmpty { base.addItem(.separator()) }
+            let item = readAloudItem(action: #selector(readAloudFromPoint(_:)))
+            item.representedObject = NSValue(point: point)
+            base.addItem(item)
+            return base
+        }
+        for title in ["Highlight", "Note", "Look Up", "Ask AI", "Read Aloud from Here", "Copy"] {
+            let item = title == "Read Aloud from Here"
+                ? readAloudItem(action: #selector(selectionMenu(_:)))
+                : NSMenuItem(title: title, action: #selector(selectionMenu(_:)), keyEquivalent: "")
             item.target = self
             menu.addItem(item)
         }
@@ -1063,10 +1101,32 @@ final class ReaderPDFView: PDFView {
         return menu
     }
 
+    private func readAloudItem(action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: "Read Aloud from Here", action: action, keyEquivalent: "r")
+        item.keyEquivalentModifierMask = [.command, .option]
+        item.target = self
+        return item
+    }
+
+    @objc private func readAloudFromPoint(_ sender: NSMenuItem) {
+        guard let session else { return }
+        let point = (sender.representedObject as? NSValue)?.pointValue ?? .zero
+        if let page = page(for: point, nearest: true),
+           let word = page.selectionForWord(at: convert(point, to: page)),
+           word.string?.contains(where: { !$0.isWhitespace }) == true {
+            setCurrentSelection(word, animate: false)
+            prepareSelection?()
+        } else {
+            session.selection = nil
+        }
+        session.onReadFromSelection?()
+    }
+
     @objc private func selectionMenu(_ sender: NSMenuItem) {
         guard let session else { return }
         let title = sender.title
-        if title == "Highlight" { session.highlight(color: session.package.state.lastHighlightColor) }
+        if title == "Read Aloud from Here" { session.onReadFromSelection?() }
+        else if title == "Highlight" { session.highlight(color: session.package.state.lastHighlightColor) }
         else if title == "Note" { session.addNote() }
         else if title.hasPrefix("Look Up") { session.lookUp() }
         else if title == "Ask AI" { session.show(tab: .askAI) }
@@ -1083,39 +1143,6 @@ final class ReaderPDFView: PDFView {
         }
     }
 
-    @objc private func recolorClicked(_ sender: NSMenuItem) {
-        guard let session, let id = sender.representedObject as? String else { return }
-        session.recolorAnnotation(id: id, color: sender.tag)
-    }
-
-    @objc private func noteClicked(_ sender: NSMenuItem) {
-        guard let session, let id = sender.representedObject as? String else { return }
-        session.openAnnotation(id)
-    }
-
-    @objc private func copyHighlightClicked(_ sender: NSMenuItem) {
-        guard let session, let id = sender.representedObject as? String, let quote = session.annotations.first(where: { $0.id == id })?.quote else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(quote, forType: .string)
-    }
-
-    @objc private func copyLinkClicked(_ sender: NSMenuItem) {
-        guard let session, let id = sender.representedObject as? String, let item = session.annotations.first(where: { $0.id == id }) else { return }
-        let link = CopyLink.make(path: session.bookURL.path, page: item.page, cfi: item.cfi, quote: item.quote)
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(link.url, forType: .string)
-    }
-
-    @objc private func removeNoteClicked(_ sender: NSMenuItem) {
-        guard let session, let id = sender.representedObject as? String else { return }
-        session.removeNoteOnly(id: id)
-    }
-
-    @objc private func removeHighlightClicked(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String else { return }
-        onRemoveHighlight?(id)
-    }
-
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
     }
@@ -1125,6 +1152,7 @@ final class NoteOverlay: NSView {
     weak var pdfView: PDFView?
     weak var session: ReaderSession?
     private var glyphs: [String: NSImageView] = [:]
+    private static let glyphSide: CGFloat = 20
     private var cards: [String: NSTextField] = [:]
 
     override var tag: Int { 77 }
@@ -1142,6 +1170,8 @@ final class NoteOverlay: NSView {
         for (id, view) in cards where !live.contains(id) { view.removeFromSuperview(); cards[id] = nil }
         let visible = Set(pdfView.visiblePages.map { document.index(for: $0) + 1 })
         var cardSlots: [(id: String, y: Double)] = []
+        var glyphSlots: [(id: String, y: Double)] = []
+        var glyphX: [String: CGFloat] = [:]
         var cardWidths: [String: CGFloat] = [:]
         var cardX: [String: CGFloat] = [:]
         for item in notes {
@@ -1152,19 +1182,22 @@ final class NoteOverlay: NSView {
             let showCard = session.showMarginNotes && margin >= 180
             let glyph = glyphs[item.id] ?? makeGlyph(item)
             glyphs[item.id] = glyph
+            // A recolor reuses the glyph, so its tint follows the highlight.
+            style(glyph, color: item.color)
             if margin < 18 {
                 let pageBounds = page.bounds(for: pdfView.displayBox)
                 let marker = NSRect(x: pageBounds.maxX - 16, y: pageBounds.midY, width: 14, height: 14)
-                let converted = pdfView.convert(marker, from: page)
-                glyph.frame = NSRect(x: converted.minX, y: passage.maxY - 16, width: 14, height: 14)
+                glyphX[item.id] = pdfView.convert(marker, from: page).minX
             } else {
-                glyph.frame = NSRect(x: min(pageRect.maxX + 4, bounds.maxX - 18), y: passage.maxY - 16, width: 14, height: 14)
+                glyphX[item.id] = min(pageRect.maxX + 4, bounds.maxX - Self.glyphSide - 4)
             }
+            glyphSlots.append((id: item.id, y: Double(passage.maxY - Self.glyphSide)))
             glyph.toolTip = item.body.split(whereSeparator: \.isNewline).first.map(String.init) ?? item.quote
             if showCard {
                 let card = cards[item.id] ?? makeCard(item)
                 cards[item.id] = card
                 card.stringValue = item.body
+                card.backgroundColor = ReaderColor.nsColor(item.color).withAlphaComponent(0.16)
                 cardSlots.append((id: item.id, y: Double(passage.maxY - 54)))
                 cardX[item.id] = pageRect.maxX + 22
                 cardWidths[item.id] = min(margin - 28, 220)
@@ -1172,6 +1205,10 @@ final class NoteOverlay: NSView {
                 cards[item.id]?.removeFromSuperview()
                 cards[item.id] = nil
             }
+        }
+        // Two notes on one line stack instead of covering each other.
+        for placed in MarginLayout.stack(glyphSlots, height: Double(Self.glyphSide), gap: 2) {
+            glyphs[placed.id]?.frame = NSRect(x: glyphX[placed.id] ?? 0, y: placed.y, width: Self.glyphSide, height: Self.glyphSide)
         }
         for placed in MarginLayout.stack(cardSlots, height: 54) {
             guard let card = cards[placed.id] else { continue }
@@ -1182,13 +1219,26 @@ final class NoteOverlay: NSView {
     private func makeGlyph(_ item: Annotation) -> NSImageView {
         let image = NSImageView()
         image.image = NSImage(systemSymbolName: "text.bubble.fill", accessibilityDescription: "Note")
-        image.contentTintColor = ReaderColor.nsColor(item.color)
-        image.imageScaling = .scaleProportionallyUpOrDown
+        image.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+        image.imageScaling = .scaleNone
+        image.imageAlignment = .alignCenter
+        image.wantsLayer = true
+        image.layer?.cornerRadius = Self.glyphSide / 2
+        image.layer?.borderWidth = 1
         image.identifier = NSUserInterfaceItemIdentifier(item.id)
+        image.setAccessibilityRole(.button)
+        image.setAccessibilityLabel("Open note")
         let click = NSClickGestureRecognizer(target: self, action: #selector(open(_:)))
         image.addGestureRecognizer(click)
         addSubview(image)
         return image
+    }
+
+    private func style(_ glyph: NSImageView, color: Int) {
+        let tint = ReaderColor.nsColor(color)
+        glyph.contentTintColor = tint
+        glyph.layer?.backgroundColor = tint.withAlphaComponent(0.18).cgColor
+        glyph.layer?.borderColor = tint.withAlphaComponent(0.45).cgColor
     }
 
     private func makeCard(_ item: Annotation) -> NSTextField {
@@ -1197,6 +1247,8 @@ final class NoteOverlay: NSView {
         field.maximumNumberOfLines = 3
         field.lineBreakMode = .byTruncatingTail
         field.textColor = .labelColor
+        field.drawsBackground = true
+        field.isBordered = false
         field.identifier = NSUserInterfaceItemIdentifier(item.id)
         let click = NSClickGestureRecognizer(target: self, action: #selector(openCard(_:)))
         field.addGestureRecognizer(click)

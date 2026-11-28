@@ -5,8 +5,12 @@ public struct TextSlice: Equatable, Sendable {
     public var spineIndex: Int?
     public var section: String?
     public var text: String
+    public var markdownSection: Int?
+    public var anchorID: String?
 
-    public init(page: Int? = nil, spineIndex: Int? = nil, section: String? = nil, text: String) {
+    public init(page: Int? = nil, spineIndex: Int? = nil, section: String? = nil, text: String, markdownSection: Int? = nil, anchorID: String? = nil) {
+        self.markdownSection = markdownSection
+        self.anchorID = anchorID
         self.page = page
         self.spineIndex = spineIndex
         self.section = section
@@ -133,6 +137,11 @@ public enum Reanchorer {
         if let spine = slice.spineIndex {
             let start = before.count
             cfi = EPUBCFI.make(spineIndex: spine, start: start, end: start + quote.count).value
+        }
+        if let index = slice.markdownSection, let anchor = slice.anchorID {
+            // Markdown offsets are UTF-16, matching the web view.
+            let start = before.utf16.count
+            cfi = MarkdownAnchor.make(sectionIndex: index, anchorID: anchor, start: start, end: start + quote.utf16.count).rawValue
         }
         return ReanchorHit(
             page: slice.page,

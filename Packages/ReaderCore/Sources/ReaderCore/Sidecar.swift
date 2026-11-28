@@ -152,11 +152,13 @@ public struct OpenResult: Equatable, Sendable {
 public enum BookKind: String, Equatable, Sendable {
     case pdf
     case epub
+    case markdown
 
     public static func from(path: String) -> BookKind? {
         let lower = path.lowercased()
         if lower.hasSuffix(".pdf") { return .pdf }
         if lower.hasSuffix(".epub") { return .epub }
+        if [".md", ".markdown", ".mdown"].contains(where: lower.hasSuffix) { return .markdown }
         return nil
     }
 }
@@ -302,6 +304,31 @@ public enum SidecarStore {
             index.documents[indexPosition].placement = .sibling
             index.documents[indexPosition].bookPath = bookPath
         }
+    }
+
+    /// The open book was rewritten on disk. Moves the notes package and its library entry to the
+    /// new fingerprint, so the next open does not report a mismatch. Pass a nil `directory` when
+    /// the notes live elsewhere (a vault) and no package should be written.
+    public static func adoptEditedBook(
+        package: inout SidecarPackage, directory: String?, bookPath: String, fingerprint: String,
+        index: inout LibraryIndex, fs: FileSystem, now: String = ISO8601DateFormatter().string(from: Date())
+    ) throws {
+        package = package.refreshingFingerprint(fingerprint)
+        for position in index.documents.indices where index.documents[position].bookPath == bookPath {
+            index.documents[position].fingerprint = fingerprint
+            index.documents[position].updated = now
+        }
+        if let directory { try package.write(to: directory, fs: fs) }
+    }
+
+    /// Where a vault book keeps its notes while it is not saving to the vault. Creates nothing.
+    public static func fallbackLocation(bookPath: String, bookData: Data, applicationSupport: String, fs: FileSystem) -> (directory: String, placement: Placement) {
+        let parent = Paths.parent(bookPath)
+        let sibling = Paths.join(parent, Paths.stem(bookPath) + ".reader")
+        let support = Paths.join(Paths.join(applicationSupport, "Sidecars"), SHA256.hex(bookData) + ".reader")
+        if fs.isDirectory(sibling) && fs.isWritable(sibling) { return (sibling, .sibling) }
+        if !fs.isDirectory(support) && fs.isWritable(parent) { return (sibling, .sibling) }
+        return (support, .applicationSupport)
     }
 
     private static func create(_ package: SidecarPackage, sibling: String, digest: String, applicationSupport: String, fs: FileSystem) throws -> (directory: String, placement: Placement, notice: String?) {

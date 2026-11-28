@@ -30,7 +30,11 @@ final class ReaderDocument: NSDocument {
         let opened = try Self.resolveBook(url)
         bookData = opened.data
         fileURL = opened.url
-        fileType = opened.kind == .epub ? "org.idpf.epub-container" : "com.adobe.pdf"
+        switch opened.kind {
+        case .pdf: fileType = "com.adobe.pdf"
+        case .epub: fileType = "org.idpf.epub-container"
+        case .markdown: fileType = "net.daringfireball.markdown"
+        }
         let fs = LocalFileSystem()
         let library = LibraryIndex.load(from: AppPaths.indexFile, fs: fs)
         let linked = library.documents.first { $0.bookPath == opened.url.path }?.vaultBookFolder
@@ -44,7 +48,9 @@ final class ReaderDocument: NSDocument {
             Self.pendingVaultNotice = nil
             let hasState = fs.exists(Paths.join(coordinator.location.bookFolder, ".reader-state.json"))
             let identity = FrontMatter(kind: "notes", document: opened.url.lastPathComponent, fingerprint: SHA256.fingerprint(opened.data))
-            let result = OpenResult(package: SidecarPackage.empty(identity: identity), directory: coordinator.location.bookFolder, placement: .sibling, hasSavedViewState: hasState)
+            // Where notes go while saving to the vault is off. Nothing is created until then.
+            let sidecar = SidecarStore.fallbackLocation(bookPath: opened.url.path, bookData: opened.data, applicationSupport: AppPaths.support, fs: fs)
+            let result = OpenResult(package: SidecarPackage.empty(identity: identity), directory: sidecar.directory, placement: sidecar.placement, hasSavedViewState: hasState)
             let session = ReaderSession(bookURL: opened.url, bookData: opened.data, open: result)
             if hasState {
                 session.package.state = VaultBookSettings.load(bookFolder: coordinator.location.bookFolder, fs: fs).view
@@ -52,6 +58,7 @@ final class ReaderDocument: NSDocument {
                 session.zoom = session.package.state.zoom
                 session.page = max(session.package.state.page, 1)
             }
+            wire(session)
             coordinator.attach(session)
             let storedMarks = BookMarks.load(applicationSupport: AppPaths.support, fingerprint: identity.fingerprint, fs: fs)
             if !storedMarks.isEmpty {
@@ -78,7 +85,6 @@ final class ReaderDocument: NSDocument {
                 now: ISO8601DateFormatter().string(from: Date())
             )
             try? index.save(to: AppPaths.indexFile, fs: fs)
-            session.onPageChange = { [weak self] in self?.refreshSubtitle() }
             self.vault = coordinator
             self.session = session
             DispatchQueue.main.async { [weak self] in self?.refreshSubtitle() }
@@ -110,6 +116,12 @@ final class ReaderDocument: NSDocument {
             session.notice = notice
             Self.pendingVaultNotice = nil
         }
+        wire(session)
+        self.session = session
+        DispatchQueue.main.async { [weak self] in self?.refreshSubtitle() }
+    }
+
+    private func wire(_ session: ReaderSession) {
         session.onDirty = { [weak self] in
             // Set the page subtitle first, then mark edited. AppKit appends " — Edited"
             // itself; including it here shows the suffix twice.
@@ -119,8 +131,6 @@ final class ReaderDocument: NSDocument {
         session.onPageChange = { [weak self] in
             self?.refreshSubtitle()
         }
-        self.session = session
-        DispatchQueue.main.async { [weak self] in self?.refreshSubtitle() }
     }
 
     override func makeWindowControllers() {
@@ -183,6 +193,7 @@ final class ReaderDocument: NSDocument {
         }
     }
 
+    /// Scrolls to a `reader://` link in this already open book.
     func reveal(_ link: ReaderLink) {
         _ = Self.takeQueuedLink(for: link.path)
         guard let session else {
@@ -197,7 +208,17 @@ final class ReaderDocument: NSDocument {
         }
     }
 
-    /// Autosave writes the sidecar only. The book file is never replaced.
+    /// Quitting does not always close windows first.
+    func flushForTermination() {
+        let controllers = windowControllers.compactMap { $0 as? ReaderWindowController }
+        if controllers.isEmpty {
+            session?.flushAllPendingEdits()
+        } else {
+            controllers.forEach { $0.flushPendingEdits() }
+        }
+    }
+
+    /// Autosave writes the vault or the sidecar. The book file is never replaced.
     override func save(to url: URL, ofType typeName: String, for saveOperation: NSDocument.SaveOperationType, completionHandler: @escaping (Error?) -> Void) {
         // May be invoked off the main thread during autosave. AppKit work and
         // the completion handler must run on the main thread. If we are already
@@ -219,15 +240,9 @@ final class ReaderDocument: NSDocument {
     private func persistSidecarOrVault(clearEdited: Bool, completion: @escaping (Error?) -> Void) {
         if session?.usesVault == true {
             session?.persistVaultMarks()
-            session?.onVaultSave?()
-            if clearEdited {
-                updateChangeCount(.changeCleared)
-            }
-            completion(nil)
-            return
         }
         do {
-            try session?.persistSidecar()
+            try session?.saveNow()
             // This path replaces NSDocument's save, which is what normally
             // clears the edited flag. Without this, " — Edited" stays after ⌘S.
             if clearEdited {
@@ -240,7 +255,7 @@ final class ReaderDocument: NSDocument {
     }
 
     override func write(to url: URL, ofType typeName: String) throws {
-        try session?.persistSidecar()
+        try session?.saveNow()
     }
 
     override func data(ofType typeName: String) throws -> Data {
@@ -290,9 +305,17 @@ final class ReaderDocument: NSDocument {
             if session.isPDF {
                 window.subtitle = "Page \(session.page) of \(max(session.pageCount, 1))"
             } else {
-                window.subtitle = session.sectionTitle.isEmpty ? "EPUB" : session.sectionTitle
+                window.subtitle = session.sectionTitle.isEmpty ? (session.isMarkdown ? "Markdown" : "EPUB") : session.sectionTitle
             }
             window.title = session.bookURL.deletingPathExtension().lastPathComponent
+        }
+    }
+
+    /// The Markdown file was edited elsewhere; adopt the new bytes and date.
+    func bookDidChange(_ data: Data) {
+        bookData = data
+        if let fileURL {
+            fileModificationDate = (try? FileManager.default.attributesOfItem(atPath: fileURL.path))?[.modificationDate] as? Date
         }
     }
 
@@ -307,6 +330,12 @@ final class ReaderDocument: NSDocument {
             }
             if FileManager.default.fileExists(atPath: siblingEPUB.path) {
                 return (siblingEPUB, try Data(contentsOf: siblingEPUB), .epub)
+            }
+            for pathExtension in ["md", "markdown", "mdown"] {
+                let sibling = url.deletingPathExtension().appendingPathExtension(pathExtension)
+                if FileManager.default.fileExists(atPath: sibling.path) {
+                    return (sibling, try Data(contentsOf: sibling), .markdown)
+                }
             }
             let index = LibraryIndex.load(from: AppPaths.indexFile, fs: LocalFileSystem())
             if let entry = index.documents.first(where: { $0.sidecarPath == url.path }),

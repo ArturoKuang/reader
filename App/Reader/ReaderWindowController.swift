@@ -3,15 +3,15 @@ import ReaderCore
 import SwiftUI
 import UniformTypeIdentifiers
 
-final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWindowDelegate, NSSearchFieldDelegate {
+final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWindowDelegate, NSSearchFieldDelegate, NSMenuDelegate, NSMenuItemValidation {
     private struct ReadingPane {
         var document: ReaderDocument?
         let session: ReaderSession
         let pdf: PDFContainerViewController?
-        let epub: EPUBContainerViewController?
+        let web: WebDocumentContainerViewController?
         var viewController: NSViewController {
             if let pdf { return pdf }
-            return epub!
+            return web!
         }
     }
 
@@ -42,9 +42,9 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         guard readingPanes.indices.contains(paneHost.activeIndex) else { return nil }
         return readingPanes[paneHost.activeIndex].pdf
     }
-    private var epubController: EPUBContainerViewController? {
+    private var webController: WebDocumentContainerViewController? {
         guard readingPanes.indices.contains(paneHost.activeIndex) else { return nil }
-        return readingPanes[paneHost.activeIndex].epub
+        return readingPanes[paneHost.activeIndex].web
     }
     private var keyMonitor: Any?
     private var sidebarItem: NSSplitViewItem?
@@ -58,6 +58,12 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     private var previousSidebar: SidebarMode = .thumbnails
     private let toastView = PassThroughView()
     private let toastLabel = NSTextField(labelWithString: "")
+    private var toastBottom: NSLayoutConstraint?
+    private let tts = TTSEngine()
+    private lazy var ttsPlayer = TTSPlayerHost(pane: paneHost.view)
+    /// The selection playback last started from, so a new one jumps instead of closing.
+    private var ttsStartSelection: String?
+    private var appearanceObservation: NSKeyValueObservation?
 
     init(session: ReaderSession) {
         let pane = Self.makePane(session: session, document: nil, publishes: true)
@@ -83,6 +89,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         configureToolbar()
         installToast()
         installMonitor()
+        configureReadAloud()
         applyChrome()
     }
 
@@ -113,7 +120,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     func applyPendingLink() {
         for pane in readingPanes {
             pane.pdf?.consumePendingJump()
-            pane.epub?.consumePendingJump()
+            pane.web?.consumePendingJump()
         }
     }
 
@@ -190,13 +197,15 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         toastLabel.translatesAutoresizingMaskIntoConstraints = false
         toastView.addSubview(toastLabel)
         content.addSubview(toastView)
+        let bottom = toastView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -32)
+        toastBottom = bottom
         NSLayoutConstraint.activate([
             toastLabel.leadingAnchor.constraint(equalTo: toastView.leadingAnchor, constant: 14),
             toastLabel.trailingAnchor.constraint(equalTo: toastView.trailingAnchor, constant: -14),
             toastLabel.topAnchor.constraint(equalTo: toastView.topAnchor, constant: 8),
             toastLabel.bottomAnchor.constraint(equalTo: toastView.bottomAnchor, constant: -8),
             toastView.centerXAnchor.constraint(equalTo: content.centerXAnchor),
-            toastView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -32),
+            bottom,
         ])
     }
 
@@ -219,11 +228,13 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
                 return event
             }
             if self.handlePaneChord(event) { return nil }
+            // Read before dismissing: an Escape that closes the bar leaves the player open.
+            let selectionBarWasShowing = self.selectionBar.isShowing
             if event.keyCode == 53 {
                 self.dismissSelectionBar()
-                if self.pdfController?.isFindVisible == true || self.epubController?.isFindVisible == true {
+                if self.pdfController?.isFindVisible == true || self.webController?.isFindVisible == true {
                     self.pdfController?.dismissFind()
-                    self.epubController?.dismissFind()
+                    self.webController?.dismissFind()
                     return nil
                 }
                 if self.session.sidebar == .searchResults {
@@ -237,7 +248,13 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
                 self.stopSlideshow()
                 return nil
             }
-            let position = self.pdfController?.currentPosition() ?? self.epubController?.currentPosition() ?? ReadingPosition(page: self.session.page, zoom: self.session.zoom)
+            let plain = event.modifierFlags.isDisjoint(with: [.command, .option, .control])
+            // Space belongs to the player only while it is open; otherwise it scrolls.
+            if event.keyCode == 49, plain, self.isTTSPresented, !self.isTextInputFocused {
+                if !event.isARepeat { self.tts.togglePlayPause() }
+                return nil
+            }
+            let position = self.pdfController?.currentPosition() ?? self.webController?.currentPosition() ?? ReadingPosition(page: self.session.page, zoom: self.session.zoom)
             let handled = self.session.handleMarkEvent(event, documentFocused: true, position: position)
             if let url = handled.otherBook {
                 self.openBookInOtherPane(url: url, position: handled.jump)
@@ -248,6 +265,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
                 if let jump = handled.jump {
                     self.reveal(jump)
                 }
+                return nil
+            }
+            // Last in line, after the search results, slideshow, and mark chords above.
+            if event.keyCode == 53, plain, self.tts.isActive, !selectionBarWasShowing, !self.isTextInputFocused {
+                self.tts.stop()
                 return nil
             }
             return event
@@ -331,7 +353,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         guard otherWindowShows(session) else { return }
         for pane in readingPanes {
             pane.pdf?.publishesPosition = false
-            pane.epub?.publishesPosition = false
+            pane.web?.publishesPosition = false
         }
     }
 
@@ -354,17 +376,31 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     }
 
     func windowWillClose(_ notification: Notification) {
+        tts.stop()
+        dismissSelectionBar()
         storeWindowFrame()
+        flushPendingEdits()
+        webController?.tearDown()
+    }
+
+    /// Saves the open note, view state, and anything still scheduled, before returning.
+    func flushPendingEdits() {
         pdfController?.capturePositionForSave()
-        session.saveViewNow()
+        notePopover.closeIfShown()
+        session.flushAllPendingEdits()
         let host = document
         var closing = Set<ObjectIdentifier>()
         for pane in readingPanes {
             guard let doc = pane.document, doc !== host else { continue }
             let id = ObjectIdentifier(doc)
             guard closing.insert(id).inserted, !otherWindowShows(pane.session) else { continue }
+            pane.session.flushAllPendingEdits()
             doc.saveForPaneClose()
         }
+    }
+
+    func consumePendingJump() {
+        applyPendingLink()
     }
 
     func applyChrome() {
@@ -380,16 +416,16 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             }
         }
         pdfController?.setContactSheet(contact)
-        epubController?.setContactSheet(contact)
-        sidebarHost.rootView = SidebarView(session: session)
-        panelHost.rootView = RightPanelView(session: session)
+        webController?.setContactSheet(contact)
+        ttsPlayer.bringToFront()
+        updateTTSTheme()
     }
 
     func reveal(_ position: ReadingPosition) {
         if session.isPDF {
             pdfController?.reveal(position)
         } else {
-            epubController?.reveal(position)
+            webController?.reveal(position)
         }
     }
 
@@ -398,14 +434,131 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         slideshowTimer?.invalidate()
     }
 
+    // MARK: Read Aloud
+
+    var isTTSPresented: Bool { tts.state.isPresented }
+
+    private var isTextInputFocused: Bool {
+        // Search fields, note editors, and any other field share an editable text view.
+        (window?.firstResponder as? NSText)?.isEditable == true
+    }
+
+    private func configureReadAloud() {
+        pointReadAloudAtActivePane()
+        tts.onToast = { [weak self] text in self?.session.showToast(text) }
+        tts.onStateChange = { [weak self] state in self?.renderReadAloud(state) }
+        let player = ttsPlayer.view
+        player.fallbackTitle = session.bookURL.deletingPathExtension().lastPathComponent
+        player.onClose = { [weak self] in self?.tts.stop() }
+        player.onPlayPause = { [weak self] in self?.tts.togglePlayPause() }
+        player.onSkip = { [weak self] seconds in self?.tts.skip(bySeconds: seconds) }
+        player.onSeek = { [weak self] fraction in self?.tts.seek(toFraction: fraction) }
+        player.onSelectSpeed = { [weak self] rate in self?.tts.setRateMultiplier(rate) }
+        player.onSelectVoice = { [weak self] voice in self?.tts.setVoiceIdentifier(voice) }
+        player.onSetFollow = { [weak self] follow in self?.tts.setAutoScroll(follow) }
+        appearanceObservation = NSApp.observe(\.effectiveAppearance) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.updateTTSTheme() }
+        }
+    }
+
+    /// Read Aloud follows the active pane. A pane that is playing keeps the voice until it stops.
+    private func pointReadAloudAtActivePane() {
+        guard !tts.isActive else { return }
+        tts.bridge = (pdfController as TTSDocumentBridge?) ?? (webController as TTSDocumentBridge?)
+        for pane in readingPanes {
+            pane.web?.onTTSContentInvalidated = { [weak self, weak web = pane.web] in
+                guard let self, self.tts.isActive, let web, self.tts.bridge === web else { return }
+                self.tts.stop()
+                self.session.showToast("Read Aloud stopped — the document changed")
+            }
+        }
+        ttsPlayer.view.fallbackTitle = session.bookURL.deletingPathExtension().lastPathComponent
+    }
+
+    private func renderReadAloud(_ state: TTSEngineState) {
+        // A closing pill keeps its last contents while it fades out.
+        if state.isPresented { ttsPlayer.view.render(state) }
+        guard state.isPresented != ttsPlayer.isVisible else { return }
+        if state.isPresented { updateTTSTheme() }
+        ttsPlayer.setVisible(state.isPresented)
+        toastBottom?.animator().constant = state.isPresented ? -TTSEngine.bottomInset : -32
+        updateReadAloudToolbarItem()
+    }
+
+    private func updateTTSTheme() {
+        let theme = session.isPDF ? nil : session.package.state.epubTheme
+        let resolved: TTSPlayerTheme
+        switch theme {
+        case "night": resolved = .dark
+        case "paper": resolved = .paper
+        case "quiet": resolved = .light
+        default:
+            let systemDark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            resolved = tts.bridge?.preferredTTSAppearanceIsDark ?? systemDark ? .dark : .light
+        }
+        ttsPlayer.view.apply(theme: resolved)
+    }
+
+    private func readAloudImage() -> NSImage? {
+        let symbol = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Read Aloud")
+        guard isTTSPresented else { return symbol }
+        return symbol?.withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [.controlAccentColor]))
+    }
+
+    private func updateReadAloudToolbarItem() {
+        window?.toolbar?.items.first { $0.itemIdentifier == .listen }?.image = readAloudImage()
+    }
+
+    /// The selection that exists right now; `session.selection` can outlive it.
+    private func withActiveSelection(_ body: @escaping (SelectionContext?) -> Void) {
+        let capture = { [weak self] (active: Bool) in
+            guard let self else { return }
+            guard active else { return body(nil) }
+            self.session.withSelection { [weak self] in body(self?.session.selection) }
+        }
+        if let web = webController {
+            web.hasActiveSelection(completion: capture)
+        } else {
+            capture(pdfController?.hasActiveSelection ?? false)
+        }
+    }
+
+    private func startReading(from selection: SelectionContext?) {
+        dismissSelectionBar()
+        ttsStartSelection = selection?.text
+        guard let selection else { return tts.open(from: .viewport) }
+        // Locator indices are 0-based; Markdown has no page that maps onto its sections.
+        let page = session.isMarkdown ? nil : (session.isPDF ? selection.page : session.page)
+        tts.open(from: .selection(text: selection.text, prefix: selection.prefix, suffix: selection.suffix, pageOrSection: page.map { $0 - 1 }))
+    }
+
+    @objc func toggleReadAloud(_ sender: Any?) {
+        withActiveSelection { [weak self] selection in
+            guard let self else { return }
+            if self.tts.isActive, selection == nil || selection?.text == self.ttsStartSelection {
+                self.tts.stop()
+            } else {
+                self.startReading(from: selection)
+            }
+        }
+    }
+
+    @objc func readAloudFromSelection(_ sender: Any?) {
+        withActiveSelection { [weak self] selection in
+            guard let self else { return }
+            guard let selection else { return self.session.showToast("Select some text to read from") }
+            self.startReading(from: selection)
+        }
+    }
+
     // MARK: Toolbar
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .syncStatus, .vault, .inspectorTrackingSeparator, .toggleInspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .zoomOut, .zoomIn, .appearance, .listen, .flexibleSpace, .syncStatus, .vault, .inspectorTrackingSeparator, .toggleInspector]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .syncStatus, .vault, .inspectorTrackingSeparator, .toggleInspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .zoomOut, .zoomIn, .appearance, .listen, .flexibleSpace, .syncStatus, .vault, .inspectorTrackingSeparator, .toggleInspector]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
@@ -434,6 +587,14 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             item.label = "Appearance"
             item.toolTip = "Reading Appearance (Theme, Font, Spacing)"
             item.menu = appearanceMenu()
+            return item
+        case .listen:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.image = readAloudImage()
+            item.action = #selector(toggleReadAloud(_:))
+            item.target = self
+            item.label = "Read Aloud"
+            item.toolTip = "Read Aloud (⌥⌘R)"
             return item
         case .zoomIn:
             let zoom = NSToolbarItem(itemIdentifier: itemIdentifier)
@@ -677,14 +838,14 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             break
         }
         pdfController?.applyDisplayMode()
-        epubController?.applyDisplayMode()
+        webController?.applyDisplayMode()
         applyChrome()
     }
-    @objc func actualSize(_ sender: Any?) { pdfController?.actualSize(); epubController?.actualSize() }
-    @objc func zoomToFit(_ sender: Any?) { pdfController?.zoomToFit(); epubController?.zoomToFit() }
-    @objc func fitWidth(_ sender: Any?) { pdfController?.fitWidth(); epubController?.fitWidth() }
-    @objc func zoomIn(_ sender: Any?) { pdfController?.zoomIn(); epubController?.zoom(by: 1.15); session.showToast("\(Int((session.zoom * 100).rounded()))%") }
-    @objc func zoomOut(_ sender: Any?) { pdfController?.zoomOut(); epubController?.zoom(by: 1 / 1.15); session.showToast("\(Int((session.zoom * 100).rounded()))%") }
+    @objc func actualSize(_ sender: Any?) { pdfController?.actualSize(); webController?.actualSize() }
+    @objc func zoomToFit(_ sender: Any?) { pdfController?.zoomToFit(); webController?.zoomToFit() }
+    @objc func fitWidth(_ sender: Any?) { pdfController?.fitWidth(); webController?.fitWidth() }
+    @objc func zoomIn(_ sender: Any?) { pdfController?.zoomIn(); webController?.zoom(by: 1.15); session.showToast("\(Int((session.zoom * 100).rounded()))%") }
+    @objc func zoomOut(_ sender: Any?) { pdfController?.zoomOut(); webController?.zoom(by: 1 / 1.15); session.showToast("\(Int((session.zoom * 100).rounded()))%") }
     @objc func zoomToSelection(_ sender: Any?) { pdfController?.zoomToSelection() }
     @objc func rotateLeft(_ sender: Any?) { session.rotate(clockwise: false); pdfController?.refreshAnnotations() }
     @objc func rotateRight(_ sender: Any?) { session.rotate(clockwise: true); pdfController?.refreshAnnotations() }
@@ -695,6 +856,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     @objc func showAskTab(_ sender: Any?) { session.show(tab: .askAI); applyChrome() }
     private func appearanceMenu() -> NSMenu {
         let menu = NSMenu()
+        menu.delegate = self
+        menu.autoenablesItems = true
         for theme in ["original", "paper", "quiet", "night"] {
             let item = NSMenuItem(title: theme.capitalized, action: #selector(chooseTheme(_:)), keyEquivalent: "")
             item.target = self
@@ -731,22 +894,49 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         return menu
     }
 
+    /// The live checkmark for an appearance item, or nil for any other item. Fonts and
+    /// themes both offer "Original", so only the action tells them apart.
+    private func appearanceState(for item: NSMenuItem) -> NSControl.StateValue? {
+        let state = session.package.state
+        let checked: Bool
+        switch item.action {
+        case #selector(chooseTheme(_:)): checked = state.epubTheme == item.title.lowercased()
+        case #selector(chooseFont(_:)): checked = state.epubFont == item.title
+        case #selector(chooseLineSpacing(_:)): checked = state.epubLine == item.tag
+        case #selector(chooseMargin(_:)): checked = state.epubMargin == item.tag
+        case #selector(chooseJustify(_:)): checked = state.epubJustify
+        default: return nil
+        }
+        return checked && webController != nil ? .on : .off
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        for item in menu.items {
+            if let state = appearanceState(for: item) { item.state = state }
+        }
+    }
+
+    /// Restyles the page, saves shortly after, and moves the checkmarks at once.
+    private func appearanceDidChange(from sender: NSMenuItem) {
+        webController?.applyLiveStyle()
+        session.scheduleViewStateSave()
+        let toolbarMenu = (window?.toolbar?.items.first { $0.itemIdentifier == .appearance } as? NSMenuToolbarItem)?.menu
+        for menu in [sender.menu, toolbarMenu].compactMap({ $0 }) { menuNeedsUpdate(menu) }
+    }
+
     @objc func chooseLineSpacing(_ sender: NSMenuItem) {
         session.package.state.epubLine = sender.tag
-        session.saveViewQuietly()
-        epubController?.applyLiveStyle()
+        appearanceDidChange(from: sender)
     }
 
     @objc func chooseMargin(_ sender: NSMenuItem) {
         session.package.state.epubMargin = sender.tag
-        session.saveViewQuietly()
-        epubController?.applyLiveStyle()
+        appearanceDidChange(from: sender)
     }
 
     @objc func chooseJustify(_ sender: NSMenuItem) {
         session.package.state.epubJustify.toggle()
-        session.saveViewQuietly()
-        epubController?.applyLiveStyle()
+        appearanceDidChange(from: sender)
     }
 
     @objc func showAppearance(_ sender: Any?) {
@@ -771,14 +961,13 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
 
     @objc func chooseTheme(_ sender: NSMenuItem) {
         session.package.state.epubTheme = sender.title.lowercased()
-        session.saveViewQuietly()
-        epubController?.applyDisplayMode()
+        appearanceDidChange(from: sender)
+        updateTTSTheme()
     }
 
     @objc func chooseFont(_ sender: NSMenuItem) {
         session.package.state.epubFont = sender.title
-        session.saveViewQuietly()
-        epubController?.applyDisplayMode()
+        appearanceDidChange(from: sender)
     }
 
     @objc func showMarginNotes(_ sender: Any?) { session.toggleMarginNotes(); applyChrome() }
@@ -847,13 +1036,31 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     func dismissSelectionBar() { selectionBar.dismiss() }
 
     func presentNote(_ id: String) {
-        let host = (pdfController?.view ?? epubController?.view) ?? window?.contentView
-        guard let host else { return }
-        let hostView = pdfController?.noteHostView ?? host
-        let rect = pdfController?.noteRect(for: id) ?? NSRect(x: hostView.bounds.midX, y: hostView.bounds.midY, width: 1, height: 1)
-        session.beginNoteEdit(id: id)
-        notePopover.show(id: id, session: session, relativeTo: rect, of: hostView)
+        // Finish the previous note before claiming this one.
+        notePopover.closeIfShown()
+        if let pdf = pdfController {
+            let host = pdf.noteHostView
+            showNote(id, relativeTo: pdf.noteRect(for: id), of: host)
+        } else if let web = webController {
+            // The page owns where a highlight is, so it is asked, then the popover opens beside it.
+            let host = web.noteHostView
+            web.noteRect(for: id) { [weak self] rect in
+                self?.showNote(id, relativeTo: rect, of: host)
+            }
+        } else if let host = window?.contentView {
+            showNote(id, relativeTo: nil, of: host)
+        }
     }
+
+    /// Opens the note editor at `rect`. Without one, the passage is not on this page, so the popover
+    /// opens at the middle of the view.
+    private func showNote(_ id: String, relativeTo rect: NSRect?, of host: NSView) {
+        let anchor = rect ?? NSRect(x: host.bounds.midX, y: host.bounds.midY, width: 1, height: 1)
+        notePopover.closeIfShown()
+        guard let token = session.beginNoteEdit(id: id) else { return }
+        notePopover.show(id: id, token: token, session: session, relativeTo: anchor, of: host)
+    }
+
     @objc func slideshow(_ sender: Any?) {
         if slideshowTimer != nil { stopSlideshow(); return }
         window?.toggleFullScreen(nil)
@@ -868,18 +1075,18 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
 
     @objc func goBack(_ sender: Any?) {
         if let pdf = pdfController, pdf.goBack() { return }
-        guard let position = session.backPosition(current: pdfController?.currentPosition() ?? epubController?.currentPosition() ?? ReadingPosition(page: session.page)) else { return }
+        guard let position = session.backPosition(current: pdfController?.currentPosition() ?? webController?.currentPosition() ?? ReadingPosition(page: session.page)) else { return }
         reveal(position)
     }
     @objc func goForward(_ sender: Any?) {
         if let pdf = pdfController, pdf.goForward() { return }
-        guard let position = session.forwardPosition(current: pdfController?.currentPosition() ?? epubController?.currentPosition() ?? ReadingPosition(page: session.page)) else { return }
+        guard let position = session.forwardPosition(current: pdfController?.currentPosition() ?? webController?.currentPosition() ?? ReadingPosition(page: session.page)) else { return }
         reveal(position)
     }
-    @objc func nextPage(_ sender: Any?) { pdfController?.nextPage(); epubController?.nextPage() }
-    @objc func previousPage(_ sender: Any?) { pdfController?.previousPage(); epubController?.previousPage() }
-    @objc func nextChapter(_ sender: Any?) { epubController?.nextPage() }
-    @objc func previousChapter(_ sender: Any?) { epubController?.previousPage() }
+    @objc func nextPage(_ sender: Any?) { pdfController?.nextPage(); webController?.nextPage() }
+    @objc func previousPage(_ sender: Any?) { pdfController?.previousPage(); webController?.previousPage() }
+    @objc func nextChapter(_ sender: Any?) { webController?.nextPage() }
+    @objc func previousChapter(_ sender: Any?) { webController?.previousPage() }
     @objc func goToPage(_ sender: Any?) {
         guard let window else { return }
         let alert = NSAlert()
@@ -898,7 +1105,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
 
     @objc func find(_ sender: Any?) {
         pdfController?.focusFind()
-        epubController?.focusFind()
+        webController?.focusFind()
     }
 
     @objc func submitSearch(_ sender: Any?) {
@@ -906,11 +1113,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         session.findQuery = query
         for pane in readingPanes {
             pane.pdf?.ownsFindSession = false
-            pane.epub?.ownsFindSession = false
+            pane.web?.ownsFindSession = false
         }
         let advance = FindCommit.isExplicitAdvance()
         pdfController?.search(query, explicitAdvance: advance)
-        epubController?.search(query, explicitAdvance: advance)
+        webController?.search(query, explicitAdvance: advance)
     }
 
     @objc func openInOtherPane(_ sender: Any?) {
@@ -999,7 +1206,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         for other in readingPanes where other.viewController !== current.viewController && other.viewController !== pane.viewController {
             other.pdf?.freezeLayout()
             other.pdf?.publishesPosition = false
-            other.epub?.publishesPosition = false
+            other.web?.publishesPosition = false
         }
     }
 
@@ -1020,19 +1227,20 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             let active = index == paneHost.activeIndex
             if !active { pane.pdf?.freezeLayout() }
             pane.pdf?.publishesPosition = active
-            pane.epub?.publishesPosition = active
+            pane.web?.publishesPosition = active
             pane.pdf?.ownsFindSession = false
-            pane.epub?.ownsFindSession = false
+            pane.web?.ownsFindSession = false
         }
         adoptActiveDocument()
+        pointReadAloudAtActivePane()
         for (index, pane) in readingPanes.enumerated() {
             let active = index == paneHost.activeIndex
             pane.pdf?.setPaneActive(active)
-            pane.epub?.setPaneActive(active)
+            pane.web?.setPaneActive(active)
         }
         applyChrome()
         pdfController?.publishCurrentPosition()
-        epubController?.publishCurrentPosition()
+        webController?.publishCurrentPosition()
     }
 
     private func place(session book: ReaderSession, document: ReaderDocument, position: ReadingPosition?) {
@@ -1064,7 +1272,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         let target = position ?? fallback
         DispatchQueue.main.async {
             if let pdf = pane.pdf { pdf.showInPane(target) }
-            if let epub = pane.epub { epub.showInPane(target) }
+            if let web = pane.web { web.showInPane(target) }
         }
     }
 
@@ -1115,7 +1323,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             previousPage?()
             guard let self, self.session === session else { return }
             self.pdfController?.consumePendingJump()
-            self.epubController?.consumePendingJump()
+            self.webController?.consumePendingJump()
         }
         let previousToast = session.onToast
         session.onToast = { [weak self] text in
@@ -1149,14 +1357,27 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             }
             self.revealVocabularyInObsidian()
         }
+        let previousDismiss = session.onDismissNoteEditors
+        session.onDismissNoteEditors = { [weak self] tokens in
+            previousDismiss?(tokens)
+            self?.notePopover.dismiss(ifEditing: tokens)
+        }
+        let previousRead = session.onReadFromSelection
+        session.onReadFromSelection = { [weak self] in
+            guard let self, self.session === session else {
+                previousRead?()
+                return
+            }
+            self.startReading(from: session.selection)
+        }
         let previousCapture = session.onCaptureSelection
         session.onCaptureSelection = { [weak self] done in
             guard let self, self.session === session else {
                 if let previousCapture { previousCapture(done) } else { done() }
                 return
             }
-            if let epub = self.epubController {
-                epub.captureSelection(completion: done)
+            if let web = self.webController {
+                web.captureSelection(completion: done)
             } else {
                 self.pdfController?.captureSelection()
                 done()
@@ -1169,12 +1390,12 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             let pdf = PDFContainerViewController(session: session)
             pdf.publishesPosition = publishes
             pdf.ownsFindSession = false
-            return ReadingPane(document: document, session: session, pdf: pdf, epub: nil)
+            return ReadingPane(document: document, session: session, pdf: pdf, web: nil)
         }
-        let epub = EPUBContainerViewController(session: session)
-        epub.publishesPosition = publishes
-        epub.ownsFindSession = false
-        return ReadingPane(document: document, session: session, pdf: nil, epub: epub)
+        let web = WebDocumentContainerViewController(session: session)
+        web.publishesPosition = publishes
+        web.ownsFindSession = false
+        return ReadingPane(document: document, session: session, pdf: nil, web: web)
     }
 
     private func handlePaneChord(_ event: NSEvent) -> Bool {
@@ -1205,14 +1426,14 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     func claimFindSession(from controller: NSViewController) {
         for pane in readingPanes {
             pane.pdf?.ownsFindSession = (pane.pdf === controller)
-            pane.epub?.ownsFindSession = (pane.epub === controller)
+            pane.web?.ownsFindSession = (pane.web === controller)
         }
     }
 
     func showFindCount(_ index: Int, of total: Int) {
         let text = total > 0 ? "\(index) of \(total)" : ""
         pdfController?.setFindCount(text)
-        epubController?.setFindCount(text)
+        webController?.setFindCount(text)
     }
 
     func searchFieldDidEndSearching(_ sender: NSSearchField) {
@@ -1221,10 +1442,10 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             session.sidebarBeforeSearch = nil
         }
         pdfController?.setFindCount("")
-        epubController?.setFindCount("")
+        webController?.setFindCount("")
     }
-    @objc func findNext(_ sender: Any?) { pdfController?.findNext(); epubController?.find(forward: true) }
-    @objc func findPrevious(_ sender: Any?) { pdfController?.findPrevious(); epubController?.find(forward: false) }
+    @objc func findNext(_ sender: Any?) { pdfController?.findNext(); webController?.find(forward: true) }
+    @objc func findPrevious(_ sender: Any?) { pdfController?.findPrevious(); webController?.find(forward: false) }
 
     @objc func highlight1(_ sender: Any?) { highlight(1) }
     @objc func highlight2(_ sender: Any?) { highlight(2) }
@@ -1413,6 +1634,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         case #selector(togglePanel(_:)): menuItem.state = session.panelVisible ? .on : .off
         case #selector(toggleConceptMarkers(_:)): menuItem.state = session.showConceptMarkers ? .on : .off
         case #selector(showMarginNotes(_:)): menuItem.state = session.showMarginNotes ? .on : .off
+        case #selector(toggleReadAloud(_:)): menuItem.state = isTTSPresented ? .on : .off
         case #selector(delete(_:)):
             return !session.annotationSelection.isEmpty || !session.wordSelection.isEmpty || !session.markSelection.isEmpty
         case #selector(revealInObsidian(_:)), #selector(openVaultFolder(_:)), #selector(pauseVault(_:)):
@@ -1424,12 +1646,13 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             menuItem.title = session.usesVault ? "Unlink Vault Book Folder" : "Link to Vault Book Folder…"
             return true
         case #selector(nextChapter(_:)), #selector(previousChapter(_:)):
-            return epubController != nil
+            return webController != nil
         case #selector(bookmarkPage(_:)):
             menuItem.title = session.bookmarkExistsForCurrentPosition() ? "Remove Bookmark" : "Add Bookmark"
             return true
         case #selector(chooseTheme(_:)), #selector(chooseFont(_:)), #selector(chooseLineSpacing(_:)), #selector(chooseMargin(_:)), #selector(chooseJustify(_:)):
-            return epubController != nil
+            if let state = appearanceState(for: menuItem) { menuItem.state = state }
+            return webController != nil
         default: break
         }
         return true
@@ -1487,6 +1710,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     }
 
     private func mergeSidecarIntoVault(_ location: VaultLocation) {
+        session.flushNoteBodies()
         let fs = LocalFileSystem()
         let directory = VaultPaths.notesDirectory(bookFolder: location.bookFolder, settings: VaultBookSettings.load(bookFolder: location.bookFolder, fs: fs))
         try? fs.createDirectory(directory)
@@ -1601,4 +1825,5 @@ private extension NSToolbarItem.Identifier {
     static let inspector = NSToolbarItem.Identifier("inspector")
     static let syncStatus = NSToolbarItem.Identifier("syncStatus")
     static let vault = NSToolbarItem.Identifier("vault")
+    static let listen = NSToolbarItem.Identifier("listen")
 }

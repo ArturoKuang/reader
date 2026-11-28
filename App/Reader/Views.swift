@@ -13,13 +13,13 @@ struct WelcomeView: View {
                 WelcomeUpdateBanner(updater: updater, release: release)
             }
             Text("Reader").font(.largeTitle.weight(.semibold))
-            Text("Open a PDF or EPUB. Drop a book here, or press Return on a recent one.")
+            Text("Open a PDF, EPUB, or Markdown file. Drop one here, or press Return on a recent one.")
                 .foregroundStyle(.secondary)
             Button("Open…") { NSDocumentController.shared.openDocument(nil) }
                 .help("Open a PDF or EPUB book (⌘O)")
             let urls = NSDocumentController.shared.recentDocumentURLs
             if urls.isEmpty {
-                ContentUnavailableView("No recent books", systemImage: "books.vertical", description: Text("Open a PDF or EPUB to start reading."))
+                ContentUnavailableView("No recent books", systemImage: "books.vertical", description: Text("Open a PDF, EPUB, or Markdown file to start reading."))
             } else {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 16)], spacing: 16) {
                     ForEach(urls.prefix(12), id: \.path) { url in
@@ -170,7 +170,7 @@ private struct WelcomeTile: View {
             let image = page.thumbnail(of: NSSize(width: 160, height: 200), for: .mediaBox)
             Image(nsImage: image).resizable().scaledToFit()
         } else {
-            Image(systemName: "book.closed").font(.largeTitle).foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 88)
+            Image(systemName: BookKind.from(path: url.path) == .markdown ? "doc.richtext" : "book.closed").font(.largeTitle).foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 88)
         }
     }
 
@@ -338,8 +338,8 @@ struct SidebarView: View {
                         .onTapGesture { jump(page: index + 1) }
                     }
                 } else {
-                    ForEach(Array((session.epub?.spine ?? []).enumerated()), id: \.offset) { index, item in
-                        Text(item.title).font(.callout).padding(.vertical, 6)
+                    ForEach(Array(session.webSectionTitles.enumerated()), id: \.offset) { index, title in
+                        Text(title).font(.callout).padding(.vertical, 6)
                             .onTapGesture { jump(page: index + 1) }
                     }
                 }
@@ -361,7 +361,11 @@ struct SidebarView: View {
         .listStyle(.sidebar)
         .onChange(of: outlineSelection) { _, id in
             guard let id, let row = session.outline.first(where: { $0.id == id }) else { return }
-            if let page = row.page { jump(page: page) } else if let cfi = row.cfi { jumpEPUB(cfi) }
+            if let page = row.page {
+                jump(page: page)
+            } else if let cfi = row.cfi {
+                if let anchor = MarkdownAnchor(value: cfi) { jumpMarkdown(anchor) } else { jumpEPUB(cfi) }
+            }
         }
         }
     }
@@ -623,6 +627,12 @@ struct SidebarView: View {
         }
     }
 
+    private func jumpMarkdown(_ anchor: MarkdownAnchor) {
+        let target = ReadingPosition(page: anchor.sectionIndex + 1, cfi: anchor.rawValue)
+        session.recordJump(from: ReadingPosition(page: session.page, zoom: session.zoom, cfi: session.currentLocation(), section: session.sectionTitle), to: target)
+        (NSApp.keyWindow?.windowController as? ReaderWindowController)?.reveal(target)
+    }
+
     private func jumpEPUB(_ href: String) {
         if let index = session.epub?.spine.firstIndex(where: { href.hasPrefix($0.href) || $0.href == href }) {
             jump(page: index + 1)
@@ -717,15 +727,15 @@ struct ContactSheetView: View {
     }
 }
 
-struct EPUBContactSheet: View {
+struct WebContactSheet: View {
     @ObservedObject var session: ReaderSession
     var select: (Int) -> Void
 
     var body: some View {
         ScrollView {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 180))], spacing: 12) {
-                ForEach(Array((session.epub?.spine ?? []).enumerated()), id: \.offset) { index, item in
-                    Text(item.title).frame(maxWidth: .infinity, minHeight: 80).padding().background(Color(nsColor: .controlBackgroundColor)).onTapGesture { select(index) }
+                ForEach(Array(session.webSectionTitles.enumerated()), id: \.offset) { index, title in
+                    Text(title).frame(maxWidth: .infinity, minHeight: 80).padding().background(Color(nsColor: .controlBackgroundColor)).onTapGesture { select(index) }
                 }
             }
             .padding(20)
@@ -1190,6 +1200,8 @@ struct SettingsView: View {
     @State private var anthropicKey = KeychainStore.load(account: "anthropic") ?? ""
     @State private var keyStatus = ""
     @State private var detectingCLIs = false
+    @State private var voiceGroups: [TTSVoiceCatalog.Group] = TTSVoiceCatalog.groups()
+    @State private var kokoroStatus: KokoroModelStatus = KokoroEngineService.isModelCachedOnDisk() ? .cached : .notDownloaded
     @State private var openInspector = UserDefaults.standard.object(forKey: "reader.openInspector") as? Bool ?? true
     @FocusState private var keyField: String?
 
@@ -1231,8 +1243,16 @@ struct SettingsView: View {
                         .foregroundStyle(isUpdateError ? .red : .secondary)
                 }
             }
+            readAloudSection
         }
         .formStyle(.grouped)
+        .onAppear {
+            voiceGroups = TTSVoiceCatalog.groups()
+            Task { kokoroStatus = await KokoroEngineService.shared.currentStatus() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .kokoroStatusDidChange)) { _ in
+            Task { kokoroStatus = await KokoroEngineService.shared.currentStatus() }
+        }
         .tabItem { Text("General") }
         Form {
             Section("Default") {
@@ -1298,8 +1318,23 @@ struct SettingsView: View {
         ShortcutList()
             .tabItem { Text("Shortcuts") }
         }
-        .onChange(of: settings) { _, newValue in
+        .onChange(of: settings) { oldValue, newValue in
             SettingsStore.save(newValue)
+            if abs(oldValue.ttsRateMultiplier - newValue.ttsRateMultiplier) > 0.0001
+                || oldValue.ttsVoiceIdentifier != newValue.ttsVoiceIdentifier {
+                NotificationCenter.default.post(
+                    name: .ttsSettingsDidChange,
+                    object: nil,
+                    userInfo: ["fromSettingsView": true]
+                )
+            }
+        }
+        // Attached to the TabView so player speed/voice updates apply even while viewing another tab.
+        .onReceive(NotificationCenter.default.publisher(for: .ttsSettingsDidChange)) { notification in
+            if (notification.userInfo?["fromSettingsView"] as? Bool) == true { return }
+            let saved = SettingsStore.load()
+            settings.ttsRateMultiplier = saved.ttsRateMultiplier
+            settings.ttsVoiceIdentifier = saved.ttsVoiceIdentifier
         }
         .onChange(of: keyField) { old, _ in
             guard let old else { return }
@@ -1375,6 +1410,56 @@ struct SettingsView: View {
                 keyStatus = (error as? AIError)?.userMessage ?? (error as? ReaderFailure)?.message ?? error.localizedDescription
             }
         }
+    }
+
+
+    private var selectedKokoroVoiceID: Binding<String> {
+        Binding(
+            get: { KokoroVoiceCatalog.resolve(settings.ttsVoiceIdentifier).id },
+            set: { settings.ttsVoiceIdentifier = $0 }
+        )
+    }
+
+    private var readAloudSection: some View {
+        Section("Read Aloud (Kokoro-82M)") {
+            Picker("Speed", selection: $settings.ttsRateMultiplier) {
+                ForEach(TTSSpeedPreset.allCases, id: \.rawValue) { Text($0.label).tag($0.rawValue) }
+            }
+            Picker("Voice", selection: selectedKokoroVoiceID) {
+                ForEach(voiceGroups, id: \.title) { group in
+                    Section(group.title) {
+                        ForEach(group.voices, id: \.identifier) { Text($0.label).tag($0.identifier) }
+                    }
+                }
+            }
+            HStack {
+                Text("Voice Model")
+                Spacer()
+                Text(kokoroStatus.summaryText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                kokoroActionButton
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var kokoroActionButton: some View {
+        switch kokoroStatus {
+        case .notDownloaded:
+            Button("Download") { triggerKokoroDownload() }
+                .controlSize(.small)
+        case .failed:
+            Button("Retry") { triggerKokoroDownload() }
+                .controlSize(.small)
+        default:
+            EmptyView()
+        }
+    }
+
+    private func triggerKokoroDownload() {
+        let voiceID = KokoroVoiceCatalog.resolve(settings.ttsVoiceIdentifier).id
+        Task { _ = try? await KokoroEngineService.shared.ensureReady(voiceID: voiceID) }
     }
 
     private func storeKey(account: String, value: String) {
@@ -1575,5 +1660,12 @@ private struct ClearSegmentSelection: NSViewRepresentable {
             if let found = findSegmented(in: child) { return found }
         }
         return nil
+    }
+}
+
+extension ReaderSession {
+    /// One title per EPUB spine item or Markdown section.
+    var webSectionTitles: [String] {
+        markdown?.sections.map(\.title) ?? epub?.spine.map(\.title) ?? []
     }
 }

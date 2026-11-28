@@ -5,8 +5,9 @@ import UniformTypeIdentifiers
 
 final class ReaderSession: ObservableObject {
     let bookURL: URL
-    let bookData: Data
-    let fingerprint: String
+    let bookKind: BookKind
+    private(set) var bookData: Data
+    private(set) var fingerprint: String
     var package: SidecarPackage
     var directory: String
     var placement: Placement
@@ -26,12 +27,25 @@ final class ReaderSession: ObservableObject {
     var bookFolder: String?
     var tutorAvailable = false
     var claudeSessionID: String?
+    /// Schedules a vault write.
     var onVaultFlush: (() -> Void)?
     /// Writes vault notes immediately (⌘S). `onVaultFlush` only schedules a short debounce.
     var onVaultSave: (() -> Void)?
+    /// Writes the vault before returning. Pass false to write only when a write is scheduled.
+    var onVaultFlushNow: ((_ force: Bool) throws -> Void)?
+    /// Rewrites the vault with the locations found again after the book's text changed.
+    var onVaultRelocate: (() -> Void)?
+    /// What the sidecar records while it stands in for the vault.
+    var vaultFallbackState: (() -> PausedVaultState)?
+    /// Closes editors whose note was removed or replaced.
+    var onDismissNoteEditors: (([NoteEditToken]) -> Void)?
+    /// True while the sidecar is behind memory.
+    private var sidecarNeedsWrite = false
     /// AppKit/WebKit refresh the current passage, then run the action. PDF is synchronous.
     var onCaptureSelection: ((@escaping () -> Void) -> Void)?
     var onSaveVaultState: (() -> Void)?
+    /// Starts Read Aloud at `selection`.
+    var onReadFromSelection: (() -> Void)?
     var onInsertConcept: ((Concept) -> Void)?
     @Published var vaultNotesFolder = "notes"
     @Published var vaultVocabularyFile = ""
@@ -40,7 +54,6 @@ final class ReaderSession: ObservableObject {
     @Published var askChoice = ""
     @Published var focusQuestion = 0
     @Published var aiSetup: String?
-    @Published var noteDraft = ""
     var pendingReaderLink: ReaderLink?
     @Published var sidebar: SidebarMode
     @Published var panelVisible: Bool
@@ -84,14 +97,18 @@ final class ReaderSession: ObservableObject {
     var onRevealVocabularyInObsidian: (() -> Void)?
     var onRelocateNotes: ((String, String, Bool) -> Void)?
     private var noteSaveTimer: Timer?
-    private var pendingNoteBodies: [String: String] = [:]
-    private var noteEditBaseline: [String: String] = [:]
+    private var noteEdits = NoteEditBuffer()
+    /// Bumps when an editor loses its note, so views drop it.
+    @Published private(set) var noteEditGeneration = 0
     var chatAnchor: SelectionContext?
     @Published var provider: ProviderID
     @Published var settings: AISettings
 
     var pdfDocument: PDFDocument?
     var epub: EPUBBook?
+    @Published private(set) var markdown: MarkdownDocumentModel?
+    /// A heading to scroll to once the document is on screen.
+    var pendingAnchor: String?
     var epubRoot: URL?
     var bookText: BookText?
     var onDirty: (() -> Void)?
@@ -115,7 +132,12 @@ final class ReaderSession: ObservableObject {
     private let globalObserver = UUID()
     private let globalHub = GlobalMarkHub.shared
 
-    var isPDF: Bool { bookURL.pathExtension.lowercased() == "pdf" }
+    var isPDF: Bool { bookKind == .pdf }
+    var isEPUB: Bool { bookKind == .epub }
+    var isMarkdown: Bool { bookKind == .markdown }
+    var isWebDocument: Bool { !isPDF }
+    /// False outside a vault, and while saving to the vault is paused. Edits then go to the sidecar.
+    var writesToVault: Bool { usesVault && vaultEnabled }
 
     /// Each pane registers itself. A new highlight then repaints every view of this book.
     func watchAnnotations(_ owner: AnyObject, perform update: @escaping () -> Void) {
@@ -140,6 +162,7 @@ final class ReaderSession: ObservableObject {
 
     init(bookURL: URL, bookData: Data, open: OpenResult) {
         self.bookURL = bookURL
+        self.bookKind = BookKind.from(path: bookURL.path) ?? .pdf
         self.bookData = bookData
         self.fingerprint = SHA256.fingerprint(bookData)
         self.package = open.package
@@ -173,10 +196,10 @@ final class ReaderSession: ObservableObject {
             self.globalMarks = marks
             self.objectWillChange.send()
         }
-        if isPDF {
-            loadPDF()
-        } else {
-            loadEPUB()
+        switch bookKind {
+        case .pdf: loadPDF()
+        case .epub: loadEPUB()
+        case .markdown: loadMarkdown()
         }
         prepareBookText()
     }
@@ -226,8 +249,17 @@ final class ReaderSession: ObservableObject {
         package.highlights.frontMatter = package.notes.frontMatter.withKind("highlights")
         package.marks.frontMatter = package.notes.frontMatter.withKind("marks")
         let fs = LocalFileSystem()
-        try package.write(to: directory, fs: fs)
+        do {
+            try writeSidecar(fs: fs)
+        } catch {
+            // A vault book's folder may refuse a sidecar; Application Support always takes one.
+            guard usesVault, placement == .sibling else { throw error }
+            directory = Paths.join(Paths.join(AppPaths.support, "Sidecars"), SHA256.hex(bookData) + ".reader")
+            placement = .applicationSupport
+            try writeSidecar(fs: fs)
+        }
         globalHub.publish(globalMarks, source: globalObserver, applicationSupport: AppPaths.support, fs: fs)
+        sidecarNeedsWrite = false
     }
 
     /// Vault books have no sidecar. Local marks live under Application Support, next to the global file.
@@ -241,6 +273,50 @@ final class ReaderSession: ObservableObject {
             fs: fs
         )
         globalHub.publish(globalMarks, source: globalObserver, applicationSupport: AppPaths.support, fs: fs)
+    }
+
+    private func writeSidecar(fs: FileSystem) throws {
+        try package.pruningBlankNotes().write(to: directory, fs: fs)
+        if usesVault {
+            var state = vaultFallbackState?() ?? PausedVaultState(authoritative: true)
+            state.authoritative = true
+            try state.save(directory: directory, fs: fs)
+        }
+    }
+
+    /// The sidecar now has to hold what is in memory.
+    func markSidecarChanged() {
+        sidecarNeedsWrite = true
+        onDirty?()
+    }
+
+    /// ⌘S and autosave. Open note editors stay open.
+    func saveNow() throws {
+        flushNoteBodies()
+        if writesToVault {
+            try onVaultFlushNow?(true)
+        } else {
+            try persistSidecar()
+        }
+    }
+
+    /// Close and quit: finishes every note edit and writes before returning.
+    func flushAllPendingEdits() {
+        endAllNoteEdits()
+        saveViewNow()
+        do {
+            if writesToVault {
+                try onVaultFlushNow?(false)
+            } else if sidecarNeedsWrite {
+                try persistSidecar()
+            }
+        } catch {
+            notice = error.localizedDescription
+            // The vault refused the write. The next open picks these edits up from the sidecar.
+            if writesToVault {
+                do { try persistSidecar() } catch { NSLog("Reader could not save notes: %@", error.localizedDescription) }
+            }
+        }
     }
 
     func finishViewRestore() {
@@ -347,7 +423,7 @@ final class ReaderSession: ObservableObject {
     func highlight(color: Int) {
         guard HighlightPalette.isValid(color), let selection, !selection.text.isEmpty else { return }
         let anchor = AnnotationAnchor(text: selection.text, page: selection.page, cfi: selection.cfi, section: selection.section, prefix: selection.prefix, suffix: selection.suffix, rects: selection.rects)
-        if let existing = AnnotationIndex.highlight(matchingQuote: selection.text, page: selection.page, cfi: selection.cfi, in: highlights) {
+        if let existing = existingHighlight(for: selection) {
             recolorAnnotation(id: existing.id, color: color)
             showToast("Highlighted with \(HighlightCallout.name(for: color))")
             return
@@ -360,16 +436,6 @@ final class ReaderSession: ObservableObject {
 
     func deleteHighlight(id: String) {
         removeAnnotationCompletely(id: id)
-    }
-
-    func restoreHighlight(_ entry: HighlightEntry) {
-        package.highlights.highlights.append(entry)
-        undoManager?.registerUndo(withTarget: self) { session in
-            session.deleteHighlight(id: entry.id)
-        }
-        undoManager?.setActionName("Remove Highlight")
-        publishAnnotationsChanged()
-        dirty()
     }
 
     func rememberScroll(_ position: ReadingPosition) {
@@ -385,25 +451,19 @@ final class ReaderSession: ObservableObject {
         highlight(color: package.state.lastHighlightColor)
     }
 
-    func commitNoteDraft() {
-        let text = noteDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        let before = package.notes.notes.count
-        addNote(body: text)
-        if package.notes.notes.count != before { noteDraft = "" }
+    func existingHighlight(for selection: SelectionContext) -> HighlightEntry? {
+        AnnotationIndex.highlight(matchingQuote: selection.text, page: selection.page, cfi: selection.cfi, rects: selection.rects, prefix: selection.prefix, suffix: selection.suffix, in: highlights)
     }
 
     func addNote(body: String = "", ai: Bool = false, provider: String? = nil) {
         guard let selection, !selection.text.isEmpty else { return }
-        let typed = noteDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        let text = body.isEmpty ? typed : body
         let anchor = AnnotationAnchor(text: selection.text, page: selection.page, cfi: selection.cfi, section: selection.section ?? sectionTitle, prefix: selection.prefix, suffix: selection.suffix, rects: selection.rects)
         var opened: String?
         editAnnotations("Add Note") {
             let highlightID = IDs.make("h")
             let created = AnnotationEdit.addNote(toSelection: anchor, color: package.state.lastHighlightColor, highlightID: highlightID, noteID: highlightID, now: ISO8601DateFormatter().string(from: Date()), package: &package)
-            if let noteID = created.note?.id, !text.isEmpty {
-                AnnotationEdit.updateNoteBody(id: noteID, body: text, now: ISO8601DateFormatter().string(from: Date()), package: &package)
+            if let noteID = created.note?.id, !body.isEmpty {
+                AnnotationEdit.updateNoteBody(id: noteID, body: body, now: ISO8601DateFormatter().string(from: Date()), package: &package)
                 if let index = package.notes.notes.firstIndex(where: { $0.id == noteID }) {
                     package.notes.notes[index].ai = ai
                     package.notes.notes[index].provider = provider
@@ -411,7 +471,6 @@ final class ReaderSession: ObservableObject {
             }
             opened = created.highlight?.id ?? created.note?.id
         }
-        noteDraft = ""
         show(tab: .notes)
         if let opened {
             lastAnnotationHit = opened
@@ -434,14 +493,6 @@ final class ReaderSession: ObservableObject {
         }
     }
 
-    func updateNote(id: String, body: String) {
-        queueNoteBody(id: id, body: body)
-    }
-
-    func deleteNote(id: String) {
-        removeNoteOnly(id: id)
-    }
-
     var lastAnnotationHit: String?
 
     func toggleNote(_ id: String) {
@@ -456,7 +507,7 @@ final class ReaderSession: ObservableObject {
     func toggleBookmark() {
         let title = sectionTitle.isEmpty ? "Page \(page)" : sectionTitle
         let pageNumber = isPDF ? page : nil
-        let cfi = isPDF ? nil : currentEPUBCFI()
+        let cfi = isPDF ? nil : currentLocation()
         let before = package.state.bookmarks
         let added = BookmarkEdit.toggle(page: pageNumber, cfi: cfi, title: title, section: sectionTitle, id: IDs.make("b"), bookmarks: &package.state.bookmarks)
         undoManager?.registerUndo(withTarget: self) { session in
@@ -469,7 +520,7 @@ final class ReaderSession: ObservableObject {
 
     func bookmarkExistsForCurrentPosition() -> Bool {
         let pageNumber = isPDF ? page : nil
-        let cfi = isPDF ? nil : currentEPUBCFI()
+        let cfi = isPDF ? nil : currentLocation()
         return package.state.bookmarks.contains { BookmarkEdit.matches($0, page: pageNumber, cfi: cfi) }
     }
 
@@ -780,12 +831,12 @@ final class ReaderSession: ObservableObject {
 
     private func dirty() {
         captureState()
-        if usesVault {
+        if writesToVault {
             persistVaultMarks()
             onVaultFlush?()
         } else {
             globalHub.publish(globalMarks, source: globalObserver, applicationSupport: AppPaths.support, fs: LocalFileSystem())
-            onDirty?()
+            markSidecarChanged()
         }
         onSyncNeeded?()
         objectWillChange.send()
@@ -1035,10 +1086,14 @@ final class ReaderSession: ObservableObject {
     }
 
     func editAnnotations(_ name: String, _ change: () -> Void) {
+        flushNoteBodies()
         let previousHighlights = package.highlights.highlights
         let previousNotes = package.notes.notes
         let previousColor = package.state.lastHighlightColor
         change()
+        guard package.highlights.highlights != previousHighlights
+            || package.notes.notes != previousNotes
+            || package.state.lastHighlightColor != previousColor else { return }
         undoManager?.registerUndo(withTarget: self) { session in
             session.editAnnotations(name) {
                 session.package.highlights.highlights = previousHighlights
@@ -1047,85 +1102,42 @@ final class ReaderSession: ObservableObject {
             }
         }
         undoManager?.setActionName(name)
+        revokeStaleNoteEdits()
+        annotationsDidChange()
+    }
+
+    private func annotationsDidChange() {
         annotationRevision += 1
         publishAnnotationsChanged()
         dirty()
     }
 
-    @discardableResult
-    func addAnnotationNote() -> Bool {
-        guard let selection, !selection.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
-        let anchor = AnnotationAnchor(text: selection.text, page: selection.page, cfi: selection.cfi, section: selection.section ?? sectionTitle, prefix: selection.prefix, suffix: selection.suffix, rects: selection.rects)
-        var opened: String?
-        editAnnotations("Add Note") {
-            let highlightID = IDs.make("h")
-            let created = AnnotationEdit.addNote(toSelection: anchor, color: package.state.lastHighlightColor, highlightID: highlightID, noteID: highlightID, now: ISO8601DateFormatter().string(from: Date()), package: &package)
-            opened = created.highlight?.id ?? created.note?.id
-        }
-        if let opened { onPresentNote?(opened) }
-        show(tab: .notes)
-        return opened != nil
+    func annotation(matching id: String) -> Annotation? {
+        AnnotationIndex.resolve(id: id, in: package)
     }
 
     func openAnnotation(_ id: String) {
-        if let highlight = highlights.first(where: { $0.id == id }), highlight.noteID == nil {
-            onPresentNote?(id)
-            return
-        }
         onPresentNote?(id)
     }
 
-    func beginNoteEdit(id: String) {
-        guard noteEditBaseline[id] == nil else { return }
-        let linked = highlights.first { $0.id == id }?.noteID
-        let body = notes.first { $0.id == id }?.body ?? linked.flatMap { noteID in notes.first { $0.id == noteID }?.body } ?? ""
-        noteEditBaseline[id] = body
+    // MARK: Note editing
+
+    /// Claims the note for one editor. `id` may be a highlight id or a note id.
+    func beginNoteEdit(id: String) -> NoteEditToken? {
+        let begun = noteEdits.begin(id: id, newNoteID: highlights.contains(where: { $0.id == id }) ? id : IDs.make("n"), package: &package, now: ISO8601DateFormatter().string(from: Date()))
+        guard let begun else { return nil }
+        for previous in begun.superseded { noteEditFinished(previous.result) }
+        dismissNoteEditors(begun.superseded.map(\.token))
+        return begun.token
     }
 
-    func endNoteEdit(id: String) {
-        flushNoteBodies()
-        let highlight = highlights.first { $0.id == id || $0.noteID == id }
-        let candidates = [id, highlight?.noteID, highlight?.id].compactMap { $0 }
-        guard let key = candidates.first(where: { noteEditBaseline[$0] != nil }) else { return }
-        let original = noteEditBaseline.removeValue(forKey: key) ?? ""
-        let noteID = highlight?.noteID ?? (notes.contains { $0.id == id } ? id : nil)
-        let current = noteID.flatMap { note in notes.first { $0.id == note }?.body }
-        guard let noteID else {
-            guard !original.isEmpty else { return }
-            undoManager?.registerUndo(withTarget: self) { session in
-                session.restoreEditedNote(id: key, body: original)
-            }
-            undoManager?.setActionName("Edit Note")
-            return
-        }
-        guard current != original else { return }
-        undoManager?.registerUndo(withTarget: self) { session in
-            session.restoreEditedNote(id: noteID, body: original)
-        }
-        undoManager?.setActionName("Edit Note")
+    func isNoteEditActive(_ token: NoteEditToken) -> Bool {
+        noteEdits.isActive(token)
     }
 
-    private func restoreEditedNote(id: String, body: String) {
-        let previous = notes.first(where: { $0.id == id })?.body
-        applyPendingNote(id: id, body: body)
-        annotationRevision += 1
-        publishAnnotationsChanged()
-        dirty()
-        undoManager?.registerUndo(withTarget: self) { session in
-            if let previous {
-                session.restoreEditedNote(id: id, body: previous)
-            } else {
-                session.applyPendingNote(id: id, body: "")
-                session.annotationRevision += 1
-                session.publishAnnotationsChanged()
-                session.dirty()
-            }
-        }
-        undoManager?.setActionName("Edit Note")
-    }
-
-    func queueNoteBody(id: String, body: String) {
-        pendingNoteBodies[id] = body
+    /// Typing from an editor. Ignored once the editor has ended or lost its note.
+    func queueNoteBody(_ token: NoteEditToken, body: String) {
+        guard noteEdits.queue(token, body: body) else { return }
         noteSaveTimer?.invalidate()
         let timer = Timer(timeInterval: 0.3, repeats: false) { [weak self] _ in
             self?.flushNoteBodies()
@@ -1136,61 +1148,127 @@ final class ReaderSession: ObservableObject {
 
     func flushNoteBodies() {
         noteSaveTimer?.invalidate()
-        let pending = pendingNoteBodies
-        pendingNoteBodies = [:]
-        guard !pending.isEmpty else { return }
-        let coalesced = pending.keys.contains { noteEditBaseline[$0] != nil }
-        if coalesced {
-            for (id, body) in pending { applyPendingNote(id: id, body: body) }
-            annotationRevision += 1
-            publishAnnotationsChanged()
-            dirty()
-        } else {
-            editAnnotations("Edit Note") {
-                for (id, body) in pending { applyPendingNote(id: id, body: body) }
-            }
+        noteSaveTimer = nil
+        guard noteEdits.hasPending else { return }
+        if noteEdits.flush(package: &package, now: ISO8601DateFormatter().string(from: Date())) {
+            annotationsDidChange()
         }
     }
 
-    private func applyPendingNote(id: String, body: String) {
-        let now = ISO8601DateFormatter().string(from: Date())
-        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        if notes.contains(where: { $0.id == id }) {
-            AnnotationEdit.updateNoteBody(id: id, body: body, now: now, package: &package)
-            return
-        }
-        guard let highlight = highlights.first(where: { $0.id == id || $0.noteID == id }) else { return }
-        if trimmed.isEmpty {
-            if let noteID = highlight.noteID {
-                AnnotationEdit.removeNote(id: noteID, package: &package)
-            }
-            return
-        }
-        let noteID = highlight.noteID ?? highlight.id
-        AnnotationEdit.addNote(toHighlight: highlight.id, noteID: noteID, now: now, package: &package)
-        AnnotationEdit.updateNoteBody(id: noteID, body: body, now: now, package: &package)
+    func endNoteEdit(_ token: NoteEditToken) {
+        guard let result = noteEdits.end(token, package: &package, now: ISO8601DateFormatter().string(from: Date())) else { return }
+        noteEditFinished(result)
     }
+
+    func endAllNoteEdits() {
+        let tokens = noteEdits.tokens
+        for token in tokens { endNoteEdit(token) }
+        dismissNoteEditors(tokens)
+    }
+
+    private func noteEditFinished(_ result: NoteEditResult) {
+        if let undo = result.undo { registerNoteRestore(undo) }
+        if result.changed || result.undo != nil { annotationsDidChange() }
+    }
+
+    private func registerNoteRestore(_ state: NoteState) {
+        undoManager?.registerUndo(withTarget: self) { session in
+            session.restoreNote(state)
+        }
+        undoManager?.setActionName("Edit Note")
+    }
+
+    private func restoreNote(_ state: NoteState) {
+        flushNoteBodies()
+        guard let replaced = state.restore(into: &package) else { return }
+        registerNoteRestore(replaced)
+        revokeStaleNoteEdits()
+        annotationsDidChange()
+    }
+
+    func revokeStaleNoteEdits() {
+        dismissNoteEditors(noteEdits.revokeStale(package: package))
+    }
+
+    private func dismissNoteEditors(_ tokens: [NoteEditToken]) {
+        guard !tokens.isEmpty else { return }
+        noteEditGeneration += 1
+        onDismissNoteEditors?(tokens)
+    }
+
+    // MARK: Recolor and removal
 
     func recolorAnnotation(id: String, color: Int) {
-        editAnnotations("Recolor Highlight") {
-            AnnotationEdit.recolor(id: id, color: color, package: &package)
+        editColors("Recolor Highlight", ids: [id], color: color)
+    }
+
+    func recolorAnnotations(ids: Set<String>, color: Int) {
+        editColors("Recolor", ids: ids, color: color)
+    }
+
+    /// Undo puts back only the colors, so it cannot rewind note text typed around the recolor.
+    private func editColors(_ name: String, ids: Set<String>, color: Int) {
+        guard HighlightPalette.isValid(color) else { return }
+        let targets = Set(ids.compactMap { annotation(matching: $0)?.highlight?.id })
+        guard !targets.isEmpty else { return }
+        let previous = Dictionary(highlights.filter { targets.contains($0.id) }.map { ($0.id, $0.color) }, uniquingKeysWith: { first, _ in first })
+        let previousLast = package.state.lastHighlightColor
+        AnnotationEdit.recolor(ids: targets, color: color, package: &package)
+        registerColorRestore(name, colors: previous, last: previousLast)
+        annotationsDidChange()
+    }
+
+    private func registerColorRestore(_ name: String, colors: [String: Int], last: Int) {
+        undoManager?.registerUndo(withTarget: self) { session in
+            var replaced: [String: Int] = [:]
+            for index in session.package.highlights.highlights.indices {
+                let id = session.package.highlights.highlights[index].id
+                guard let color = colors[id] else { continue }
+                replaced[id] = session.package.highlights.highlights[index].color
+                session.package.highlights.highlights[index].color = color
+            }
+            let replacedLast = session.package.state.lastHighlightColor
+            session.package.state.lastHighlightColor = last
+            session.registerColorRestore(name, colors: replaced, last: replacedLast)
+            session.annotationsDidChange()
         }
+        undoManager?.setActionName(name)
+    }
+
+    private func prepareRemoval(ids: Set<String>) {
+        let prepared = noteEdits.prepareRemoval(ids: ids, package: &package, now: ISO8601DateFormatter().string(from: Date()))
+        dismissNoteEditors(prepared.revoked)
+        if prepared.changed { annotationsDidChange() }
     }
 
     func removeNoteOnly(id: String) {
-        let linked = highlights.first(where: { $0.id == id })?.noteID
+        prepareRemoval(ids: [id])
         editAnnotations("Remove Note") {
-            if let linked {
-                AnnotationEdit.removeNote(id: linked, package: &package)
-            } else {
-                AnnotationEdit.removeNote(id: id, package: &package)
-            }
+            AnnotationEdit.removeNoteOnly(id: id, package: &package)
         }
-        if lastAnnotationHit == id || (linked != nil && lastAnnotationHit == linked) {
-            if !highlights.contains(where: { $0.id == id }) {
-                lastAnnotationHit = nil
-            }
+    }
+
+    func removeAnnotationCompletely(id: String) {
+        recordDeletion(ids: [id])
+        prepareRemoval(ids: [id])
+        editAnnotations("Remove Highlight") {
+            AnnotationEdit.removeAnnotation(id: id, package: &package)
         }
+    }
+
+    /// The vault and sync need the ids removed on purpose, with each highlight's linked note.
+    private func recordDeletion(ids: Set<String>) {
+        var removed = ids
+        for item in annotations where ids.contains(item.id) {
+            if let id = item.highlight?.id { removed.insert(id) }
+            if let id = item.note?.id { removed.insert(id) }
+        }
+        for highlight in highlights where ids.contains(highlight.id) {
+            if let id = highlight.noteID { removed.insert(id) }
+        }
+        deletedAnnotationIDs.formUnion(removed)
+        if let hit = lastAnnotationHit, removed.contains(hit) { lastAnnotationHit = nil }
+        annotationSelection.subtract(removed)
     }
 
     func deleteSelectedAnnotations() {
@@ -1199,6 +1277,7 @@ final class ReaderSession: ObservableObject {
 
     func deleteAnnotations(ids: Set<String>) {
         if deletingAnnotations { return }
+        flushNoteBodies()
         let chosen = annotations.filter { ids.contains($0.id) }
         guard !chosen.isEmpty else { return }
         deletingAnnotations = true
@@ -1212,25 +1291,12 @@ final class ReaderSession: ObservableObject {
             alert.buttons.first?.hasDestructiveAction = true
             guard alert.runModal() == .alertFirstButtonReturn else { return }
         }
-        var removedIDs = ids
-        for item in chosen {
-            if let hid = item.highlight?.id { removedIDs.insert(hid) }
-            if let nid = item.note?.id { removedIDs.insert(nid) }
-        }
-        deletedAnnotationIDs.formUnion(removedIDs)
-        if let hit = lastAnnotationHit, removedIDs.contains(hit) {
-            lastAnnotationHit = nil
-        }
+        recordDeletion(ids: ids)
+        prepareRemoval(ids: ids)
         editAnnotations(chosen.count == 1 ? "Delete" : "Delete Annotations") {
             AnnotationEdit.remove(ids: ids, package: &package)
         }
         annotationSelection.subtract(ids)
-    }
-
-    func recolorAnnotations(ids: Set<String>, color: Int) {
-        editAnnotations("Recolor") {
-            AnnotationEdit.recolor(ids: ids, color: color, package: &package)
-        }
     }
 
     func exportAnnotations(_ items: [Annotation]) {
@@ -1242,22 +1308,6 @@ final class ReaderSession: ObservableObject {
             guard response == .OK, let self, let url = panel.url else { return }
             try? self.annotationMarkdown(items).write(to: url, atomically: true, encoding: .utf8)
         }
-    }
-
-    func removeAnnotationCompletely(id: String) {
-        deletedAnnotationIDs.insert(id)
-        if let noteID = highlights.first(where: { $0.id == id })?.noteID {
-            deletedAnnotationIDs.insert(noteID)
-        }
-        if lastAnnotationHit == id { lastAnnotationHit = nil }
-        editAnnotations("Remove Highlight") {
-            if highlights.contains(where: { $0.id == id }) {
-                AnnotationEdit.removeHighlightAndNote(id: id, package: &package)
-            } else {
-                AnnotationEdit.removeNote(id: id, package: &package)
-            }
-        }
-        annotationSelection.remove(id)
     }
 
     func toggleMarginNotes() {
@@ -1277,10 +1327,21 @@ final class ReaderSession: ObservableObject {
         return sectionTitle
     }
 
-    func currentEPUBCFI() -> String? {
+    /// The stored location of the current section in a web document.
+    func currentLocation() -> String? {
+        if let markdown {
+            let index = min(max(page - 1, 0), max(markdown.sections.count - 1, 0))
+            guard markdown.sections.indices.contains(index) else { return nil }
+            return MarkdownAnchor.make(sectionIndex: index, anchorID: markdown.sections[index].anchorID).rawValue
+        }
         guard let epub else { return nil }
         let index = min(max(page - 1, 0), max(epub.spine.count - 1, 0))
         return EPUBCFI.make(spineIndex: index, start: 0, end: 0).value
+    }
+
+    /// The current EPUB chapter's CFI. Nil for PDF and Markdown.
+    func currentEPUBCFI() -> String? {
+        isEPUB ? currentLocation() : nil
     }
 
     private func loadPDF() {
@@ -1308,7 +1369,67 @@ final class ReaderSession: ObservableObject {
         sectionTitle = book.spine.first?.title ?? book.title
     }
 
+    private func loadMarkdown() {
+        let source = String(decoding: bookData, as: UTF8.self)
+        let model = MarkdownDocumentModel.parse(source: source, fileName: bookURL.lastPathComponent)
+        markdown = model
+        pageCount = max(model.sections.count, 1)
+        page = min(page, pageCount)
+        outline = model.headings.enumerated().map { index, heading in
+            OutlineRow(id: "md-\(index)-\(heading.id)", title: heading.title, page: nil,
+                       cfi: MarkdownAnchor.make(sectionIndex: heading.sectionIndex, anchorID: heading.id).rawValue,
+                       depth: max(heading.level - 1, 0))
+        }
+        sectionTitle = model.sections.indices.contains(page - 1) ? model.sections[page - 1].title : model.title
+        bookText = model.bookText()
+    }
+
+    func reloadMarkdown(data: Data) {
+        bookData = data
+        fingerprint = SHA256.fingerprint(data)
+        loadMarkdown()
+        adoptEditedMarkdown()
+        onPageChange?()
+    }
+
+    /// Re-anchors annotations to the new text and records the new fingerprint.
+    private func adoptEditedMarkdown() {
+        guard let model = markdown else { return }
+        flushNoteBodies()
+        let hasAnnotations = !highlights.isEmpty || !notes.isEmpty || !words.isEmpty || !marks.isEmpty
+        if hasAnnotations {
+            // Entries whose quote is gone keep their old anchor.
+            _ = Reanchorer.apply(package: &package, corpus: model.textCorpus())
+            needsReanchor = false
+        }
+        captureState()
+        let fs = LocalFileSystem()
+        var index = LibraryIndex.load(from: AppPaths.indexFile, fs: fs)
+        do {
+            try SidecarStore.adoptEditedBook(
+                package: &package, directory: nil, bookPath: bookURL.path,
+                fingerprint: fingerprint, index: &index, fs: fs
+            )
+            try index.save(to: AppPaths.indexFile, fs: fs)
+            if writesToVault {
+                if hasAnnotations { onVaultRelocate?() }
+            } else if !usesVault || hasAnnotations {
+                try persistSidecar()
+            }
+        } catch {
+            notice = error.localizedDescription
+        }
+        if hasAnnotations {
+            revokeStaleNoteEdits()
+            annotationRevision += 1
+            publishAnnotationsChanged()
+            objectWillChange.send()
+        }
+    }
+
     private func prepareBookText() {
+        // Markdown parses quickly and changes on disk, so its text is never cached.
+        if isMarkdown { return }
         if let cached = BookTextCache.load(caches: AppPaths.caches, fingerprint: fingerprint, fs: LocalFileSystem()) {
             bookText = cached
             return

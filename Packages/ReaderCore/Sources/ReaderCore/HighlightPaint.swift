@@ -1,6 +1,7 @@
 import Foundation
 
 public struct HighlightPaintMark: Equatable, Sendable {
+    public var id: String
     public var quote: String
     public var color: Int
     public var prefix: String
@@ -8,7 +9,8 @@ public struct HighlightPaintMark: Equatable, Sendable {
     public var chapter: Int?
     public var spineIndex: Int?
 
-    public init(quote: String, color: Int, prefix: String, suffix: String, chapter: Int? = nil, spineIndex: Int? = nil) {
+    public init(id: String = "", quote: String, color: Int, prefix: String, suffix: String, chapter: Int? = nil, spineIndex: Int? = nil) {
+        self.id = id
         self.quote = quote
         self.color = color
         self.prefix = prefix
@@ -24,6 +26,7 @@ public enum HighlightPaint {
         highlights.compactMap { highlight in
             guard !highlight.quote.isEmpty else { return nil }
             return HighlightPaintMark(
+                id: highlight.id,
                 quote: highlight.quote,
                 color: highlight.color,
                 prefix: highlight.prefix,

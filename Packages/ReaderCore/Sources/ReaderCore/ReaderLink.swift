@@ -57,7 +57,7 @@ public struct ReaderLink: Equatable, Sendable {
 
     /// Decoded pairs inside `loc` (`page`, `y`, `fp`). A still-encoded `page%3D3` counts.
     public var locationFields: [String: String] {
-        guard let location, !location.isEmpty, !location.hasPrefix("epubcfi(") else { return [:] }
+        guard let location, !location.isEmpty, !location.hasPrefix("epubcfi("), !location.hasPrefix("mdloc(") else { return [:] }
         let decoded = Query.unescapeDeep(location)
         var fields: [String: String] = [:]
         for part in decoded.split(whereSeparator: { $0 == "&" || $0 == ";" }) {

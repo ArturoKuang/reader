@@ -2,17 +2,19 @@ name: Reader
 options:
   bundleIdPrefix: com.reader
   deploymentTarget:
-    macOS: "14.0"
+    macOS: "15.0"
   createIntermediateGroups: true
 settings:
   SWIFT_VERSION: "5.0"
-  MACOSX_DEPLOYMENT_TARGET: "14.0"
+  MACOSX_DEPLOYMENT_TARGET: "15.0"
   SWIFT_STRICT_CONCURRENCY: minimal
 packages:
   ReaderCore:
     path: Packages/ReaderCore
   ReaderSync:
     path: Packages/ReaderSync
+  ReaderKokoro:
+    path: Packages/ReaderKokoro
 targets:
   Reader:
     type: application
@@ -27,6 +29,8 @@ targets:
         product: ReaderCore
       - package: ReaderSync
         product: ReaderSync
+      - package: ReaderKokoro
+        product: ReaderKokoro
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.reader.Reader
       PRODUCT_NAME: Reader
@@ -42,7 +46,7 @@ targets:
       SWIFT_OBJC_BRIDGING_HEADER: App/Reader/Reader-Bridging-Header.h
       ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
       LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
-      MACOSX_DEPLOYMENT_TARGET: "14.0"
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
 schemes:
   Reader:
     build:
