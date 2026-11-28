@@ -7,3 +7,7 @@ dist/
 *.xcuserstate
 *.xcscmblueprint
 .DS_Store
+# Generated from project.yml by `xcodegen generate`
+Reader.xcodeproj/
+# Screenshots and logs from the verify-reader runs
+.verify-evidence/
