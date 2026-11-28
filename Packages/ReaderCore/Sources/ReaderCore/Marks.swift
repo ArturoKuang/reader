@@ -172,6 +172,15 @@ public struct MarkStore: Equatable, Sendable {
         global.removeAll { $0.id == id }
         return local.count + global.count != before
     }
+
+    @discardableResult
+    public mutating func remove(ids: Set<String>) -> Bool {
+        guard !ids.isEmpty else { return false }
+        let before = local.count + global.count
+        local.removeAll { ids.contains($0.id) }
+        global.removeAll { ids.contains($0.id) }
+        return local.count + global.count != before
+    }
 }
 
 public struct MarkListLine: Equatable, Sendable, Identifiable {

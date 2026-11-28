@@ -35,6 +35,7 @@ struct AnnotationBrowser: View {
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize(horizontal: true, vertical: false)
+                .help("Filter and sort highlights and notes")
             }
             .padding(.horizontal, 12)
             .padding(.top, 8)
@@ -76,7 +77,7 @@ struct AnnotationBrowser: View {
                 .onChange(of: session.annotationSelection) { _, ids in
                     guard !suppressJump, ids.count == 1, let id = ids.first, let item = session.visibleAnnotations.first(where: { $0.id == id }) else { return }
                     if NSEvent.modifierFlags.contains(.option) {
-                        (NSApp.keyWindow?.windowController as? ReaderWindowController)?.openInPane(item)
+                        ReaderWindowController.controller(for: session)?.openInPane(item)
                         return
                     }
                     onJump(item)
@@ -193,7 +194,7 @@ struct AnnotationBrowser: View {
         } else if let id = ids.first, let item = session.annotations.first(where: { $0.id == id }) {
             Button("Edit Note") { beginEditing(item) }
             Button("Open in Pane") {
-                (NSApp.keyWindow?.windowController as? ReaderWindowController)?.openInPane(item)
+                ReaderWindowController.controller(for: session)?.openInPane(item)
             }
             Menu("Color") {
                 ForEach(1...6, id: \.self) { color in
@@ -234,6 +235,7 @@ struct AnnotationBrowser: View {
     private var selectionActions: some View {
         HStack(spacing: 10) {
             Button("Delete") { session.deleteSelectedAnnotations() }
+                .help("Delete all selected highlights and notes")
             Menu("Recolor") {
                 ForEach(1...6, id: \.self) { color in
                     Button(HighlightCallout.name(for: color).capitalized) {
@@ -243,10 +245,12 @@ struct AnnotationBrowser: View {
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
+            .help("Change highlight color for selected items")
             Button("Export") {
                 let items = session.visibleAnnotations.filter { session.annotationSelection.contains($0.id) }
                 session.exportAnnotations(items)
             }
+            .help("Export selected highlights and notes as Markdown")
         }
     }
 
@@ -274,6 +278,7 @@ struct AnnotationBrowser: View {
                         .buttonStyle(.borderless)
                         .font(.caption)
                         .lineLimit(1)
+                        .help("Open \(notesCaption) in Obsidian")
                 } else {
                     Text("Obsidian vault found · Not saving here")
                         .font(.caption)
@@ -290,8 +295,10 @@ struct AnnotationBrowser: View {
                     }
                 }
                 .buttonStyle(.borderless)
+                .help(session.vaultEnabled ? "Open this chapter's notes in Obsidian" : "Start saving highlights and notes into this Obsidian vault")
                 Button("Settings") { vaultSettings = true }
                     .buttonStyle(.borderless)
+                    .help("Configure vault notes folder and vocabulary file")
             }
             .padding(.horizontal, 12)
             .padding(.bottom, 8)

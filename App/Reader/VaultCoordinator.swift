@@ -12,6 +12,7 @@ final class VaultCoordinator {
     private var flushTimer: Timer?
     private var lastWritten: [String: String] = [:]
     private var loadedBlockIDs: Set<String> = []
+    private var loadedWords: [String: String] = [:]
     private var applyingOwnWrite = false
 
     init(location: VaultLocation, settings: VaultBookSettings) {
@@ -177,7 +178,12 @@ final class VaultCoordinator {
         session.package.notes.notes = notes
         session.package.highlights.highlights = highlights
         loadedBlockIDs = ids
-        session.wordsFromVault(loadVocabulary(title: session.bookURL.deletingPathExtension().lastPathComponent))
+        let vocab = loadVocabulary(title: session.bookURL.deletingPathExtension().lastPathComponent)
+        loadedWords = Dictionary(vocab.map { entry in
+            let id = entry.readerOwned ? entry.id : "hand_\(entry.word.lowercased())"
+            return (id, entry.word)
+        }, uniquingKeysWith: { first, _ in first })
+        session.wordsFromVault(vocab)
         session.objectWillChange.send()
         session.publishAnnotationsChanged()
     }
@@ -205,7 +211,13 @@ final class VaultCoordinator {
     }
 
     func reveal(id: String, chapter: Int?) {
-        let file = Paths.join(settings.notesFolder, ChapterFiles.notesFile(chapter: chapter, bookTitle: ""))
+        let file = ObsidianLink.noteFile(
+            vaultRoot: location.vaultRoot,
+            bookFolder: location.bookFolder,
+            notesFolder: settings.notesFolder,
+            chapter: chapter,
+            bookTitle: ""
+        )
         let url = URL(string: ObsidianLink.open(vault: location.vaultName, file: file, blockID: id))
         if let url { NSWorkspace.shared.open(url) }
     }
@@ -266,25 +278,38 @@ final class VaultCoordinator {
         if let existing = try? fs.list(directory) {
             for name in existing where name.hasSuffix(".md") { names.insert(name) }
         }
+        let explicitlyDeleted = session.deletedAnnotationIDs
         for name in names {
             let path = Paths.join(directory, name)
             let text = (try? fs.readString(path)) ?? ""
             let items = grouped[name] ?? []
             let keep = Set(items.map(\.id))
             let present = Set(OwnedBlocks.parse(text).compactMap(\.id))
-            let remove = present.intersection(loadedBlockIDs).subtracting(keep)
+            let remove = present.intersection(loadedBlockIDs.union(explicitlyDeleted)).subtracting(keep)
             if items.isEmpty, remove.isEmpty { continue }
             let written = VaultAnnotationSync.render(existing: text, bookPath: session.bookURL.path, annotations: items, removeIDs: remove)
             loadedBlockIDs.subtract(remove)
             for item in items { loadedBlockIDs.insert(item.id) }
             writeIfChanged(path, written)
         }
+        session.deletedAnnotationIDs.subtract(explicitlyDeleted)
     }
 
     private func writeWords(_ session: ReaderSession) {
         let path = VaultPaths.vocabularyFile(bookFolder: location.bookFolder, settings: settings, fs: fs)
         var text = (try? fs.readString(path)) ?? ""
         let title = session.bookURL.deletingPathExtension().lastPathComponent
+        let liveIDs = Set(session.words.map(\.id))
+        let removedFromLoaded = Set(loadedWords.keys).subtracting(liveIDs)
+        let explicitRemoved = session.deletedWordIDs.subtracting(liveIDs)
+        let removedIDs = removedFromLoaded.union(explicitRemoved)
+        for id in removedIDs {
+            let wordName = loadedWords[id] ?? session.deletedWordNames[id]
+            text = VocabularyFile.remove(text, id: id, word: wordName)
+            loadedWords.removeValue(forKey: id)
+            session.deletedWordIDs.remove(id)
+            session.deletedWordNames.removeValue(forKey: id)
+        }
         for word in session.words where word.id.hasPrefix("w_") {
             let added = LongDate.format(year: Calendar.current.component(.year, from: Date()), month: Calendar.current.component(.month, from: Date()), day: Calendar.current.component(.day, from: Date()))
             let lookup = word.lookups.first
@@ -301,6 +326,7 @@ final class VaultCoordinator {
                 readerOwned: true
             )
             text = VocabularyFile.upsert(text, title: title, entry: entry)
+            loadedWords[word.id] = word.word
         }
         try? fs.createDirectory(Paths.parent(path))
         writeIfChanged(path, text)

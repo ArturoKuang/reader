@@ -85,7 +85,12 @@ final class VaultRecordProjector: SyncVaultWriting {
         session.package.highlights.highlights = highlights
         session.package.notes.notes = notes
         session.package.words.words = words
-        session.onAnnotationsChanged?()
-        session.onSaveVaultState?()
+        session.publishAnnotationsChanged()
+        session.objectWillChange.send()
+        if session.usesVault {
+            session.onVaultFlush?()
+        } else {
+            session.onSaveVaultState?()
+        }
     }
 }

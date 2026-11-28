@@ -97,6 +97,18 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         readingPanes.contains { $0.session === session }
     }
 
+    static func controller(for session: ReaderSession) -> ReaderWindowController? {
+        if let key = NSApp.keyWindow?.windowController as? ReaderWindowController, key.shows(session) {
+            return key
+        }
+        for window in NSApp.windows {
+            if let controller = window.windowController as? ReaderWindowController, controller.shows(session) {
+                return controller
+            }
+        }
+        return NSApp.keyWindow?.windowController as? ReaderWindowController
+    }
+
     /// Lands a `reader://` link once the PDF or EPUB view can move.
     func applyPendingLink() {
         for pane in readingPanes {
@@ -150,6 +162,16 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         for index in indexes {
             toolbar.removeItem(at: index)
         }
+        for item in toolbar.items where item.itemIdentifier == .toggleInspector {
+            item.toolTip = "Toggle Inspector (⌘I)"
+        }
+    }
+
+    func toolbarWillAddItem(_ notification: Notification) {
+        guard let item = notification.userInfo?["item"] as? NSToolbarItem else { return }
+        if item.itemIdentifier == .toggleInspector {
+            item.toolTip = "Toggle Inspector (⌘I)"
+        }
     }
 
     private func installToast() {
@@ -199,6 +221,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             if self.handlePaneChord(event) { return nil }
             if event.keyCode == 53 {
                 self.dismissSelectionBar()
+                if self.pdfController?.isFindVisible == true || self.epubController?.isFindVisible == true {
+                    self.pdfController?.dismissFind()
+                    self.epubController?.dismissFind()
+                    return nil
+                }
                 if self.session.sidebar == .searchResults {
                     self.session.sidebar = self.session.sidebarBeforeSearch ?? .thumbnails
                     self.session.searchHits = []
@@ -374,11 +401,11 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
     // MARK: Toolbar
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .syncStatus, .vault, .inspectorTrackingSeparator, .toggleInspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .syncStatus, .vault, .inspectorTrackingSeparator, .toggleInspector]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .addNote, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .syncStatus, .vault, .inspectorTrackingSeparator, .toggleInspector]
+        [.sidebarModes, .sidebarTrackingSeparator, .backForward, .highlight, .zoomOut, .zoomIn, .appearance, .flexibleSpace, .syncStatus, .vault, .inspectorTrackingSeparator, .toggleInspector]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
@@ -388,12 +415,14 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.view = sidebarModeControl()
             item.label = "Sidebar"
+            item.toolTip = "Toggle Sidebar & Layout Options"
             return item
         case .backForward:
             // After the separator: its own capsule at the leading edge of the document.
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.view = backForwardControl()
             item.label = "History"
+            item.toolTip = "Navigate Reading History"
             item.isNavigational = true
             return item
         case .sidebarTrackingSeparator:
@@ -403,21 +432,16 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             let item = NSMenuToolbarItem(itemIdentifier: itemIdentifier)
             item.image = NSImage(systemSymbolName: "textformat.size", accessibilityDescription: "Appearance")
             item.label = "Appearance"
+            item.toolTip = "Reading Appearance (Theme, Font, Spacing)"
             item.menu = appearanceMenu()
             return item
-        case .addNote:
-            let note = NSToolbarItem(itemIdentifier: itemIdentifier)
-            note.image = NSImage(systemSymbolName: "note.text.badge.plus", accessibilityDescription: "Add Note")
-            note.action = #selector(addNote(_:))
-            note.target = self
-            note.label = "Add Note"
-            return note
         case .zoomIn:
             let zoom = NSToolbarItem(itemIdentifier: itemIdentifier)
             zoom.image = NSImage(systemSymbolName: "plus.magnifyingglass", accessibilityDescription: "Zoom In")
             zoom.action = #selector(zoomIn(_:))
             zoom.target = self
             zoom.label = "Zoom In"
+            zoom.toolTip = "Zoom In (⌘+)"
             return zoom
         case .zoomOut:
             let zoom = NSToolbarItem(itemIdentifier: itemIdentifier)
@@ -425,11 +449,13 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             zoom.action = #selector(zoomOut(_:))
             zoom.target = self
             zoom.label = "Zoom Out"
+            zoom.toolTip = "Zoom Out (⌘-)"
             return zoom
         case .highlight:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.view = highlightControl()
             item.label = "Highlight"
+            item.toolTip = "Highlight Selected Text (⌃⌘H)"
             return item
         case .search:
             let item = NSSearchToolbarItem(itemIdentifier: itemIdentifier)
@@ -440,6 +466,7 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             (item.searchField.cell as? NSActionCell)?.sendsActionOnEndEditing = false
             searchItem = item
             item.label = "Find"
+            item.toolTip = "Find in Book (⌘F)"
             return item
         case .findCount:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
@@ -448,9 +475,13 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             return item
         case .syncStatus:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.view = NSHostingView(rootView: SyncStatusChipView())
+            let hosting = NSHostingView(rootView: SyncStatusChipView())
+            hosting.sizingOptions = [.intrinsicContentSize]
+            item.view = hosting
+            item.isBordered = true
             item.label = "Sync"
             item.paletteLabel = "Sync"
+            item.toolTip = "TailDrive Sync Status"
             return item
         case .vault:
             let item = NSMenuToolbarItem(itemIdentifier: itemIdentifier)
@@ -463,6 +494,9 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             }
             item.title = session.vaultName ?? "Vault"
             item.label = "Vault"
+            item.toolTip = session.usesVault
+                ? "Obsidian Vault (\(session.vaultName ?? "Vault")) — Reveal notes or configure vault"
+                : "Not linked to an Obsidian vault"
             item.menu = vaultMenu()
             item.isEnabled = session.usesVault
             return item
@@ -484,6 +518,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         control.setImage(chevron, forSegment: 1)
         control.setWidth(32, forSegment: 0)
         control.setWidth(22, forSegment: 1)
+        control.setToolTip("Toggle Sidebar (⌥⌘1)", forSegment: 0)
+        control.setToolTip("Sidebar & Page Layout Options", forSegment: 1)
         control.target = self
         control.action = #selector(sidebarSegmentClicked(_:))
         return control
@@ -498,6 +534,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         control.setImage(NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "Highlight color"), forSegment: 1)
         control.setWidth(32, forSegment: 0)
         control.setWidth(18, forSegment: 1)
+        control.setToolTip("Highlight Selection with Last Color (⌃⌘H)", forSegment: 0)
+        control.setToolTip("Choose Highlight Color or Remove Highlight", forSegment: 1)
         control.target = self
         control.action = #selector(highlightSegment(_:))
         return control
@@ -541,6 +579,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         control.setImage(NSImage(systemSymbolName: "chevron.right", accessibilityDescription: "Forward"), forSegment: 1)
         control.setWidth(36, forSegment: 0)
         control.setWidth(36, forSegment: 1)
+        control.setToolTip("Go Back (⌘[)", forSegment: 0)
+        control.setToolTip("Go Forward (⌘])", forSegment: 1)
         control.target = self
         control.action = #selector(backForwardClicked(_:))
         return control
@@ -756,12 +796,25 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             text.selectAll(sender)
             return
         }
-        let showingNotes = session.panelTab == .notes || session.panelTab == .highlights || session.sidebar == .highlightsAndNotes
-        guard showingNotes else {
-            (window?.firstResponder as? NSText)?.selectAll(sender)
+        if session.sidebar == .marks, let responder = window?.firstResponder as? NSView, responder.isDescendant(of: sidebarHost.view) {
+            let allMarks = Set(session.marks.map(\.id) + session.globalMarks.map(\.id))
+            session.markSelection = allMarks
             return
         }
-        session.annotationSelection = Set(session.visibleAnnotations.map(\.id))
+        if session.panelVisible && session.panelTab == .words {
+            session.wordSelection = Set(session.words.map(\.id))
+            return
+        }
+        let showingNotes = (session.panelVisible && (session.panelTab == .notes || session.panelTab == .highlights)) || session.sidebar == .highlightsAndNotes
+        if showingNotes {
+            session.annotationSelection = Set(session.visibleAnnotations.map(\.id))
+            return
+        }
+        if session.sidebar == .marks {
+            session.markSelection = Set(session.marks.map(\.id) + session.globalMarks.map(\.id))
+            return
+        }
+        (window?.firstResponder as? NSText)?.selectAll(sender)
     }
 
     @objc func delete(_ sender: Any?) {
@@ -769,7 +822,17 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             text.deleteToBeginningOfLine(sender)
             return
         }
-        session.deleteSelectedAnnotations()
+        if !session.markSelection.isEmpty && session.sidebar == .marks {
+            session.deleteSelectedMarks()
+            return
+        }
+        if !session.wordSelection.isEmpty && session.panelVisible && session.panelTab == .words {
+            session.deleteSelectedWords()
+            return
+        }
+        if !session.annotationSelection.isEmpty {
+            session.deleteSelectedAnnotations()
+        }
     }
 
     @objc func copyAllNotes(_ sender: Any?) {
@@ -1078,6 +1141,14 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             }
             self.revealObsidian(id: id)
         }
+        let previousRevealVocab = session.onRevealVocabularyInObsidian
+        session.onRevealVocabularyInObsidian = { [weak self] in
+            guard let self, self.session === session else {
+                previousRevealVocab?()
+                return
+            }
+            self.revealVocabularyInObsidian()
+        }
         let previousCapture = session.onCaptureSelection
         session.onCaptureSelection = { [weak self] done in
             guard let self, self.session === session else {
@@ -1220,16 +1291,97 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
 
     func revealObsidian(id: String?) {
         guard session.usesVault, let vault = session.vaultName, let root = session.vaultRoot, let folder = session.bookFolder else { return }
-        let item = id.flatMap { value in session.annotations.first { $0.id == value } }
-        let chapter = ChapterFiles.number(in: item?.section ?? session.selection?.section ?? session.sectionTitle)
-        let file = ObsidianLink.noteFile(
-            vaultRoot: root,
-            bookFolder: folder,
+        if session.vaultEnabled {
+            session.onVaultSave?()
+        }
+        let fs = LocalFileSystem()
+        let notesDir = Paths.join(folder, session.vaultNotesFolder.isEmpty ? "notes" : session.vaultNotesFolder)
+        let item = id.flatMap { value in session.annotations.first { $0.id == value || $0.highlight?.id == value || $0.note?.id == value } }
+        let blockID = item?.id ?? id
+
+        var targetRelativeFile: String?
+        if let blockID, !blockID.isEmpty, let names = try? fs.list(notesDir) {
+            for name in names.sorted() where name.hasSuffix(".md") {
+                let candidatePath = Paths.join(notesDir, name)
+                if let text = try? fs.readString(candidatePath),
+                   (text.contains("id=\(blockID)") || text.contains("^\(blockID)")) {
+                    targetRelativeFile = ObsidianLink.displayPath(vaultRoot: root, absolute: candidatePath)
+                    break
+                }
+            }
+        }
+
+        if targetRelativeFile == nil {
+            let sectionText = item?.section ?? session.selection?.section ?? session.sectionTitle
+            let chapter = ChapterFiles.number(in: sectionText)
+            let bookTitle = session.bookURL.deletingPathExtension().lastPathComponent
+            let computed = ObsidianLink.noteFile(
+                vaultRoot: root,
+                bookFolder: folder,
+                notesFolder: session.vaultNotesFolder,
+                chapter: chapter,
+                bookTitle: bookTitle
+            )
+            let absolute = Paths.join(root, computed)
+            if fs.exists(absolute) {
+                targetRelativeFile = computed
+            } else if session.vaultEnabled {
+                try? fs.createDirectory(Paths.parent(absolute))
+                let heading: String
+                if let chapter {
+                    let cleanSection = sectionText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    heading = cleanSection.isEmpty ? "# Chapter \(chapter)\n\n" : "# Chapter \(chapter) — \(cleanSection)\n\n"
+                } else {
+                    heading = "# \(bookTitle)\n\n"
+                }
+                try? fs.writeString(absolute, heading)
+                targetRelativeFile = computed
+            } else {
+                // Vault saving is paused and this chapter file does not exist yet:
+                // fall back to an existing notes file or book README so Obsidian still routes to a real page.
+                let fallbackBookFile = ObsidianLink.noteFile(
+                    vaultRoot: root,
+                    bookFolder: folder,
+                    notesFolder: session.vaultNotesFolder,
+                    chapter: nil,
+                    bookTitle: bookTitle
+                )
+                if fs.exists(Paths.join(root, fallbackBookFile)) {
+                    targetRelativeFile = fallbackBookFile
+                } else if let existing = (try? fs.list(notesDir))?.sorted().first(where: { $0.hasSuffix(".md") }) {
+                    targetRelativeFile = ObsidianLink.displayPath(vaultRoot: root, absolute: Paths.join(notesDir, existing))
+                } else if fs.exists(Paths.join(folder, "README.md")) {
+                    targetRelativeFile = ObsidianLink.displayPath(vaultRoot: root, absolute: Paths.join(folder, "README.md"))
+                } else {
+                    targetRelativeFile = computed
+                }
+            }
+        }
+
+        if let file = targetRelativeFile,
+           let url = URL(string: ObsidianLink.open(vault: vault, file: file, blockID: blockID)) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    func revealVocabularyInObsidian() {
+        guard session.usesVault, let vault = session.vaultName, let root = session.vaultRoot, let folder = session.bookFolder else { return }
+        if session.vaultEnabled {
+            session.onVaultSave?()
+        }
+        let fs = LocalFileSystem()
+        let settings = VaultBookSettings(
             notesFolder: session.vaultNotesFolder,
-            chapter: chapter,
-            bookTitle: session.bookURL.deletingPathExtension().lastPathComponent
+            vocabularyFile: session.vaultVocabularyFile.isEmpty ? nil : session.vaultVocabularyFile
         )
-        if let url = URL(string: ObsidianLink.open(vault: vault, file: file, blockID: item?.id ?? id)) {
+        let absolute = VaultPaths.vocabularyFile(bookFolder: folder, settings: settings, fs: fs)
+        if !fs.exists(absolute), session.vaultEnabled {
+            try? fs.createDirectory(Paths.parent(absolute))
+            let title = session.bookURL.deletingPathExtension().lastPathComponent
+            try? fs.writeString(absolute, VocabularyFile.header(title: title) + "\n\n")
+        }
+        let relative = ObsidianLink.displayPath(vaultRoot: root, absolute: absolute)
+        if let url = URL(string: ObsidianLink.open(vault: vault, file: relative, blockID: nil)) {
             NSWorkspace.shared.open(url)
         }
     }
@@ -1261,7 +1413,8 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
         case #selector(togglePanel(_:)): menuItem.state = session.panelVisible ? .on : .off
         case #selector(toggleConceptMarkers(_:)): menuItem.state = session.showConceptMarkers ? .on : .off
         case #selector(showMarginNotes(_:)): menuItem.state = session.showMarginNotes ? .on : .off
-        case #selector(delete(_:)): return !session.annotationSelection.isEmpty
+        case #selector(delete(_:)):
+            return !session.annotationSelection.isEmpty || !session.wordSelection.isEmpty || !session.markSelection.isEmpty
         case #selector(revealInObsidian(_:)), #selector(openVaultFolder(_:)), #selector(pauseVault(_:)):
             if menuItem.action == #selector(pauseVault(_:)) {
                 menuItem.title = session.vaultEnabled ? "Pause Saving to Vault" : "Resume Saving to Vault"

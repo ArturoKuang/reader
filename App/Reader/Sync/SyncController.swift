@@ -254,10 +254,22 @@ final class SyncController: ObservableObject {
     private func applyPulledRecords(to session: ReaderSession) async {
         guard let engine else { return }
         let fingerprint = session.fingerprint
-        let bookId = engine.store.bookId(forSha256: fingerprint.replacingOccurrences(of: "sha256:", with: "")) ?? fingerprint
-        // Apply only records for this book. Positions apply only on open, via applyOpeningPosition.
-        let records = engine.appliedRecords.filter { $0.bookId == bookId || $0.bookId == fingerprint }
-        VaultRecordProjector.shared.apply(records: records, to: session)
+        let sha = fingerprint.replacingOccurrences(of: "sha256:", with: "")
+        let bookId = engine.store.bookId(forSha256: sha) ?? fingerprint
+        // Apply only newly pulled records for this book, skipping any record that is
+        // currently locally deleted or dirty in SyncStore so deleted notes cannot resurrect.
+        let bookIds: Set<String> = [bookId, fingerprint]
+        let pending = engine.takePendingProjectionRecords(forBookIds: bookIds)
+        guard !pending.isEmpty else { return }
+        let safeRecords = pending.filter { record in
+            if let local = engine.store.record(bookId: record.bookId, kind: record.kind, recordId: record.recordId) {
+                if local.dirty { return false }
+                if local.deleted && !record.deleted { return false }
+            }
+            return true
+        }
+        guard !safeRecords.isEmpty else { return }
+        VaultRecordProjector.shared.apply(records: safeRecords, to: session)
     }
 
     func applyOpeningPosition(to session: ReaderSession) {

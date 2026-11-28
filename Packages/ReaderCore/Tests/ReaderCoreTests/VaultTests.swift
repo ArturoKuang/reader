@@ -360,4 +360,77 @@ final class VaultTests: XCTestCase {
         XCTAssertNil(VocabularyFile.parse(markdown).first?.chapter)
         XCTAssertNil(VocabularyFile.sectionHeading(for: VocabEntry(id: "w", word: "x", chapter: nil, meaning: "", bookContext: "", added: "", readerOwned: true)))
     }
+
+    func testObsidianLinkKeepsMarkdownExtensionAndChapterNumbersMatchPDFOutlines() {
+        let dotted = ObsidianLink.open(
+            vault: "SecondBrain",
+            file: "books/boi/notes/Book (z-library.sk, 1lib.sk).md",
+            blockID: nil
+        )
+        XCTAssertTrue(dotted.contains(".md"))
+        let withBlock = ObsidianLink.open(
+            vault: "SecondBrain",
+            file: "books/boi/notes/Chapter 10.md",
+            blockID: "h123"
+        )
+        XCTAssertTrue(withBlock.contains("Chapter%2010.md%23%5Eh123"))
+
+        XCTAssertEqual(ChapterFiles.number(in: "10 A Dream of Socrates"), 10)
+        XCTAssertEqual(ChapterFiles.number(in: "4. Creation"), 4)
+        XCTAssertEqual(ChapterFiles.number(in: "1: The Reach of Explanations"), 1)
+        XCTAssertNil(ChapterFiles.number(in: "2026"))
+        XCTAssertNil(ChapterFiles.number(in: "Bibliography"))
+    }
+
+    func testVocabularyPageRoundTripAndBatchRemoval() {
+        let first = VocabEntry(
+            id: "w_tacitly",
+            word: "tacitly",
+            chapter: 1,
+            page: 14,
+            meaning: "Implicitly.",
+            bookContext: "tacitly relying on explanatory theories",
+            added: "November 27, 2026",
+            readerOwned: true
+        )
+        let second = VocabEntry(
+            id: "w_parochial",
+            word: "parochial",
+            chapter: 1,
+            page: 18,
+            meaning: "Limited to a narrow scope.",
+            bookContext: "parochial concerns",
+            added: "November 27, 2026",
+            readerOwned: true
+        )
+        var text = VocabularyFile.upsert("", title: "Beginning of Infinity", entry: first)
+        text = VocabularyFile.upsert(text, title: "Beginning of Infinity", entry: second)
+        let parsed = VocabularyFile.parse(text)
+        XCTAssertEqual(parsed.first { $0.id == "w_tacitly" }?.page, 14)
+        XCTAssertEqual(parsed.first { $0.id == "w_parochial" }?.page, 18)
+
+        let afterOne = VocabularyFile.remove(text, id: "w_tacitly", word: "tacitly")
+        XCTAssertEqual(VocabularyFile.parse(afterOne).map(\.word), ["Parochial"])
+        XCTAssertTrue(afterOne.contains("## Chapter 1"))
+
+        let afterBoth = VocabularyFile.remove(afterOne, id: "w_parochial", word: "parochial")
+        XCTAssertTrue(VocabularyFile.parse(afterBoth).isEmpty)
+        XCTAssertFalse(afterBoth.contains("## Chapter 1"))
+    }
+
+    func testMarkStoreBatchRemove() {
+        var store = MarkStore(
+            local: [
+                MarkEntry(id: "m1", symbol: "a", position: ReadingPosition(page: 10), setAt: "t1"),
+                MarkEntry(id: "m2", symbol: "b", position: ReadingPosition(page: 20), setAt: "t2"),
+            ],
+            global: [
+                MarkEntry(id: "m3", symbol: "A", position: ReadingPosition(page: 30), setAt: "t3"),
+            ]
+        )
+        XCTAssertTrue(store.remove(ids: ["m1", "m3"]))
+        XCTAssertEqual(store.local.map(\.id), ["m2"])
+        XCTAssertTrue(store.global.isEmpty)
+        XCTAssertFalse(store.remove(ids: ["missing"]))
+    }
 }

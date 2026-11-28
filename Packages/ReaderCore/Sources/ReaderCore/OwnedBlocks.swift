@@ -86,7 +86,28 @@ public enum OwnedBlocks {
     }
 
     public static func remove(_ text: String, id: String) -> String {
-        let pieces = parse(text).filter { $0.id != id }
-        return pieces.map(\.raw).joined()
+        var pieces = parse(text)
+        guard let index = pieces.firstIndex(where: { $0.id == id }) else { return text }
+        pieces.remove(at: index)
+        // Collapse separator-only newline slices that belonged to the removed block so repeated
+        // add/delete cycles do not accumulate blank lines, while preserving user text verbatim.
+        if index < pieces.count, case .user = pieces[index].kind,
+           pieces[index].raw.allSatisfy({ $0 == "\n" }) {
+            let trimmed = String(pieces[index].raw.dropFirst())
+            if trimmed.isEmpty {
+                pieces.remove(at: index)
+            } else {
+                pieces[index] = Piece(kind: .user, body: trimmed, raw: trimmed)
+            }
+        }
+        if index > 0, index <= pieces.count, case .user = pieces[index - 1].kind,
+           pieces[index - 1].raw.allSatisfy({ $0 == "\n" }) {
+            pieces.remove(at: index - 1)
+        }
+        let joined = pieces.map(\.raw).joined()
+        if joined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return ""
+        }
+        return joined
     }
 }

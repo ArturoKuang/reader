@@ -44,17 +44,19 @@ public enum VocabularyFile {
         var entries: [VocabEntry] = []
         var chapter: Int?
         var page: Int?
+        var entryPage: Int?
         var word: String?
         var fields: [String: String] = [:]
         var ownedID: String?
         func flush() {
             guard let word, !word.isEmpty else { return }
-            let handKey = chapter.map(String.init) ?? page.map { "p\($0)" } ?? "x"
+            let resolvedPage = entryPage ?? page
+            let handKey = chapter.map(String.init) ?? resolvedPage.map { "p\($0)" } ?? "x"
             entries.append(VocabEntry(
                 id: ownedID ?? "hand-\(handKey)-\(word.lowercased())",
                 word: word,
                 chapter: chapter,
-                page: page,
+                page: resolvedPage,
                 meaning: fields["Meaning"] ?? "",
                 bookContext: fields["Book context"] ?? "",
                 plainLanguage: fields["In plain language"],
@@ -68,6 +70,7 @@ public enum VocabularyFile {
             word = nil
             fields = [:]
             ownedID = nil
+            entryPage = nil
         }
         for line in text.components(separatedBy: "\n") {
             if line.hasPrefix("## Chapter ") {
@@ -91,6 +94,9 @@ public enum VocabularyFile {
             }
             if let comment = ReaderComment.parse(line: line)?.object, let id = comment["id"]?.string {
                 ownedID = id
+                if let commentPage = comment["page"]?.int {
+                    entryPage = commentPage
+                }
                 continue
             }
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -179,7 +185,78 @@ public enum VocabularyFile {
             lines.append("- **Example:** \(example)")
         }
         lines.append("- **Added:** \(entry.added)")
-        lines.append("<!-- reader {\"id\":\"\(entry.id)\"} -->")
+        if let page = entry.page, page > 0 {
+            lines.append("<!-- reader {\"id\":\"\(entry.id)\",\"page\":\(page)} -->")
+        } else {
+            lines.append("<!-- reader {\"id\":\"\(entry.id)\"} -->")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Removes a vocabulary entry matching `id` (for Reader-owned blocks) or `word` (for hand-written `### Word` sections).
+    /// Drops a `## Chapter N` or `## Page N` heading if no entries remain beneath it.
+    public static func remove(_ text: String, id: String, word: String? = nil) -> String {
+        guard !text.isEmpty else { return text }
+        var lines = text.components(separatedBy: "\n")
+        var rangeToRemove: ClosedRange<Int>?
+
+        if let marker = lines.firstIndex(where: { $0.contains("\"id\":\"\(id)\"") || $0.contains("\"id\": \"\(id)\"") }) {
+            var start = marker
+            while start > 0, !lines[start].hasPrefix("### ") { start -= 1 }
+            if lines[start].hasPrefix("### ") {
+                rangeToRemove = start...marker
+            }
+        }
+
+        if rangeToRemove == nil, let word, !word.isEmpty {
+            let needle = WordStore.normalize(word)
+            for index in lines.indices where lines[index].hasPrefix("### ") {
+                let headingWord = WordStore.normalize(String(lines[index].dropFirst(4)))
+                if headingWord == needle {
+                    var end = index
+                    while end + 1 < lines.count,
+                          !lines[end + 1].hasPrefix("### "),
+                          !lines[end + 1].hasPrefix("## ") {
+                        end += 1
+                    }
+                    while end > index, lines[end].trimmingCharacters(in: .whitespaces).isEmpty {
+                        end -= 1
+                    }
+                    rangeToRemove = index...end
+                    break
+                }
+            }
+        }
+
+        guard let range = rangeToRemove else { return text }
+        var start = range.lowerBound
+        var end = range.upperBound
+        if end + 1 < lines.count, lines[end + 1].trimmingCharacters(in: .whitespaces).isEmpty {
+            end += 1
+        } else if start > 0, lines[start - 1].trimmingCharacters(in: .whitespaces).isEmpty {
+            start -= 1
+        }
+        lines.removeSubrange(start...end)
+
+        // Remove an empty ## Chapter / ## Page section if removing this entry left it empty.
+        var scan = min(start, lines.count) - 1
+        while scan >= 0, lines[scan].trimmingCharacters(in: .whitespaces).isEmpty {
+            scan -= 1
+        }
+        if scan >= 0, (lines[scan].hasPrefix("## Chapter ") || lines[scan].hasPrefix("## Page ")) {
+            var next = scan + 1
+            while next < lines.count, lines[next].trimmingCharacters(in: .whitespaces).isEmpty {
+                next += 1
+            }
+            if next == lines.count || lines[next].hasPrefix("## ") {
+                var sectionStart = scan
+                if sectionStart > 0, lines[sectionStart - 1].trimmingCharacters(in: .whitespaces).isEmpty {
+                    sectionStart -= 1
+                }
+                lines.removeSubrange(sectionStart..<next)
+            }
+        }
+
         return lines.joined(separator: "\n")
     }
 

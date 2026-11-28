@@ -170,10 +170,13 @@ public enum ObsidianLink {
         return value
     }
 
-    /// `file` is vault-relative and may include `.md`. A block id becomes `#^id`.
+    /// `file` is vault-relative and keeps `.md` so filenames containing dots resolve reliably in Obsidian.
+    /// A block id becomes `#^id`.
     public static func open(vault: String, file: String, blockID: String? = nil) -> String {
         var note = file
-        if note.hasSuffix(".md") { note.removeLast(3) }
+        if !note.isEmpty, !note.hasSuffix(".md") {
+            note += ".md"
+        }
         if let blockID, !blockID.isEmpty {
             note += "#^\(blockID)"
         }

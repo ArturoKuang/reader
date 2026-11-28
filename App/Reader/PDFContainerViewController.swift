@@ -67,6 +67,9 @@ final class PDFContainerViewController: NSViewController {
         findBar.target = self
         findBar.action = #selector(findFromBar)
         (findBar.cell as? NSActionCell)?.sendsActionOnEndEditing = false
+        titleStrip.onPrevious = { [weak self] in self?.findPrevious() }
+        titleStrip.onNext = { [weak self] in self?.findNext() }
+        titleStrip.onClose = { [weak self] in self?.dismissFind() }
         view.addSubview(titleStrip)
         let stripConstraint = titleStrip.topAnchor.constraint(equalTo: view.topAnchor)
         stripTop = stripConstraint
@@ -402,8 +405,11 @@ final class PDFContainerViewController: NSViewController {
         refreshPaneTitle()
     }
 
+    var isFindVisible: Bool { titleStrip.isFindVisible }
+
     func focusFind() {
         setPaneActive(true)
+        titleStrip.setFindVisible(true)
         if findBar.stringValue.isEmpty { findBar.stringValue = session.findQuery }
         view.layoutSubtreeIfNeeded()
         DispatchQueue.main.async { [weak self] in
@@ -411,6 +417,18 @@ final class PDFContainerViewController: NSViewController {
             self.view.window?.makeFirstResponder(self.findBar)
             self.findBar.currentEditor()?.selectAll(nil)
         }
+    }
+
+    func dismissFind() {
+        titleStrip.setFindVisible(false)
+        titleStrip.setCount("")
+        if session.sidebar == .searchResults {
+            session.sidebar = session.sidebarBeforeSearch ?? .thumbnails
+            session.sidebarBeforeSearch = nil
+            session.searchHits = []
+            (view.window?.windowController as? ReaderWindowController)?.applyChrome()
+        }
+        view.window?.makeFirstResponder(pdfView)
     }
 
     func toggleFind() {
@@ -712,6 +730,13 @@ final class PDFContainerViewController: NSViewController {
         // the page where it is when that corner is already barely on screen.
         let destination = PDFDestination(page: page, at: NSPoint(x: position.pdfX ?? bounds.minX, y: y))
         pdfView.go(to: destination)
+        if position.pdfY == nil, position.scrollY == nil, let quote = position.quote?.trimmingCharacters(in: .whitespacesAndNewlines), !quote.isEmpty, let pageText = page.string {
+            if let range = pageText.range(of: quote, options: [.caseInsensitive, .diacriticInsensitive]),
+               let selection = page.selection(for: NSRange(range, in: pageText)) {
+                pdfView.go(to: selection)
+                flashRect(selection.bounds(for: page), on: page)
+            }
+        }
         pinPageFromMark(position)
     }
 

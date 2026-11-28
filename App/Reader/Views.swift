@@ -16,6 +16,7 @@ struct WelcomeView: View {
             Text("Open a PDF or EPUB. Drop a book here, or press Return on a recent one.")
                 .foregroundStyle(.secondary)
             Button("Open…") { NSDocumentController.shared.openDocument(nil) }
+                .help("Open a PDF or EPUB book (⌘O)")
             let urls = NSDocumentController.shared.recentDocumentURLs
             if urls.isEmpty {
                 ContentUnavailableView("No recent books", systemImage: "books.vertical", description: Text("Open a PDF or EPUB to start reading."))
@@ -199,6 +200,7 @@ struct MarkJumpOverlay: View {
                 Text("Marks").font(.headline)
                 Spacer()
                 Button("Close", action: close).buttonStyle(.borderless)
+                    .help("Close marks overlay (Esc)")
             }
             if sections.isEmpty {
                 Text("Press m and a letter to set a mark.")
@@ -239,7 +241,7 @@ struct MarkJumpOverlay: View {
 struct SidebarView: View {
     @ObservedObject var session: ReaderSession
     @State private var outlineSelection: String?
-    @State private var markSelection: String?
+    @State private var hoveredMarkID: String?
 
     private var sidebarPick: Binding<SidebarMode?> {
         Binding(
@@ -268,6 +270,7 @@ struct SidebarView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .controlSize(.small)
+            .help("Switch sidebar view between Pages, Contents, and Marks")
             .background(ClearSegmentSelection(clear: session.sidebar == .highlightsAndNotes))
             .padding(.horizontal, 8)
             .padding(.top, 8)
@@ -278,11 +281,14 @@ struct SidebarView: View {
                     HStack {
                         if session.needsReanchor {
                             Button("Re-anchor") { session.reanchor() }
+                                .help("Match existing notes and highlights to the updated book text")
                         }
                         if session.offerMoveTo != nil {
                             Button("Move notes") { session.acceptMove() }
+                                .help("Move sidecar notes next to the book file")
                         }
                         Button("Dismiss") { session.dismissNotice() }
+                            .help("Dismiss this notice")
                     }
                 }
                 .padding(8)
@@ -381,17 +387,63 @@ struct SidebarView: View {
     }
 
     private func jumpAnnotation(_ item: Annotation) {
-        guard let controller = NSApp.keyWindow?.windowController as? ReaderWindowController else { return }
+        guard let controller = ReaderWindowController.controller(for: session) else { return }
         controller.reveal(ReadingPosition(page: item.page, cfi: item.cfi, section: item.section, quote: item.quote))
     }
 
     private var marksList: some View {
         let sections = MarkList.sections(local: session.marks, global: session.globalMarks)
-        return Group {
+        let allIDs = sections.flatMap { $0.lines.map(\.id) }
+        return VStack(alignment: .leading, spacing: 6) {
             if sections.isEmpty {
                 ContentUnavailableView("No marks", systemImage: "bookmark", description: Text("Press m and a letter to set a mark."))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(selection: $markSelection) {
+                HStack(spacing: 8) {
+                    if session.markSelection.count > 1 {
+                        Text("\(session.markSelection.count) selected")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button("Delete") { session.deleteSelectedMarks() }
+                            .buttonStyle(.borderless)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .help("Delete all selected marks")
+                        Spacer()
+                        Button("Clear") { session.markSelection.removeAll() }
+                            .buttonStyle(.borderless)
+                            .font(.caption)
+                            .help("Clear mark selection (Esc)")
+                    } else {
+                        Text("\(allIDs.count) \(allIDs.count == 1 ? "mark" : "marks")")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Menu {
+                            Button("Select All") { session.markSelection = Set(allIDs) }
+                            if !session.marks.isEmpty {
+                                Button("Delete All in This Book", role: .destructive) {
+                                    session.removeMarks(ids: Set(session.marks.map(\.id)))
+                                }
+                            }
+                            if !allIDs.isEmpty {
+                                Button("Delete All Marks", role: .destructive) {
+                                    session.removeMarks(ids: Set(allIDs))
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                                .font(.caption)
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .help("Batch select or delete marks")
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.top, 4)
+
+                List(selection: $session.markSelection) {
                     ForEach(sections) { section in
                         Section(section.title) {
                             ForEach(section.lines) { line in
@@ -403,40 +455,76 @@ struct SidebarView: View {
                                             Text(line.snippet).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                                         }
                                     }
+                                    Spacer(minLength: 4)
+                                    if hoveredMarkID == line.id || session.markSelection.contains(line.id) {
+                                        Button {
+                                            session.removeMark(id: line.id)
+                                        } label: {
+                                            Image(systemName: "trash")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .help("Delete mark \(line.symbol)")
+                                    }
                                 }
                                 .contentShape(Rectangle())
+                                .onHover { hovering in
+                                    hoveredMarkID = hovering ? line.id : (hoveredMarkID == line.id ? nil : hoveredMarkID)
+                                }
                                 .tag(line.id)
                             }
                         }
                     }
                 }
                 .listStyle(.sidebar)
-                .onChange(of: markSelection) { _, id in
-                    guard let id else { return }
+                .onChange(of: session.markSelection) { _, ids in
+                    guard ids.count == 1, let id = ids.first else { return }
                     jumpToMark(id: id)
                 }
-                .onKeyPress(keys: [.return], phases: .down) { _ in
-                    guard let markSelection else { return .ignored }
-                    jumpToMark(id: markSelection)
-                    return .handled
+                .contextMenu(forSelectionType: String.self) { ids in
+                    if ids.count > 1 {
+                        Button("Delete \(ids.count) Marks", role: .destructive) {
+                            session.removeMarks(ids: ids)
+                        }
+                    } else if let id = ids.first {
+                        Button("Jump to Mark") { jumpToMark(id: id) }
+                        Button("Delete Mark", role: .destructive) { session.removeMark(id: id) }
+                    }
+                } primaryAction: { ids in
+                    if ids.count == 1, let id = ids.first { jumpToMark(id: id) }
                 }
-                .onKeyPress(keys: [KeyEquivalent("x")], phases: .down) { _ in
-                    guard let markSelection else { return .ignored }
-                    session.removeMark(id: markSelection)
-                    return .handled
+                .onDeleteCommand { session.deleteSelectedMarks() }
+                .onExitCommand { session.markSelection.removeAll() }
+                .onKeyPress(phases: .down) { press in
+                    if press.key == KeyEquivalent("a"), press.modifiers.contains(.command), !press.modifiers.contains(.shift) {
+                        session.markSelection = Set(allIDs)
+                        return .handled
+                    }
+                    if press.key == .return, session.markSelection.count == 1, let id = session.markSelection.first {
+                        jumpToMark(id: id)
+                        return .handled
+                    }
+                    if press.key == .delete || press.characters == "\u{8}" || press.characters == "\u{7F}" || press.key == KeyEquivalent("x") {
+                        guard !session.markSelection.isEmpty else { return .ignored }
+                        session.deleteSelectedMarks()
+                        return .handled
+                    }
+                    return .ignored
                 }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func jumpToMark(id: String) {
         let mark = session.marks.first { $0.id == id } ?? session.globalMarks.first { $0.id == id }
         guard let mark else { return }
         if mark.scope == .global, mark.bookFingerprint != session.fingerprint, let path = mark.bookPath {
-            (NSApp.keyWindow?.windowController as? ReaderWindowController)?.openBookInOtherPane(url: URL(fileURLWithPath: path), position: mark.position)
+            ReaderWindowController.controller(for: session)?.openBookInOtherPane(url: URL(fileURLWithPath: path), position: mark.position)
             return
         }
-        guard let controller = NSApp.keyWindow?.windowController as? ReaderWindowController else { return }
+        guard let controller = ReaderWindowController.controller(for: session) else { return }
         controller.reveal(mark.position)
     }
 
@@ -453,7 +541,7 @@ struct SidebarView: View {
                         Text(bookmark.page.map { "p. \($0)" } ?? bookmark.section ?? "").font(.caption).foregroundStyle(.secondary)
                     }
                     .onTapGesture {
-                        guard let controller = NSApp.keyWindow?.windowController as? ReaderWindowController else { return }
+                        guard let controller = ReaderWindowController.controller(for: session) else { return }
                         controller.reveal(ReadingPosition(page: bookmark.page, cfi: bookmark.cfi, section: bookmark.section))
                     }
                     .contextMenu {
@@ -487,18 +575,35 @@ struct SidebarView: View {
     }
 
     private func markRow(_ mark: MarkEntry, global: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("\(mark.symbol)  \(mark.position.section ?? mark.position.page.map { "p. \($0)" } ?? "")")
-                .font(.callout.monospaced())
-            Text(global ? (mark.documentTitle ?? "Another book") : "This book")
-                .font(.caption).foregroundStyle(.secondary)
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(mark.symbol)  \(mark.position.section ?? mark.position.page.map { "p. \($0)" } ?? "")")
+                    .font(.callout.monospaced())
+                Text(global ? (mark.documentTitle ?? "Another book") : "This book")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button {
+                session.removeMark(id: mark.id)
+            } label: {
+                Image(systemName: "trash")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Delete mark \(mark.symbol)")
         }
+        .contentShape(Rectangle())
         .onTapGesture {
             if global, mark.bookFingerprint != session.fingerprint, let path = mark.bookPath {
-                (NSApp.keyWindow?.windowController as? ReaderWindowController)?.openBookInOtherPane(url: URL(fileURLWithPath: path), position: mark.position)
-            } else if let controller = NSApp.keyWindow?.windowController as? ReaderWindowController {
+                ReaderWindowController.controller(for: session)?.openBookInOtherPane(url: URL(fileURLWithPath: path), position: mark.position)
+            } else if let controller = ReaderWindowController.controller(for: session) {
                 controller.reveal(mark.position)
             }
+        }
+        .contextMenu {
+            Button("Jump to Mark") { jumpToMark(id: mark.id) }
+            Button("Delete Mark", role: .destructive) { session.removeMark(id: mark.id) }
         }
     }
 
@@ -513,7 +618,7 @@ struct SidebarView: View {
         session.recordJump(from: ReadingPosition(page: session.page, zoom: session.zoom, section: session.sectionTitle), to: ReadingPosition(page: page))
         session.page = page
         session.onPageChange?()
-        if let controller = NSApp.keyWindow?.windowController as? ReaderWindowController {
+        if let controller = ReaderWindowController.controller(for: session) {
             controller.reveal(ReadingPosition(page: page))
         }
     }
@@ -642,6 +747,7 @@ struct RightPanelView: View {
             .pickerStyle(.segmented)
             .padding(8)
             .labelsHidden()
+            .help("Switch inspector tab between Notes, Words, and Ask AI")
             Divider()
             switch session.panelTab {
             case .notes, .highlights:
@@ -659,7 +765,7 @@ struct RightPanelView: View {
     }
 
     private func jumpAnnotation(_ item: Annotation) {
-        guard let controller = NSApp.keyWindow?.windowController as? ReaderWindowController else { return }
+        guard let controller = ReaderWindowController.controller(for: session) else { return }
         controller.reveal(ReadingPosition(page: item.page, cfi: item.cfi, section: item.section, quote: item.quote))
     }
 
@@ -673,19 +779,26 @@ struct RightPanelView: View {
                         Image(systemName: "xmark.circle.fill")
                     }
                     .buttonStyle(.borderless)
+                    .help("Clear selected passage and chat")
                 }
             }
             ControlGroup {
                 Button("Explain") { session.withSelection { session.ask(purpose: .explainSimply) } }
+                    .help("Explain the selected passage in plain language")
                 Button("Summarize") { session.withSelection { session.ask(purpose: .summarizeSection) } }
+                    .help("Summarize the current section")
                 Button("Define Terms") { session.withSelection { session.ask(purpose: .ask("Define the difficult terms in this passage.")) } }
+                    .help("Define unfamiliar terms in this passage")
             }
             if session.tutorAvailable {
                 Text("Tutor").font(.caption).foregroundStyle(.secondary)
                 ControlGroup {
                     Button("Learn") { session.withSelection { session.askTutor(command: .learn, question: session.question) } }
+                        .help("Start an interactive tutor exchange on this passage")
                     Button("Review") { session.withSelection { session.askTutor(command: .review, question: session.question) } }
+                        .help("Review concepts from this chapter with the tutor")
                     Button("Wrap") { session.withSelection { session.askTutor(command: .wrap, question: session.question) } }
+                        .help("Wrap up and log this chapter with the tutor")
                 }
             }
             if let setup = session.aiSetup {
@@ -693,6 +806,7 @@ struct RightPanelView: View {
                     Text("Set up AI").font(.headline)
                     Text(setup).font(.callout)
                     Button("Open Settings…") { NSApp.sendAction(#selector(AppDelegate.showSettings(_:)), to: nil, from: nil) }
+                        .help("Open Reader Settings to configure AI providers")
                 }
                 .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -715,10 +829,12 @@ struct RightPanelView: View {
                                         NSPasteboard.general.clearContents()
                                         NSPasteboard.general.setString(line.text, forType: .string)
                                     }
+                                    .help("Copy answer to clipboard")
                                     Button("Save as Note") {
                                         session.answer = line.text
                                         session.saveAnswerAsNote()
                                     }
+                                    .help("Save this answer as a note on the passage")
                                 }
                                 .buttonStyle(.borderless)
                             }
@@ -761,6 +877,7 @@ struct RightPanelView: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
+                .help("Choose the AI provider for questions")
                 .onAppear {
                     if session.askChoice.isEmpty {
                         session.askChoice = session.tutorAvailable ? "tutor" : session.provider.rawValue
@@ -772,7 +889,10 @@ struct RightPanelView: View {
                     .foregroundStyle(.secondary)
             }
                 Spacer()
-                if session.asking { Button("Stop") { session.stopAsk() } }
+                if session.asking {
+                    Button("Stop") { session.stopAsk() }
+                        .help("Cancel the current AI request")
+                }
             }
         }
     }
@@ -783,6 +903,7 @@ struct WordList: View {
     @State private var query = ""
     @State private var sort = "recent"
     @State private var filter = "all"
+    @State private var hoveredWordID: String?
 
     private var vocabularyCaption: String {
         guard session.vaultEnabled, let root = session.vaultRoot, let folder = session.bookFolder else {
@@ -802,67 +923,201 @@ struct WordList: View {
             VStack(alignment: .leading, spacing: 6) {
                 TextField("Search words", text: $query)
                     .textFieldStyle(.roundedBorder)
-                Menu {
-                    Section("Sort") {
-                        Button("Recent") { sort = "recent" }
-                        Button("A–Z") { sort = "alpha" }
-                        Button("Page") { sort = "page" }
+                HStack {
+                    Menu {
+                        Section("Sort") {
+                            Button("Recent") { sort = "recent" }
+                            Button("A–Z") { sort = "alpha" }
+                            Button("Page") { sort = "page" }
+                        }
+                        Section("Filter") {
+                            Button("All") { filter = "all" }
+                            Button("Learning") { filter = "learning" }
+                            Button("Learned") { filter = "learned" }
+                        }
+                    } label: {
+                        Label(wordMenuTitle, systemImage: "line.3.horizontal.decrease")
                     }
-                    Section("Filter") {
-                        Button("All") { filter = "all" }
-                        Button("Learning") { filter = "learning" }
-                        Button("Learned") { filter = "learned" }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .help("Sort and filter saved words")
+                    Spacer()
+                    if !rows.isEmpty {
+                        Menu {
+                            Button("Select All (\(rows.count))") {
+                                session.wordSelection = Set(rows.map(\.id))
+                            }
+                            if !session.wordSelection.isEmpty {
+                                Button("Remove Selected (\(session.wordSelection.count))", role: .destructive) {
+                                    session.deleteSelectedWords()
+                                }
+                            }
+                            Button("Remove All Shown (\(rows.count))", role: .destructive) {
+                                session.deleteWords(ids: Set(rows.map(\.id)))
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .help("Batch select or remove words")
                     }
-                } label: {
-                    Label(wordMenuTitle, systemImage: "line.3.horizontal.decrease")
                 }
-                .menuStyle(.borderlessButton)
-                .fixedSize(horizontal: true, vertical: false)
             }
             .padding(.horizontal, 12)
             .padding(.top, 8)
+
+            if session.wordSelection.count > 1 {
+                wordSelectionStrip
+            }
+
             if rows.isEmpty {
-                ContentUnavailableView("No words yet", systemImage: "character.book.closed", description: Text("Look up a word with ⌃⌘D or Force Click. It lands here with its sentence."))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if query.isEmpty && filter == "all" {
+                    ContentUnavailableView("No words yet", systemImage: "character.book.closed", description: Text("Look up a word with ⌃⌘D or Force Click. It lands here with its sentence."))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ContentUnavailableView.search(text: query)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             } else {
-                List {
+                List(selection: $session.wordSelection) {
                     ForEach(rows) { word in
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(word.word).font(.body.weight(.semibold))
-                            Text(word.definition).font(.callout).lineLimit(2)
-                            if let sentence = word.lookups.first?.sentence {
-                                Text(sentence).font(.caption).lineLimit(1)
+                        HStack(alignment: .top, spacing: 6) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 4) {
+                                    Text(word.word).font(.body.weight(.semibold))
+                                    if word.learned {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                if !word.definition.isEmpty {
+                                    Text(word.definition).font(.callout).lineLimit(2)
+                                }
+                                if let sentence = word.lookups.first?.sentence, !sentence.isEmpty {
+                                    Text(sentence).font(.caption).lineLimit(1)
+                                }
+                                let location = word.lookups.first?.page.map { "p. \($0)" } ?? word.lookups.first?.section ?? ""
+                                if !location.isEmpty {
+                                    Text(location).font(.caption).foregroundStyle(.secondary)
+                                }
                             }
-                            Text(word.lookups.first?.page.map { "p. \($0)" } ?? word.lookups.first?.section ?? "").font(.caption).foregroundStyle(.secondary)
+                            Spacer(minLength: 4)
+                            if hoveredWordID == word.id || session.wordSelection.contains(word.id) {
+                                Button {
+                                    session.deleteWord(id: word.id)
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Remove “\(word.word)”")
+                            }
                         }
+                        .padding(.vertical, 2)
                         .contentShape(Rectangle())
-                        .onTapGesture {
-                            guard let lookup = word.lookups.first, let controller = NSApp.keyWindow?.windowController as? ReaderWindowController else { return }
-                            controller.reveal(ReadingPosition(page: lookup.page, cfi: lookup.cfi, section: lookup.section, quote: lookup.sentence))
+                        .onHover { hovering in
+                            hoveredWordID = hovering ? word.id : (hoveredWordID == word.id ? nil : hoveredWordID)
                         }
-                        .contextMenu {
-                            Button("Copy") { copy(word.word) }
-                            Button("Copy with Sentence") { copy("\(word.word) — \(word.lookups.first?.sentence ?? "")") }
-                            Button(word.learned ? "Mark Learning" : "Mark Learned") { session.setLearned(id: word.id, learned: !word.learned) }
-                            Button("Remove") { session.deleteWord(id: word.id) }
-                        }
+                        .tag(word.id)
                     }
                     .onDelete { offsets in
-                        offsets.map { rows[$0].id }.forEach { session.deleteWord(id: $0) }
+                        let ids = Set(offsets.map { rows[$0].id })
+                        session.deleteWords(ids: ids)
                     }
+                }
+                .onChange(of: session.wordSelection) { _, ids in
+                    guard ids.count == 1, let id = ids.first, let word = rows.first(where: { $0.id == id }) else { return }
+                    jumpToWord(word)
+                }
+                .contextMenu(forSelectionType: String.self) { ids in
+                    if ids.count > 1 {
+                        Button("Mark \(ids.count) Learned") { session.setLearned(ids: ids, learned: true) }
+                        Button("Mark \(ids.count) Learning") { session.setLearned(ids: ids, learned: false) }
+                        Divider()
+                        Button("Remove \(ids.count) Words", role: .destructive) { session.deleteWords(ids: ids) }
+                    } else if let id = ids.first, let word = session.words.first(where: { $0.id == id }) {
+                        Button("Go to Page") { jumpToWord(word) }
+                        Divider()
+                        Button("Copy") { copy(word.word) }
+                        Button("Copy with Sentence") { copy("\(word.word) — \(word.lookups.first?.sentence ?? "")") }
+                        Button(word.learned ? "Mark Learning" : "Mark Learned") { session.setLearned(id: word.id, learned: !word.learned) }
+                        Divider()
+                        Button("Remove", role: .destructive) { session.deleteWord(id: word.id) }
+                    }
+                } primaryAction: { ids in
+                    guard ids.count == 1, let id = ids.first, let word = rows.first(where: { $0.id == id }) else { return }
+                    jumpToWord(word)
+                }
+                .onDeleteCommand { session.deleteSelectedWords() }
+                .onExitCommand { session.wordSelection.removeAll() }
+                .onKeyPress(phases: .down) { press in
+                    if press.key == KeyEquivalent("a"), press.modifiers.contains(.command), !press.modifiers.contains(.shift) {
+                        session.wordSelection = Set(rows.map(\.id))
+                        return .handled
+                    }
+                    if press.key == .delete || press.characters == "\u{8}" || press.characters == "\u{7F}" {
+                        guard !session.wordSelection.isEmpty else { return .ignored }
+                        session.deleteSelectedWords()
+                        return .handled
+                    }
+                    return .ignored
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             if session.usesVault {
-                Text(vocabularyCaption)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 8)
+                HStack {
+                    if session.vaultEnabled {
+                        Button(vocabularyCaption) { session.onRevealVocabularyInObsidian?() }
+                            .buttonStyle(.borderless)
+                            .font(.caption)
+                            .lineLimit(1)
+                            .help("Open \(vocabularyCaption) in Obsidian")
+                        Spacer()
+                        Button("Reveal") { session.onRevealVocabularyInObsidian?() }
+                            .buttonStyle(.borderless)
+                            .help("Open vocabulary file in Obsidian")
+                    } else {
+                        Text(vocabularyCaption)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var wordSelectionStrip: some View {
+        HStack(spacing: 10) {
+            Text("\(session.wordSelection.count) selected")
+                .foregroundStyle(.secondary)
+            Button("Remove") { session.deleteSelectedWords() }
+                .foregroundStyle(.red)
+                .help("Remove all selected words")
+            Button("Learned") { session.setLearned(ids: session.wordSelection, learned: true) }
+                .help("Mark all selected words as learned")
+            Spacer()
+            Button("Clear") { session.wordSelection.removeAll() }
+                .help("Clear word selection (Esc)")
+        }
+        .font(.caption)
+        .buttonStyle(.borderless)
+        .padding(.horizontal, 12)
+    }
+
+    private func jumpToWord(_ word: WordEntry) {
+        guard let controller = ReaderWindowController.controller(for: session) else { return }
+        if let position = session.resolveWordPosition(word) {
+            controller.reveal(position)
+        } else {
+            session.showToast("Couldn't find “\(word.word)” in this book")
+        }
     }
 
     private var wordMenuTitle: String {

@@ -260,14 +260,14 @@ private final class SelectionChrome: NSView {
         }
         views.append(DividerLine(frame: NSRect(x: 0, y: 0, width: 9, height: 24)))
         let actions: [(String, String, String, Selector)] = [
-            ("note.text", "Note", "⇧⌘N", #selector(SelectionBarController.noteClicked(_:))),
-            ("character.book.closed", "Look Up", "⌃⌘D", #selector(SelectionBarController.lookUpClicked(_:))),
-            ("sparkles", "Ask AI", "⌘K", #selector(SelectionBarController.askClicked(_:))),
-            ("doc.on.doc", "Copy", "⌘C", #selector(SelectionBarController.copyClicked(_:))),
+            ("note.text", "Note", "Add Note (⇧⌘N)", #selector(SelectionBarController.noteClicked(_:))),
+            ("character.book.closed", "Look Up", "Look Up Word (⌃⌘D)", #selector(SelectionBarController.lookUpClicked(_:))),
+            ("sparkles", "Ask AI", "Ask AI about Selection (⌘K)", #selector(SelectionBarController.askClicked(_:))),
+            ("doc.on.doc", "Copy", "Copy Selection (⌘C)", #selector(SelectionBarController.copyClicked(_:))),
         ]
         for action in actions {
             let button = BarButton(symbol: action.0, title: action.1, showsTitle: !compact)
-            button.toolTip = compact ? "\(action.1) (\(action.2))" : action.2
+            button.toolTip = action.2
             button.target = target
             button.action = action.3
             views.append(button)

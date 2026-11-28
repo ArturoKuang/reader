@@ -68,7 +68,7 @@ final class NotePopoverController: NSObject, NSTextViewDelegate, NSPopoverDelega
             }
             let name = HighlightCallout.name(for: index).capitalized
             button.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: name)
-            button.toolTip = name
+            button.toolTip = "Highlight \(name)"
             button.setAccessibilityLabel(name)
             colorButtons.append(button)
             colors.addArrangedSubview(button)
@@ -104,6 +104,7 @@ final class NotePopoverController: NSObject, NSTextViewDelegate, NSPopoverDelega
         saved.isHidden = true
         let more = NSButton()
         more.image = NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: "Note actions")
+        more.toolTip = "Note Actions (Copy Link, Reveal in Obsidian, Remove)"
         more.bezelStyle = .inline
         more.isBordered = false
         more.target = self
@@ -269,6 +270,6 @@ private final class PlaceholderTextView: NSTextView {
             .foregroundColor: NSColor.placeholderTextColor,
             .font: font ?? NSFont.systemFont(ofSize: 13),
         ]
-        placeholder.draw(at: NSPoint(x: textContainerInset.width + 4, y: bounds.height - 20), withAttributes: attributes)
+        placeholder.draw(at: NSPoint(x: textContainerInset.width + 4, y: textContainerInset.height), withAttributes: attributes)
     }
 }

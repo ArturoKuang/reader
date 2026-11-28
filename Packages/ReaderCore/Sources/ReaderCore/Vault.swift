@@ -74,9 +74,21 @@ public enum ChapterFiles {
             let digits = rest.prefix { $0.isNumber }
             if let value = Int(digits), !digits.isEmpty { return value }
         }
-        let trimmed = heading.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if trimmed == "introduction" || trimmed.hasPrefix("introduction ") || trimmed.hasPrefix("introduction:") || trimmed == "intro" || trimmed.hasPrefix("preface") {
+        let trimmed = heading.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedLower = trimmed.lowercased()
+        if trimmedLower == "introduction" || trimmedLower.hasPrefix("introduction ") || trimmedLower.hasPrefix("introduction:") || trimmedLower == "intro" || trimmedLower.hasPrefix("preface") {
             return 0
+        }
+        // Numbered chapter headings in PDF outlines, e.g. "10 A Dream of Socrates" or "4. Creation".
+        let digits = trimmed.prefix { $0.isNumber }
+        if !digits.isEmpty, digits.count <= 3, let value = Int(digits), value > 0 {
+            let afterDigits = trimmed[digits.endIndex...]
+            if let first = afterDigits.first, first == " " || first == "." || first == ":" || first == "-" || first == "—" || first == "–" {
+                let remainder = afterDigits.drop { $0 == " " || $0 == "." || $0 == ":" || $0 == "-" || $0 == "—" || $0 == "–" || $0 == "·" }
+                if remainder.contains(where: \.isLetter) {
+                    return value
+                }
+            }
         }
         return nil
     }

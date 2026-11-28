@@ -3,47 +3,58 @@ import ReaderSync
 
 struct SyncStatusChipView: View {
     @ObservedObject var controller = SyncController.shared
+    @State private var popoverVisible = false
 
     var body: some View {
-        Button(action: {
-            if controller.status.state == .conflict {
-                controller.handleChipClick()
-            } else if controller.status.state == .error {
-                Task { await controller.retry() }
-            } else if controller.status.state == .storageFull {
-                Task { await controller.checkAgain() }
-            }
-        }) {
-            HStack(spacing: 6) {
+        Button(action: handleClick) {
+            HStack(spacing: 5) {
                 Circle()
                     .fill(Color(hex: controller.status.state.dotHex))
-                    .frame(width: 8, height: 8)
+                    .frame(width: 7, height: 7)
                     .opacity(controller.status.state.animates ? 0.55 : 1)
                 Text(chipLabel)
-                    .font(.caption.weight(.medium))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.primary)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(.quaternary.opacity(0.5), in: Capsule())
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(controller.status.detail ?? controller.status.label)
+        .help(tooltipText)
         .sheet(isPresented: $controller.showingConflictReview) {
             ConflictReviewView()
         }
-        .popover(isPresented: Binding(
-            get: { popoverVisible },
-            set: { if !$0 { popoverVisible = false } }
-        )) {
+        .popover(isPresented: $popoverVisible) {
             statusPopover
                 .padding(14)
                 .frame(width: 280)
         }
     }
 
-    @State private var popoverVisible = false
-
     private var chipLabel: String { controller.status.label }
+
+    private var tooltipText: String {
+        if let detail = controller.status.detail, !detail.isEmpty {
+            return "Sync: \(controller.status.label) — \(detail)"
+        }
+        return "Sync: \(controller.status.label) — Click for sync status and manual sync"
+    }
+
+    private func handleClick() {
+        switch controller.status.state {
+        case .conflict:
+            controller.handleChipClick()
+        case .error:
+            popoverVisible = true
+            Task { await controller.retry() }
+        case .storageFull:
+            popoverVisible = true
+            Task { await controller.checkAgain() }
+        case .synced, .syncing, .offline:
+            popoverVisible.toggle()
+        }
+    }
 
     private var statusPopover: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -64,12 +75,19 @@ struct SyncStatusChipView: View {
                         .foregroundStyle(.secondary)
                 }
                 Button("Check again") { Task { await controller.checkAgain() } }
-            }
-            if controller.status.state == .error {
+                    .help("Check whether TailDrive storage has space available")
+            } else if controller.status.state == .error {
                 Button("Retry") { Task { await controller.retry() } }
-            }
-            if controller.status.state == .conflict {
-                Button("Review versions") { controller.showingConflictReview = true }
+                    .help("Retry syncing with TailDrive")
+            } else if controller.status.state == .conflict {
+                Button("Review versions") {
+                    popoverVisible = false
+                    controller.showingConflictReview = true
+                }
+                .help("Open conflict review to pick which version to keep")
+            } else {
+                Button("Sync Now") { Task { await controller.syncNow() } }
+                    .help("Push local changes and pull updates now")
             }
         }
     }

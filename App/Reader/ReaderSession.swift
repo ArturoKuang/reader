@@ -71,11 +71,17 @@ final class ReaderSession: ObservableObject {
     @Published var annotationFilter = "all"
     @Published var annotationSortRecent = false
     @Published var annotationSelection = Set<String>()
+    @Published var wordSelection = Set<String>()
+    @Published var markSelection = Set<String>()
+    var deletedAnnotationIDs = Set<String>()
+    var deletedWordIDs = Set<String>()
+    var deletedWordNames: [String: String] = [:]
     private var deletingAnnotations = false
     @Published var annotationRevision = 0
     @Published var showMarginNotes = false
     var onPresentNote: ((String) -> Void)?
     var onRevealInObsidian: ((String?) -> Void)?
+    var onRevealVocabularyInObsidian: (() -> Void)?
     var onRelocateNotes: ((String, String, Bool) -> Void)?
     private var noteSaveTimer: Timer?
     private var pendingNoteBodies: [String: String] = [:]
@@ -558,12 +564,56 @@ final class ReaderSession: ObservableObject {
     }
 
     func deleteWord(id: String) {
-        package.words.words.removeAll { $0.id == id }
+        deleteWords(ids: [id])
+    }
+
+    func deleteSelectedWords() {
+        deleteWords(ids: wordSelection)
+    }
+
+    func deleteWords(ids: Set<String>) {
+        guard !ids.isEmpty else { return }
+        let removed = package.words.words.filter { ids.contains($0.id) }
+        guard !removed.isEmpty else { return }
+        let previous = package.words.words
+        for word in removed {
+            deletedWordIDs.insert(word.id)
+            deletedWordNames[word.id] = word.word
+        }
+        package.words.words.removeAll { ids.contains($0.id) }
+        wordSelection.subtract(ids)
+        undoManager?.registerUndo(withTarget: self) { session in
+            session.restoreWords(previous)
+        }
+        undoManager?.setActionName(removed.count == 1 ? "Remove Word" : "Remove Words")
+        dirty()
+        showToast(removed.count == 1 ? "Removed “\(removed[0].word)”" : "Removed \(removed.count) words")
+    }
+
+    private func restoreWords(_ words: [WordEntry]) {
+        let previous = package.words.words
+        for word in words {
+            deletedWordIDs.remove(word.id)
+            deletedWordNames.removeValue(forKey: word.id)
+        }
+        package.words.words = words
+        undoManager?.registerUndo(withTarget: self) { session in
+            session.restoreWords(previous)
+        }
+        undoManager?.setActionName("Remove Words")
         dirty()
     }
 
     func setLearned(id: String, learned: Bool) {
         WordStore.setLearned(words: &package.words.words, id: id, learned: learned)
+        dirty()
+    }
+
+    func setLearned(ids: Set<String>, learned: Bool) {
+        guard !ids.isEmpty else { return }
+        for id in ids {
+            WordStore.setLearned(words: &package.words.words, id: id, learned: learned)
+        }
         dirty()
     }
 
@@ -748,9 +798,114 @@ final class ReaderSession: ObservableObject {
                 word: entry.word,
                 definition: entry.meaning,
                 explanation: entry.plainLanguage,
-                lookups: [LookupEntry(id: "l_\(entry.id)", section: entry.chapter.map { "Chapter \($0)" }, quote: entry.word, sentence: entry.bookContext, date: entry.added)]
+                lookups: [LookupEntry(
+                    id: "l_\(entry.id)",
+                    page: entry.page,
+                    section: entry.chapter.map { "Chapter \($0)" },
+                    quote: entry.word,
+                    sentence: entry.bookContext,
+                    date: entry.added
+                )]
             )
         }
+    }
+
+    /// Resolves a word's reading position, using its stored page/CFI when available
+    /// and falling back to searching the book text for its context sentence or word.
+    func resolveWordPosition(_ word: WordEntry) -> ReadingPosition? {
+        let lookup = word.lookups.first
+        if let lookup, (lookup.page != nil || (lookup.cfi?.isEmpty == false)) {
+            let quote = lookup.sentence.isEmpty ? (lookup.quote.isEmpty ? word.word : lookup.quote) : lookup.sentence
+            return ReadingPosition(page: lookup.page, cfi: lookup.cfi, section: lookup.section, quote: quote)
+        }
+
+        let targetChapter = lookup?.section.flatMap { ChapterFiles.number(in: $0) }
+        let candidates = searchCandidates(for: word, lookup: lookup)
+
+        if let pages = bookText?.pages, !pages.isEmpty {
+            let chapterPages: [BookPage]
+            if let targetChapter {
+                chapterPages = pages.filter { page in
+                    page.section.flatMap { ChapterFiles.number(in: $0) } == targetChapter
+                }
+            } else {
+                chapterPages = []
+            }
+            let searchOrder = chapterPages.isEmpty ? [pages] : [chapterPages, pages]
+            for scope in searchOrder {
+                for candidate in candidates {
+                    if let hit = findCandidate(candidate.needle, wholeWord: candidate.wholeWord, in: scope) {
+                        return ReadingPosition(
+                            page: hit.page.page ?? (pages.firstIndex(of: hit.page).map { $0 + 1 }),
+                            section: hit.page.section ?? lookup?.section,
+                            quote: hit.matchedText
+                        )
+                    }
+                }
+            }
+            if let firstInChapter = chapterPages.first {
+                return ReadingPosition(
+                    page: firstInChapter.page,
+                    section: firstInChapter.section ?? lookup?.section,
+                    quote: word.word
+                )
+            }
+        }
+
+        if let targetChapter,
+           let outlineRow = outline.first(where: { ChapterFiles.number(in: $0.title) == targetChapter }),
+           (outlineRow.page != nil || outlineRow.cfi != nil) {
+            return ReadingPosition(page: outlineRow.page, cfi: outlineRow.cfi, section: outlineRow.title, quote: word.word)
+        }
+        return nil
+    }
+
+    private func searchCandidates(for word: WordEntry, lookup: LookupEntry?) -> [(needle: String, wholeWord: Bool)] {
+        var result: [(String, Bool)] = []
+        if let sentence = lookup?.sentence {
+            let rawParts = sentence.components(separatedBy: ";")
+            for part in rawParts {
+                let cleaned = part
+                    .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"“”'‘’")))
+                if cleaned.count >= 4 {
+                    result.append((cleaned, false))
+                }
+            }
+        }
+        let term = word.word.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !term.isEmpty {
+            result.append((term, true))
+            result.append((term, false))
+        }
+        return result
+    }
+
+    private func findCandidate(_ needle: String, wholeWord: Bool, in pages: [BookPage]) -> (page: BookPage, matchedText: String)? {
+        let normalizedNeedle = collapseWhitespace(needle).lowercased()
+        guard !normalizedNeedle.isEmpty else { return nil }
+        for page in pages {
+            let raw = page.text
+            if !wholeWord, let range = raw.range(of: needle, options: [.caseInsensitive, .diacriticInsensitive]) {
+                return (page, String(raw[range]))
+            }
+            if wholeWord {
+                let pattern = "\\b" + NSRegularExpression.escapedPattern(for: needle) + "\\b"
+                if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+                   let match = regex.firstMatch(in: raw, range: NSRange(raw.startIndex..., in: raw)),
+                   let range = Range(match.range, in: raw) {
+                    return (page, String(raw[range]))
+                }
+            }
+            let collapsed = collapseWhitespace(raw)
+            if !wholeWord, collapsed.lowercased().contains(normalizedNeedle) {
+                return (page, needle)
+            }
+        }
+        return nil
+    }
+
+    private func collapseWhitespace(_ text: String) -> String {
+        text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
     }
 
     func askAboutConcept(_ concept: Concept) {
@@ -1023,11 +1178,17 @@ final class ReaderSession: ObservableObject {
     }
 
     func removeNoteOnly(id: String) {
+        let linked = highlights.first(where: { $0.id == id })?.noteID
         editAnnotations("Remove Note") {
-            if let highlight = highlights.first(where: { $0.id == id }), let noteID = highlight.noteID {
-                AnnotationEdit.removeNote(id: noteID, package: &package)
+            if let linked {
+                AnnotationEdit.removeNote(id: linked, package: &package)
             } else {
                 AnnotationEdit.removeNote(id: id, package: &package)
+            }
+        }
+        if lastAnnotationHit == id || (linked != nil && lastAnnotationHit == linked) {
+            if !highlights.contains(where: { $0.id == id }) {
+                lastAnnotationHit = nil
             }
         }
     }
@@ -1050,6 +1211,15 @@ final class ReaderSession: ObservableObject {
             alert.addButton(withTitle: "Cancel")
             alert.buttons.first?.hasDestructiveAction = true
             guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        var removedIDs = ids
+        for item in chosen {
+            if let hid = item.highlight?.id { removedIDs.insert(hid) }
+            if let nid = item.note?.id { removedIDs.insert(nid) }
+        }
+        deletedAnnotationIDs.formUnion(removedIDs)
+        if let hit = lastAnnotationHit, removedIDs.contains(hit) {
+            lastAnnotationHit = nil
         }
         editAnnotations(chosen.count == 1 ? "Delete" : "Delete Annotations") {
             AnnotationEdit.remove(ids: ids, package: &package)
@@ -1075,6 +1245,11 @@ final class ReaderSession: ObservableObject {
     }
 
     func removeAnnotationCompletely(id: String) {
+        deletedAnnotationIDs.insert(id)
+        if let noteID = highlights.first(where: { $0.id == id })?.noteID {
+            deletedAnnotationIDs.insert(noteID)
+        }
+        if lastAnnotationHit == id { lastAnnotationHit = nil }
         editAnnotations("Remove Highlight") {
             if highlights.contains(where: { $0.id == id }) {
                 AnnotationEdit.removeHighlightAndNote(id: id, package: &package)
@@ -1082,6 +1257,7 @@ final class ReaderSession: ObservableObject {
                 AnnotationEdit.removeNote(id: id, package: &package)
             }
         }
+        annotationSelection.remove(id)
     }
 
     func toggleMarginNotes() {
@@ -1233,17 +1409,30 @@ extension ReaderSession {
     }
 
     func removeMark(id: String) {
+        removeMarks(ids: [id])
+    }
+
+    func deleteSelectedMarks() {
+        removeMarks(ids: markSelection)
+    }
+
+    func removeMarks(ids: Set<String>) {
+        guard !ids.isEmpty else { return }
         var store = MarkStore(local: package.marks.marks, global: globalMarks)
         let previousLocal = package.marks.marks
         let previousGlobal = globalMarks
-        guard store.remove(id: id) else { return }
+        let beforeCount = previousLocal.count + previousGlobal.count
+        guard store.remove(ids: ids) else { return }
+        let removedCount = beforeCount - (store.local.count + store.global.count)
         package.marks.marks = store.local
         globalMarks = store.global
+        markSelection.subtract(ids)
         undoManager?.registerUndo(withTarget: self) { session in
             session.restoreMarks(local: previousLocal, global: previousGlobal)
         }
-        undoManager?.setActionName("Delete Mark")
+        undoManager?.setActionName(removedCount == 1 ? "Delete Mark" : "Delete Marks")
         dirty()
+        showToast(removedCount == 1 ? "Deleted mark" : "Deleted \(removedCount) marks")
     }
 
     private func restoreMarks(local: [MarkEntry], global: [MarkEntry]) {

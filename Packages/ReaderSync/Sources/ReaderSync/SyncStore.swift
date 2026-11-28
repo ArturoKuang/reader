@@ -220,6 +220,38 @@ public final class SyncStore: @unchecked Sendable {
         }
     }
 
+    public func records(bookId: String) -> [LocalRecordState] {
+        withLock {
+            var statement: OpaquePointer?
+            defer { sqlite3_finalize(statement) }
+            let sql = "SELECT kind, id, server_version, dirty, deleted, payload FROM records WHERE book_id = ?1;"
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
+            sqlite3_bind_text(statement, 1, bookId, -1, SQLITE_TRANSIENT)
+            var result: [LocalRecordState] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let kindPtr = sqlite3_column_text(statement, 0),
+                      let kind = RecordKind(rawValue: String(cString: kindPtr)),
+                      let idPtr = sqlite3_column_text(statement, 1) else { continue }
+                let payload: Data?
+                if let pointer = sqlite3_column_text(statement, 5) {
+                    payload = String(cString: pointer).data(using: .utf8)
+                } else {
+                    payload = nil
+                }
+                result.append(LocalRecordState(
+                    bookId: bookId,
+                    kind: kind,
+                    recordId: String(cString: idPtr),
+                    serverVersion: Int(sqlite3_column_int64(statement, 2)),
+                    dirty: sqlite3_column_int(statement, 3) != 0,
+                    deleted: sqlite3_column_int(statement, 4) != 0,
+                    payloadJSON: payload
+                ))
+            }
+            return result
+        }
+    }
+
     public func upsertRecord(_ state: LocalRecordState) {
         withLock {
 

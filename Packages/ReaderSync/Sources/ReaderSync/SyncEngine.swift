@@ -66,6 +66,24 @@ public final class SyncEngine: @unchecked Sendable {
     public private(set) var syncing = false
     public private(set) var lastError: String?
     public private(set) var appliedRecords: [RecordEnvelope] = []
+    private var pendingProjectionRecords: [RecordEnvelope] = []
+
+    /// Returns newly pulled or conflict-resolved records waiting to be projected into open sessions.
+    public func takePendingProjectionRecords(forBookIds bookIds: Set<String>) -> [RecordEnvelope] {
+        lock.lock()
+        defer { lock.unlock() }
+        var matched: [RecordEnvelope] = []
+        var remaining: [RecordEnvelope] = []
+        for record in pendingProjectionRecords {
+            if bookIds.contains(record.bookId) {
+                matched.append(record)
+            } else {
+                remaining.append(record)
+            }
+        }
+        pendingProjectionRecords = remaining
+        return matched
+    }
 
     private let lock = NSLock()
     private let pairingGate = PairingGate()
@@ -221,6 +239,7 @@ public final class SyncEngine: @unchecked Sendable {
             deleted: envelope.deleted,
             payloadJSON: envelope.payload.flatMap { try? JSONSupport.data($0) }
         ))
+        recordApplied([envelope])
         try vaultWriter?.applyAcceptedRecords([envelope], vaultRoot: vaultRoot)
     }
 
@@ -312,11 +331,51 @@ public final class SyncEngine: @unchecked Sendable {
         }
     }
 
+    private struct RecordKey: Hashable {
+        let bookId: String
+        let kind: RecordKind
+        let recordId: String
+    }
+
+    private func recordApplied(_ records: [RecordEnvelope]) {
+        guard !records.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        for envelope in records {
+            if let existing = appliedRecords.firstIndex(where: {
+                $0.bookId == envelope.bookId && $0.kind == envelope.kind && $0.recordId == envelope.recordId
+            }) {
+                appliedRecords[existing] = envelope
+            } else {
+                appliedRecords.append(envelope)
+            }
+            if let pending = pendingProjectionRecords.firstIndex(where: {
+                $0.bookId == envelope.bookId && $0.kind == envelope.kind && $0.recordId == envelope.recordId
+            }) {
+                pendingProjectionRecords[pending] = envelope
+            } else {
+                pendingProjectionRecords.append(envelope)
+            }
+        }
+    }
+
+    private func dropLocallyDeletedFromApplied(bookId: String, kind: RecordKind, recordId: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        appliedRecords.removeAll { $0.bookId == bookId && $0.kind == kind && $0.recordId == recordId }
+        pendingProjectionRecords.removeAll { $0.bookId == bookId && $0.kind == kind && $0.recordId == recordId }
+    }
+
     private func enqueueLocalRecords(_ snapshot: BookSyncSnapshot, bookId: String) {
-        func enqueue(kind: RecordKind, recordId: String, payload: [String: Any], deleted: Bool = false) {
+        var liveKeys = Set<RecordKey>()
+
+        func enqueue(kind: RecordKind, recordId: String, payload: [String: Any]?, deleted: Bool = false) {
+            if !deleted {
+                liveKeys.insert(RecordKey(bookId: bookId, kind: kind, recordId: recordId))
+            }
             let current = store.record(bookId: bookId, kind: kind, recordId: recordId)
-            let payloadData = try? JSONSupport.data(payload)
-            if let current, !current.dirty, current.payloadJSON == payloadData, current.deleted == deleted {
+            let payloadData = payload.flatMap { try? JSONSupport.data($0) }
+            if let current, !current.dirty, current.deleted == deleted, (deleted || current.payloadJSON == payloadData) {
                 return
             }
             let base = current?.serverVersion ?? 0
@@ -328,11 +387,14 @@ public final class SyncEngine: @unchecked Sendable {
                 recordId: recordId,
                 baseVersion: base,
                 deleted: deleted,
-                payloadJSON: payloadData,
+                payloadJSON: deleted ? nil : payloadData,
                 clientTime: isoNow()
             )
             store.mergeOutbox(for: (bookId, kind, recordId), into: item)
-            store.upsertRecord(LocalRecordState(bookId: bookId, kind: kind, recordId: recordId, serverVersion: base, dirty: true, deleted: deleted, payloadJSON: payloadData))
+            store.upsertRecord(LocalRecordState(bookId: bookId, kind: kind, recordId: recordId, serverVersion: base, dirty: true, deleted: deleted, payloadJSON: deleted ? nil : payloadData))
+            if deleted {
+                dropLocallyDeletedFromApplied(bookId: bookId, kind: kind, recordId: recordId)
+            }
         }
 
         let notesById = Dictionary(uniqueKeysWithValues: snapshot.notes.map { ($0.id, $0) })
@@ -352,6 +414,17 @@ public final class SyncEngine: @unchecked Sendable {
                 enqueue(kind: .lookup, recordId: lookup.id, payload: RecordAdapter.lookupPayload(lookup, wordId: id))
             }
         }
+
+        // Propagate local deletions as tombstones so deleted notes, highlights, and words
+        // stay deleted instead of being resurrected by sync pulls.
+        let deletableKinds: Set<RecordKind> = [.highlight, .note, .word, .lookup]
+        for stored in store.records(bookId: bookId) where deletableKinds.contains(stored.kind) && !stored.deleted {
+            let key = RecordKey(bookId: bookId, kind: stored.kind, recordId: stored.recordId)
+            if !liveKeys.contains(key) {
+                enqueue(kind: stored.kind, recordId: stored.recordId, payload: nil, deleted: true)
+            }
+        }
+
         let positionId = RecordAdapter.positionId(bookId: bookId, deviceId: store.deviceId)
         let payload = RecordAdapter.positionPayload(
             bookId: bookId,
@@ -464,7 +537,7 @@ public final class SyncEngine: @unchecked Sendable {
         }
         unreachable = false
         lastError = nil
-        appliedRecords.append(contentsOf: accepted)
+        recordApplied(accepted)
         if !accepted.isEmpty {
             try vaultWriter?.applyAcceptedRecords(accepted, vaultRoot: vaultRoot)
         }

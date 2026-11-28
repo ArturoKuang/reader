@@ -52,6 +52,9 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         findBar.target = self
         findBar.action = #selector(submitFind)
         (findBar.cell as? NSActionCell)?.sendsActionOnEndEditing = false
+        titleStrip.onPrevious = { [weak self] in self?.find(forward: false) }
+        titleStrip.onNext = { [weak self] in self?.find(forward: true) }
+        titleStrip.onClose = { [weak self] in self?.dismissFind() }
         view.addSubview(titleStrip)
         let stripConstraint = titleStrip.topAnchor.constraint(equalTo: view.topAnchor)
         stripTop = stripConstraint
@@ -181,8 +184,11 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
         refreshPaneTitle()
     }
 
+    var isFindVisible: Bool { titleStrip.isFindVisible }
+
     func focusFind() {
         setPaneActive(true)
+        titleStrip.setFindVisible(true)
         if findBar.stringValue.isEmpty { findBar.stringValue = session.findQuery }
         view.layoutSubtreeIfNeeded()
         DispatchQueue.main.async { [weak self] in
@@ -190,6 +196,18 @@ final class EPUBContainerViewController: NSViewController, WKScriptMessageHandle
             self.view.window?.makeFirstResponder(self.findBar)
             self.findBar.currentEditor()?.selectAll(nil)
         }
+    }
+
+    func dismissFind() {
+        titleStrip.setFindVisible(false)
+        titleStrip.setCount("")
+        if session.sidebar == .searchResults {
+            session.sidebar = session.sidebarBeforeSearch ?? .thumbnails
+            session.sidebarBeforeSearch = nil
+            session.searchHits = []
+            (view.window?.windowController as? ReaderWindowController)?.applyChrome()
+        }
+        if let webView { view.window?.makeFirstResponder(webView) }
     }
 
     func toggleFind() {
