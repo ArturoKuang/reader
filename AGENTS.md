@@ -94,7 +94,7 @@ There is no CLI, debug port, or UI test target. The app has no accessibility ide
 - **Merging to `main` ships to the user's Mac.** `.github/workflows/release-main.yml` runs on every push to `main` that touches anything except `**/*.md`, `spec/**`, or `apps/mobile/**`. It builds, signs, and publishes `main-<N>`, then moves `main-latest`. The installed app checks `main-latest` in the background, stages the update, and swaps it in silently on quit. Work on a branch and open a PR. Do not push to `main` or move release tags.
 - `Scripts/live-taildrive-sync.sh` (`READER_SYNC_LIVE=1`) talks to the real sync test server on the Mac mini (`127.0.0.1:8789/v1/reader`).
 - `Scripts/install-macos-app.sh` quits the running Reader and replaces `~/Applications/Reader.app`.
-- The user's own Reader is often running. Never drive, focus, or kill it (`pkill Reader` is off-limits). Their data is in `~/Library/Application Support/Reader/` and in the login keychain (`com.reader.Reader`, accounts `openai` and `anthropic`).
+- The user's own Reader is often running. Never drive, focus, or kill it (`pkill Reader` is off-limits). Their data is in `~/Library/Application Support/Reader/` and in the login keychain (service `com.reader.Reader`: the combined `reader.secrets` item, plus the older `openai`, `anthropic`, and `taildrive.*` items). Read secrets only through `SecretStore` (`Packages/ReaderSync/Sources/ReaderSync/CredentialStore.swift`): it reads the keychain once per launch, and every extra direct read is another password prompt for the user after each update.
 - The update-signing public key is pinned in `AppUpdater.swift`, `install-macos-app.sh`, and the workflow. Changing it breaks updates for every installed copy.
 
 ## Conventions

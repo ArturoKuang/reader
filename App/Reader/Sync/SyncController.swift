@@ -45,7 +45,7 @@ final class SyncController: ObservableObject {
             engine = try SyncEngine(
                 directory: support,
                 configuration: configuration,
-                credentials: KeychainCredentialStore()
+                credentials: SecretStore.shared
             )
             engine?.vaultWriter = VaultRecordProjector.shared
         } catch {

@@ -96,7 +96,9 @@ public final class SyncEngine: @unchecked Sendable {
     ) throws {
         self.store = try SyncStore(directory: directory)
         self.credentials = credentials
-        let http = SyncHTTPClient(configuration: configuration, credential: credentials.load(account: SyncKeychainAccount.credential), transport: transport)
+        // The credential is read from the keychain on first use, not here: that read can
+        // show a prompt, and building the engine should not.
+        let http = SyncHTTPClient(configuration: configuration, credential: nil, transport: transport)
         self.http = http
         self.api = TailDriveAPI(http: http)
         if let name = configuration.deviceName as String? {
@@ -104,8 +106,11 @@ public final class SyncEngine: @unchecked Sendable {
         }
     }
 
+    /// Never touches the keychain: `status()` runs on every refresh.
+    /// The server id is saved in the sync database when the Mac pairs.
     public var isPaired: Bool {
-        credentials.load(account: SyncKeychainAccount.credential) != nil
+        if let credential = http.credential, !credential.isEmpty { return true }
+        return !(store.serverId ?? "").isEmpty
     }
 
     public var macDeviceId: String { store.deviceId }
@@ -148,11 +153,8 @@ public final class SyncEngine: @unchecked Sendable {
     }
 
     private func performEnsureMacPaired() async throws -> RedeemResponse {
-        if let credential = credentials.load(account: SyncKeychainAccount.credential) {
-            http.credential = credential
-            let deviceId = credentials.load(account: SyncKeychainAccount.deviceId) ?? store.deviceId
-            store.setMeta("deviceId", deviceId)
-            return RedeemResponse(deviceId: deviceId, credential: credential, serverId: credentials.load(account: SyncKeychainAccount.serverId) ?? store.serverId ?? "", kind: "mac")
+        if let credential = try restoreCredential() {
+            return RedeemResponse(deviceId: store.deviceId, credential: credential, serverId: store.serverId ?? "", kind: "mac")
         }
         let issued = try await api.issuePairingToken(kind: "mac")
         let redeemed = try await api.redeem(
@@ -206,11 +208,13 @@ public final class SyncEngine: @unchecked Sendable {
     }
 
     public func ingest(_ snapshot: BookSyncSnapshot) async throws {
+        _ = try restoreCredential()
         let bookId = try await registerAndMaybeUpload(snapshot)
         enqueueLocalRecords(snapshot, bookId: bookId)
     }
 
     public func resolve(conflict: OpenConflict, choice: ConflictChoice) async throws {
+        _ = try restoreCredential()
         let macIds = Set(devices.filter(\.isMac).map(\.deviceId) + [macDeviceId])
         let prepared = try ConflictResolution.prepare(conflict: conflict, choice: choice, macDeviceIds: macIds)
         _ = try await api.resolve(conflictId: conflict.conflictId, request: prepared.request)
@@ -244,6 +248,7 @@ public final class SyncEngine: @unchecked Sendable {
     }
 
     public func retryWaitingUploads() async throws {
+        _ = try restoreCredential()
         for book in store.waitingBooks() {
             // Re-HEAD and upload if the file is still around is the caller's job; this
             // just clears the flag when the server already has the blob.
@@ -265,10 +270,46 @@ public final class SyncEngine: @unchecked Sendable {
 
     // MARK: - Internals
 
+    /// Loads the saved credential into the HTTP client the first time it is needed.
+    /// Returns nil when this Mac has never paired. Throws when the keychain refused, so a
+    /// denied prompt does not make Reader pair again as a new device.
+    @discardableResult
+    private func restoreCredential() throws -> String? {
+        if let credential = http.credential, !credential.isEmpty { return credential }
+        switch credentials.lookup(account: SyncKeychainAccount.credential) {
+        case .found(let credential):
+            http.credential = credential
+            recoverIdentifiersIfNeeded()
+            return credential
+        case .notFound:
+            return nil
+        case .unavailable(let status):
+            let error = SyncAPIError(
+                status: 0,
+                code: "keychain",
+                message: "Reader can't read its sync credential from the Keychain (\(status)). Quit and reopen Reader, then allow access."
+            )
+            lastError = error.message
+            throw error
+        }
+    }
+
+    /// Device and server ids live in the sync database. Older builds also kept them in the
+    /// keychain; read those only if the database lost its copy.
+    private func recoverIdentifiersIfNeeded() {
+        if (store.meta("deviceId") ?? "").isEmpty,
+           let deviceId = credentials.legacyValue(account: SyncKeychainAccount.deviceId), !deviceId.isEmpty {
+            store.setMeta("deviceId", deviceId)
+        }
+        if (store.serverId ?? "").isEmpty,
+           let serverId = credentials.legacyValue(account: SyncKeychainAccount.serverId), !serverId.isEmpty {
+            store.serverId = serverId
+        }
+    }
+
     private func saveCredential(_ redeemed: RedeemResponse) throws {
+        // Only the credential is secret. The ids go to the sync database, not the keychain.
         try credentials.save(account: SyncKeychainAccount.credential, secret: redeemed.credential)
-        try credentials.save(account: SyncKeychainAccount.deviceId, secret: redeemed.deviceId)
-        try credentials.save(account: SyncKeychainAccount.serverId, secret: redeemed.serverId)
         store.setMeta("deviceId", redeemed.deviceId)
         store.serverId = redeemed.serverId
         http.credential = redeemed.credential

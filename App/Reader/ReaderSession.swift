@@ -690,8 +690,6 @@ final class ReaderSession: ObservableObject {
 
         let bookTitle = bookURL.deletingPathExtension().lastPathComponent
         let section = selection.section ?? sectionTitle
-        let openAIKey = KeychainStore.load(account: "openai")
-        let anthropicKey = KeychainStore.load(account: "anthropic")
         let capturedBookText = bookText
         let originalBookPath = bookURL.path
 
@@ -723,9 +721,7 @@ final class ReaderSession: ObservableObject {
                 } else {
                     let chosen = Self.resolveUsableProvider(
                         requested: resolvedSettings.lookupUsesDefault ? resolvedSettings.defaultProvider : resolvedSettings.lookupProvider,
-                        settings: resolvedSettings,
-                        openAIKey: openAIKey,
-                        anthropicKey: anthropicKey
+                        settings: resolvedSettings
                     )
                     if chosen.isCLI, !fastCandidates.isEmpty,
                        let match = fastCandidates.first(where: { $0.provider == chosen }) {
@@ -745,8 +741,8 @@ final class ReaderSession: ObservableObject {
                         let focus = Focus(quote: selection.text, page: selection.page, section: selection.section, cfi: selection.cfi)
                         let router = AIRouter(
                             settings: resolvedSettings,
-                            openAIKey: openAIKey,
-                            anthropicKey: anthropicKey,
+                            openAIKey: Self.apiKey(for: .openai, chosen: chosen),
+                            anthropicKey: Self.apiKey(for: .anthropic, chosen: chosen),
                             transport: URLSessionTransport(),
                             runner: activeRunner
                         )
@@ -811,17 +807,23 @@ final class ReaderSession: ObservableObject {
         return copy
     }
 
-    private static func resolveUsableProvider(
-        requested: ProviderID,
-        settings: AISettings,
-        openAIKey: String?,
-        anthropicKey: String?
-    ) -> ProviderID {
+    /// The chosen API provider's key, or nil. Keys are read only when an API provider is in
+    /// play, so a CLI-only setup never touches the keychain for Ask AI or Look Up.
+    private static func apiKey(for provider: ProviderID, chosen: ProviderID) -> String? {
+        guard provider == chosen else { return nil }
+        switch provider {
+        case .openai: return KeychainStore.load(account: "openai")
+        case .anthropic: return KeychainStore.load(account: "anthropic")
+        case .claudeCLI, .codexCLI, .geminiCLI: return nil
+        }
+    }
+
+    private static func resolveUsableProvider(requested: ProviderID, settings: AISettings) -> ProviderID {
         let fm = FileManager.default
         func isUsable(_ provider: ProviderID) -> Bool {
             switch provider {
-            case .openai: return !(openAIKey?.isEmpty ?? true)
-            case .anthropic: return !(anthropicKey?.isEmpty ?? true)
+            case .openai: return !(apiKey(for: .openai, chosen: .openai)?.isEmpty ?? true)
+            case .anthropic: return !(apiKey(for: .anthropic, chosen: .anthropic)?.isEmpty ?? true)
             case .claudeCLI: return settings.claudeCLIPath.map { fm.isExecutableFile(atPath: $0) } ?? false
             case .codexCLI: return settings.codexCLIPath.map { fm.isExecutableFile(atPath: $0) } ?? false
             case .geminiCLI: return settings.geminiCLIPath.map { fm.isExecutableFile(atPath: $0) } ?? false
@@ -922,8 +924,6 @@ final class ReaderSession: ObservableObject {
         let directory = Paths.join(NSTemporaryDirectory(), "reader-ai-\(UUID().uuidString)")
         let baseSettings = SettingsStore.load()
         self.settings = baseSettings
-        let openAIKey = KeychainStore.load(account: "openai")
-        let anthropicKey = KeychainStore.load(account: "anthropic")
         let activeRunner = runner
         let originalBookPath = bookURL.path
         Task.detached(priority: .userInitiated) { [weak self] in
@@ -931,14 +931,14 @@ final class ReaderSession: ObservableObject {
             let chosen: ProviderID
             if let explicit = chosenOverride {
                 // Respect explicit CLI/API choice if usable; otherwise fall back to an available CLI.
-                chosen = Self.resolveUsableProvider(requested: explicit, settings: resolvedSettings, openAIKey: openAIKey, anthropicKey: anthropicKey)
+                chosen = Self.resolveUsableProvider(requested: explicit, settings: resolvedSettings)
             } else {
-                chosen = Self.resolveUsableProvider(requested: requested, settings: resolvedSettings, openAIKey: openAIKey, anthropicKey: anthropicKey)
+                chosen = Self.resolveUsableProvider(requested: requested, settings: resolvedSettings)
             }
             let router = AIRouter(
                 settings: resolvedSettings,
-                openAIKey: openAIKey,
-                anthropicKey: anthropicKey,
+                openAIKey: Self.apiKey(for: .openai, chosen: chosen),
+                anthropicKey: Self.apiKey(for: .anthropic, chosen: chosen),
                 transport: URLSessionTransport(),
                 runner: activeRunner
             ) { [weak self] partial in

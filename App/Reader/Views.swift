@@ -1,6 +1,7 @@
 import AppKit
 import PDFKit
 import ReaderCore
+import ReaderSync
 import SwiftUI
 
 struct WelcomeView: View {
@@ -1468,8 +1469,12 @@ struct LookupCard: View {
 struct SettingsView: View {
     @ObservedObject private var updater = AppUpdater.shared
     @State private var settings = SettingsStore.load()
-    @State private var openAIKey = KeychainStore.load(account: "openai") ?? ""
-    @State private var anthropicKey = KeychainStore.load(account: "anthropic") ?? ""
+    // Read when the AI tab appears, not when the view is built.
+    @State private var openAIKey = ""
+    @State private var anthropicKey = ""
+    /// Stays false until the keys were read, so closing Settings never "saves" empty fields
+    /// over keys that were never shown.
+    @State private var keysLoaded = false
     @State private var keyStatus = ""
     @State private var detectingCLIs = false
     @State private var voiceGroups: [TTSVoiceCatalog.Group] = TTSVoiceCatalog.groups()
@@ -1580,6 +1585,7 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .onAppear {
+            loadKeysIfNeeded()
             let fm = FileManager.default
             let needsDetect = (settings.claudeCLIPath.map { !fm.isExecutableFile(atPath: $0) } ?? true)
                 || (settings.codexCLIPath.map { !fm.isExecutableFile(atPath: $0) } ?? true)
@@ -1790,14 +1796,27 @@ struct SettingsView: View {
         Task { _ = try? await KokoroEngineService.shared.ensureReady(voiceID: voiceID) }
     }
 
-    private func storeKey(account: String, value: String) {
-        if value.isEmpty {
-            KeychainStore.delete(account: account)
-            keyStatus = "Removed from Keychain"
-        } else {
-            KeychainStore.save(account: account, secret: value)
-            keyStatus = "Saved in Keychain"
+    private func loadKeysIfNeeded() {
+        guard !keysLoaded else { return }
+        keysLoaded = true
+        let openAI = KeychainStore.lookup(account: "openai")
+        let anthropic = KeychainStore.lookup(account: "anthropic")
+        openAIKey = openAI.value ?? ""
+        anthropicKey = anthropic.value ?? ""
+        if case .unavailable = openAI {
+            keyStatus = "Reader couldn't read the Keychain, so saved keys aren't shown. They are unchanged."
+        } else if case .unavailable = anthropic {
+            keyStatus = "Reader couldn't read the Keychain, so saved keys aren't shown. They are unchanged."
         }
+    }
+
+    /// Writes only a key the user changed. An unreadable keychain is left alone.
+    private func storeKey(account: String, value: String) {
+        guard keysLoaded else { return }
+        let message = value.isEmpty
+            ? KeychainStore.delete(account: account)
+            : KeychainStore.save(account: account, secret: value)
+        if let message { keyStatus = message }
     }
 }
 

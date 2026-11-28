@@ -22,9 +22,13 @@ To make Reader the default app for PDFs or EPUBs, use Finder → Get Info → Op
 
 Open **Reader → Settings…** (⌘,).
 
-- **ChatGPT** uses the OpenAI API. Paste an API key; it is stored in the login keychain (`com.reader.Reader`, account `openai`). The default model is `gpt-4.1`. Change it if your account uses another name.
-- **Claude** uses the Anthropic API the same way (account `anthropic`). The default model is `claude-sonnet-4-5`.
+- **ChatGPT** uses the OpenAI API. Paste an API key; it is stored in the login keychain. The default model is `gpt-4.1`. Change it if your account uses another name.
+- **Claude** uses the Anthropic API the same way. The default model is `claude-sonnet-4-5`.
 - Keys are not written to `settings.json`.
+
+All of Reader's secrets (both API keys and the Mac mini sync credential) live in one keychain item: service `com.reader.Reader`, account `reader.secrets`, a JSON object keyed `openai`, `anthropic`, and `taildrive.credential`. Reader reads it once per launch, and only when something needs a secret, so a new build asks for keychain access once. Builds before this kept one item per account; the first launch copies those into the combined item and leaves them in place. Removing a key in Settings removes the old item too. The sync device and server ids are kept in the sync database, not the keychain.
+
+The release build is ad-hoc signed, so macOS treats each update as a new app and asks again the first time it reads the item. Choose **Always Allow** to stop the prompts until the next update.
 
 ChatGPT is the default for Ask AI and for the in-context part of Look Up. Pick another provider in Settings, or just for one question in the Ask AI panel. Reader sends the book as soon as you ask. It does not show a confirmation step.
 

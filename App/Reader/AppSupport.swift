@@ -1,6 +1,6 @@
 import AppKit
 import ReaderCore
-import Security
+import ReaderSync
 
 enum AppPaths {
     static var support: String {
@@ -106,44 +106,43 @@ enum SettingsStore {
     }
 }
 
+/// API keys. All of Reader's secrets share one keychain item that is read at most once per
+/// launch (see `SecretStore`), so a new build asks for keychain access once, not once per key
+/// and per read.
 enum KeychainStore {
-    static let service = "com.reader.Reader"
-
-    static func save(account: String, secret: String) {
-        let data = Data(secret.utf8)
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-        SecItemDelete(query as CFDictionary)
-        var add = query
-        add[kSecValueData as String] = data
-        SecItemAdd(add as CFDictionary, nil)
-    }
+    static var service: String { SecretStore.shared.service }
 
     static func load(account: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data,
-              let string = String(data: data, encoding: .utf8) else { return nil }
-        return string
+        SecretStore.shared.load(account: account)
     }
 
-    static func delete(account: String) {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-        SecItemDelete(query as CFDictionary)
+    static func lookup(account: String) -> SecretLookup {
+        SecretStore.shared.lookup(account: account)
+    }
+
+    /// Writes only when the value changed. Returns a line for the Settings status text, or nil
+    /// when nothing was written.
+    @discardableResult
+    static func save(account: String, secret: String) -> String? {
+        do {
+            return try SecretStore.shared.update(account: account, secret: secret) == .saved ? "Saved in Keychain" : nil
+        } catch let error as SecretStoreError {
+            return "Couldn't save to Keychain. \(error.message)"
+        } catch {
+            return "Couldn't save to Keychain."
+        }
+    }
+
+    /// Removes the key. Leaves it alone when the keychain could not be read.
+    @discardableResult
+    static func delete(account: String) -> String? {
+        do {
+            return try SecretStore.shared.remove(account: account) == .removed ? "Removed from Keychain" : nil
+        } catch let error as SecretStoreError {
+            return "Couldn't update Keychain. \(error.message)"
+        } catch {
+            return "Couldn't update Keychain."
+        }
     }
 }
 
