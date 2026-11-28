@@ -51,6 +51,8 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
     /// The spine item a single-page EPUB is loading so the voice can continue there.
     var ttsPendingSection: Int?
     var ttsViewport: (section: Int, offset: Int)?
+    private var lastSelectionRect: NSRect?
+    private var lookupPopover: NSPopover?
 
     init(session: ReaderSession) {
         self.session = session
@@ -896,8 +898,13 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
             sentence: body["sentence"] as? String ?? text,
             rects: []
         )
-        if session.settings.showSelectionBar, let webView, let rect = cssSelectionRect(body["rect"], in: webView) {
-            (view.window?.windowController as? ReaderWindowController)?.showSelectionBar(relativeTo: rect, in: webView)
+        if let webView, let rect = cssSelectionRect(body["rect"], in: webView) {
+            lastSelectionRect = rect
+            if session.settings.showSelectionBar {
+                (view.window?.windowController as? ReaderWindowController)?.showSelectionBar(relativeTo: rect, in: webView)
+            }
+        } else {
+            lastSelectionRect = nil
         }
     }
 
@@ -988,6 +995,40 @@ final class WebDocumentContainerViewController: NSViewController, WKScriptMessag
     }
 
     var noteHostView: NSView { webView ?? view }
+
+    @discardableResult
+    func dismissLookupIfShown() -> Bool {
+        guard let popover = lookupPopover, popover.isShown else { return false }
+        popover.performClose(nil)
+        lookupPopover = nil
+        session.dismissLookup()
+        return true
+    }
+
+    func showLookup() {
+        guard session.lookup != nil, view.window != nil else { return }
+        lookupPopover?.performClose(nil)
+        lookupPopover = nil
+        let host = NSHostingController(rootView: LookupCard(session: session) { [weak self] in
+            self?.lookupPopover?.performClose(nil)
+            self?.lookupPopover = nil
+            self?.session.dismissLookup()
+        })
+        host.sizingOptions = [.preferredContentSize]
+        let popover = NSPopover()
+        popover.contentViewController = host
+        popover.behavior = .transient
+        popover.animates = true
+        let targetView = webView ?? view
+        let anchorRect: NSRect
+        if let rect = lastSelectionRect, targetView.bounds.intersects(rect) {
+            anchorRect = rect
+        } else {
+            anchorRect = NSRect(x: targetView.bounds.midX - 1, y: targetView.bounds.midY - 1, width: 2, height: 2)
+        }
+        popover.show(relativeTo: anchorRect, of: targetView, preferredEdge: .maxY)
+        lookupPopover = popover
+    }
 
     /// Where the highlight for `id` is, in the web view's own coordinates. Scrolls it into view when
     /// it is off screen. Nil when the page does not show it.

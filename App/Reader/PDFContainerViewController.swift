@@ -914,19 +914,43 @@ final class PDFContainerViewController: NSViewController {
         )
     }
 
+    @discardableResult
+    func dismissLookupIfShown() -> Bool {
+        guard let popover = lookupPopover, popover.isShown else { return false }
+        popover.performClose(nil)
+        lookupPopover = nil
+        session.dismissLookup()
+        return true
+    }
+
     func showLookup() {
-        guard session.lookup != nil, let window = view.window else { return }
+        guard session.lookup != nil, view.window != nil else { return }
+        lookupPopover?.performClose(nil)
+        lookupPopover = nil
         let host = NSHostingController(rootView: LookupCard(session: session) { [weak self] in
             self?.lookupPopover?.performClose(nil)
+            self?.lookupPopover = nil
+            self?.session.dismissLookup()
             self?.refreshAnnotations()
         })
+        host.sizingOptions = [.preferredContentSize]
         let popover = NSPopover()
         popover.contentViewController = host
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: 360, height: 240)
-        let rect = pdfView.currentSelection?.bounds(for: pdfView.currentPage ?? PDFPage()) ?? pdfView.bounds
-        let viewRect = pdfView.currentPage.map { pdfView.convert(rect, from: $0) } ?? pdfView.bounds
-        popover.show(relativeTo: viewRect, of: pdfView, preferredEdge: .maxY)
+        popover.animates = true
+        let anchorRect: NSRect
+        if let sel = pdfView.currentSelection, let page = sel.pages.first ?? pdfView.currentPage {
+            let pageBounds = sel.bounds(for: page)
+            let converted = pdfView.convert(pageBounds, from: page)
+            if converted.width > 0.5 && converted.height > 0.5 && pdfView.bounds.intersects(converted) {
+                anchorRect = converted
+            } else {
+                anchorRect = NSRect(x: pdfView.bounds.midX - 1, y: pdfView.bounds.midY - 1, width: 2, height: 2)
+            }
+        } else {
+            anchorRect = NSRect(x: pdfView.bounds.midX - 1, y: pdfView.bounds.midY - 1, width: 2, height: 2)
+        }
+        popover.show(relativeTo: anchorRect, of: pdfView, preferredEdge: .maxY)
         lookupPopover = popover
     }
 

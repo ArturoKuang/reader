@@ -25,16 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if NSDocumentController.shared.documents.isEmpty {
             showWelcome(nil)
         }
-        if !FileManager.default.fileExists(atPath: AppPaths.settingsFile) {
-            Task.detached {
-                guard CLILocator.locate("claude") != nil else { return }
-                await MainActor.run {
-                    var settings = SettingsStore.load()
-                    settings.defaultProvider = .claudeCLI
-                    SettingsStore.save(settings)
-                }
-            }
-        }
+        SettingsStore.autoConfigureCLIsInBackground()
     }
 
     func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool { false }

@@ -232,6 +232,9 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             let selectionBarWasShowing = self.selectionBar.isShowing
             if event.keyCode == 53 {
                 self.dismissSelectionBar()
+                if self.pdfController?.dismissLookupIfShown() == true || self.webController?.dismissLookupIfShown() == true {
+                    return nil
+                }
                 if self.pdfController?.isFindVisible == true || self.webController?.isFindVisible == true {
                     self.pdfController?.dismissFind()
                     self.webController?.dismissFind()
@@ -1341,6 +1344,14 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             }
             self.presentNote(id)
         }
+        let previousLookup = session.onPresentLookup
+        session.onPresentLookup = { [weak self] in
+            guard let self, self.session === session else {
+                previousLookup?()
+                return
+            }
+            self.presentLookup()
+        }
         let previousReveal = session.onRevealInObsidian
         session.onRevealInObsidian = { [weak self] id in
             guard let self, self.session === session else {
@@ -1476,11 +1487,19 @@ final class ReaderWindowController: NSWindowController, NSToolbarDelegate, NSWin
             self.applyChrome()
         }
     }
+    func presentLookup() {
+        dismissSelectionBar()
+        if let pdf = pdfController {
+            pdf.showLookup()
+        } else if let web = webController {
+            web.showLookup()
+        }
+    }
+
     @objc func lookUp(_ sender: Any?) {
         session.withSelection { [weak self] in
             guard let self else { return }
             self.session.lookUp()
-            self.pdfController?.showLookup()
             self.applyChrome()
         }
     }

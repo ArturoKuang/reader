@@ -534,10 +534,36 @@ final class CoreTests: XCTestCase {
         XCTAssertFalse(claude.arguments.contains("--dangerously-skip-permissions"))
         let codex = CodexCommand.invocation(executable: "/opt/homebrew/bin/codex", prompt: "Answer", workingDirectory: "/tmp/job")
         XCTAssertEqual(codex.arguments, [
-            "exec", "--sandbox", "read-only", "--ask-for-approval", "never",
+            "exec", "--sandbox", "read-only", "-c", "approval_policy=\"never\"",
             "--skip-git-repo-check", "--ephemeral", "--json", "-C", "/tmp/job", "Answer",
         ])
         XCTAssertFalse(codex.arguments.contains("--full-auto"))
+        XCTAssertFalse(codex.arguments.contains("--ask-for-approval"))
+
+        let fastClaude = ClaudeCommand.fastLookupInvocation(executable: "/usr/local/bin/claude", prompt: "Define", workingDirectory: "/tmp")
+        XCTAssertTrue(fastClaude.arguments.contains("--model"))
+        XCTAssertTrue(fastClaude.arguments.contains("sonnet"))
+        XCTAssertTrue(fastClaude.arguments.contains("--effort"))
+        XCTAssertTrue(fastClaude.arguments.contains("low"))
+        XCTAssertTrue(fastClaude.arguments.contains("--no-session-persistence"))
+
+        let fastCodex = CodexCommand.fastLookupInvocation(executable: "/opt/homebrew/bin/codex", prompt: "Define", workingDirectory: "/tmp", model: "gpt-6.2-sol")
+        XCTAssertTrue(fastCodex.arguments.contains("gpt-6.2-sol"))
+        XCTAssertTrue(fastCodex.arguments.contains("model_reasoning_effort=\"low\""))
+
+        let gemini = GeminiCommand.invocation(executable: "/opt/homebrew/bin/gemini", prompt: "Define", workingDirectory: "/tmp")
+        XCTAssertTrue(gemini.arguments.contains("--skip-trust"))
+        XCTAssertTrue(gemini.arguments.contains("gemini-4-neon"))
+        XCTAssertEqual(try CLIOutput.parseGemini("{\"response\":\"Short meaning.\"}"), "Short meaning.")
+
+        let parsedDef = WordLookupParser.parse("```json\n{\"partOfSpeech\":\"adjective\",\"definition\":\"Narrowly focused on local concerns.\",\"inContext\":\"Describes rules that fail outside familiar settings.\"}\n```")
+        XCTAssertEqual(parsedDef.partOfSpeech, "adjective")
+        XCTAssertEqual(parsedDef.definition, "Narrowly focused on local concerns.")
+        XCTAssertEqual(parsedDef.inContext, "Describes rules that fail outside familiar settings.")
+
+        let path = ProcessCommandRunner.enrichedPATH(existing: "/usr/bin:/bin", executable: "/opt/homebrew/bin/codex", home: "/Users/test")
+        XCTAssertTrue(path.contains("/opt/homebrew/bin"))
+        XCTAssertTrue(path.contains("/Users/test/.local/bin"))
 
         let claudeText = """
         {"type":"assistant","message":{"content":[{"type":"text","text":"Partial"}]}}
@@ -632,6 +658,79 @@ final class CoreTests: XCTestCase {
         let decoded = try JSONDecoder().decode(AISettings.self, from: data)
         XCTAssertEqual(decoded, .default)
         XCTAssertEqual(decoded.defaultProvider, .openai)
+        XCTAssertTrue(decoded.fastLookupEnabled)
+    }
+
+    func testFastLookupRouterOrdersBySpeedAndFallsBack() throws {
+        final class FakeLookupRunner: CommandRunning {
+            var calls: [String] = []
+            func run(_ invocation: CLIInvocation, timeout: TimeInterval, onStdout: @escaping (String) -> Void) throws -> CommandResult {
+                calls.append(invocation.executable)
+                if invocation.executable.contains("claude") {
+                    return CommandResult(exitCode: 1, stdout: #"{"type":"result","is_error":true,"result":"rate limited"}"#, stderr: "", timedOut: false, cancelled: false)
+                }
+                return CommandResult(
+                    exitCode: 0,
+                    stdout: #"{"type":"item.completed","item":{"type":"agent_message","text":"{\"partOfSpeech\":\"noun\",\"definition\":\"A lasting effect.\",\"inContext\":\"The lingering consequence of an idea.\"}"}}"#,
+                    stderr: "",
+                    timedOut: false,
+                    cancelled: false
+                )
+            }
+            func cancel() {}
+        }
+
+        let router = FastLookupRouter()
+        let initial = router.candidates(
+            claudePath: "/usr/local/bin/claude",
+            codexPath: "/opt/homebrew/bin/codex",
+            geminiPath: "/opt/homebrew/bin/gemini",
+            codexSolModel: "gpt-6.2-sol"
+        )
+        XCTAssertEqual(initial.map(\.provider), [.claudeCLI, .codexCLI, .geminiCLI])
+        XCTAssertEqual(initial[0].label, "Sonnet · low effort")
+        XCTAssertEqual(initial[1].label, "Sol 6.2 · low effort")
+        XCTAssertEqual(initial[2].label, "Gemini 4 Neon · low effort")
+
+        let runner = FakeLookupRunner()
+        let outcome = try router.lookup(
+            word: "aftermath",
+            sentence: "The aftermath was clear.",
+            bookTitle: "Sample",
+            section: "Ch. 1",
+            candidates: initial,
+            workingDirectory: NSTemporaryDirectory(),
+            runner: runner
+        )
+        XCTAssertEqual(runner.calls, ["/usr/local/bin/claude", "/opt/homebrew/bin/codex"])
+        XCTAssertEqual(outcome.provider, .codexCLI)
+        XCTAssertEqual(outcome.result.partOfSpeech, "noun")
+        XCTAssertEqual(outcome.result.definition, "A lasting effect.")
+
+        // After Claude failed and Codex succeeded, Codex should now be tried first.
+        let afterFallback = router.candidates(
+            claudePath: "/usr/local/bin/claude",
+            codexPath: "/opt/homebrew/bin/codex",
+            geminiPath: "/opt/homebrew/bin/gemini",
+            codexSolModel: "gpt-6.2-sol"
+        )
+        XCTAssertEqual(afterFallback.first?.provider, .codexCLI)
+    }
+
+    func testResolveSolModelPrefers62AndFallsBackToHighestSol() throws {
+        let fs = MemoryFileSystem()
+        try fs.createDirectory("/home/.codex")
+        try fs.writeString(
+            "/home/.codex/models_cache.json",
+            #"{"models":[{"slug":"gpt-5.6-sol"},{"slug":"gpt-6.1-sol"},{"slug":"gpt-6.1-terra"}]}"#
+        )
+        XCTAssertEqual(CodexCommand.resolveSolModel(home: "/home", fs: fs), "gpt-6.1-sol")
+
+        try fs.writeString(
+            "/home/.codex/models_cache.json",
+            #"{"models":[{"slug":"gpt-6.1-sol"},{"slug":"gpt-6.2-sol"}]}"#
+        )
+        XCTAssertEqual(CodexCommand.resolveSolModel(home: "/home", fs: fs), "gpt-6.2-sol")
     }
 
     private func sampleEPUB() throws -> Data {

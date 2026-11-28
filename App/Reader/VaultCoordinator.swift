@@ -446,12 +446,16 @@ final class VaultCoordinator {
         for word in session.words where word.id.hasPrefix("w_") {
             let added = LongDate.format(year: Calendar.current.component(.year, from: Date()), month: Calendar.current.component(.month, from: Date()), day: Calendar.current.component(.day, from: Date()))
             let lookup = word.lookups.first
+            let rawDefinition = word.definition.trimmingCharacters(in: .whitespacesAndNewlines)
+            let meaningSource = (rawDefinition.isEmpty || rawDefinition == "No dictionary entry.")
+                ? (word.explanation ?? "")
+                : rawDefinition
             let entry = VocabEntry(
                 id: word.id,
                 word: word.word,
                 chapter: lookup?.section.flatMap { ChapterFiles.number(in: $0) },
                 page: lookup?.page,
-                meaning: VocabularyFile.shortMeaning(word.definition),
+                meaning: VocabularyFile.shortMeaning(meaningSource),
                 bookContext: word.lookups.first?.sentence ?? word.lookups.first?.quote ?? word.word,
                 plainLanguage: word.explanation,
                 example: nil,

@@ -493,6 +493,7 @@ public enum ProviderID: String, Codable, Equatable, Sendable, CaseIterable {
     case anthropic
     case claudeCLI
     case codexCLI
+    case geminiCLI
 
     public var label: String {
         switch self {
@@ -500,11 +501,12 @@ public enum ProviderID: String, Codable, Equatable, Sendable, CaseIterable {
         case .anthropic: return "Claude"
         case .claudeCLI: return "Claude Code"
         case .codexCLI: return "Codex"
+        case .geminiCLI: return "Gemini CLI"
         }
     }
 
     public var isCLI: Bool {
-        self == .claudeCLI || self == .codexCLI
+        self == .claudeCLI || self == .codexCLI || self == .geminiCLI
     }
 }
 
@@ -516,6 +518,8 @@ public struct AISettings: Codable, Equatable, Sendable {
     public var anthropicContextTokens: Int
     public var claudeCLIPath: String?
     public var codexCLIPath: String?
+    public var geminiCLIPath: String?
+    public var fastLookupEnabled: Bool
     public var lookupUsesDefault: Bool
     public var lookupProvider: ProviderID
     /// Suggested notes stay off until the reader turns them on.
@@ -535,6 +539,8 @@ public struct AISettings: Codable, Equatable, Sendable {
         anthropicContextTokens: Int = 200_000,
         claudeCLIPath: String? = nil,
         codexCLIPath: String? = nil,
+        geminiCLIPath: String? = nil,
+        fastLookupEnabled: Bool = true,
         lookupUsesDefault: Bool = true,
         lookupProvider: ProviderID = .openai,
         suggestedNotes: Bool = false,
@@ -549,6 +555,8 @@ public struct AISettings: Codable, Equatable, Sendable {
         self.anthropicContextTokens = anthropicContextTokens
         self.claudeCLIPath = claudeCLIPath
         self.codexCLIPath = codexCLIPath
+        self.geminiCLIPath = geminiCLIPath
+        self.fastLookupEnabled = fastLookupEnabled
         self.lookupUsesDefault = lookupUsesDefault
         self.lookupProvider = lookupProvider
         self.suggestedNotes = suggestedNotes
@@ -559,7 +567,8 @@ public struct AISettings: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case defaultProvider, openAIModel, anthropicModel, openAIContextTokens, anthropicContextTokens
-        case claudeCLIPath, codexCLIPath, lookupUsesDefault, lookupProvider, suggestedNotes, showSelectionBar
+        case claudeCLIPath, codexCLIPath, geminiCLIPath, fastLookupEnabled
+        case lookupUsesDefault, lookupProvider, suggestedNotes, showSelectionBar
         case ttsRateMultiplier, ttsVoiceIdentifier
     }
 
@@ -572,6 +581,8 @@ public struct AISettings: Codable, Equatable, Sendable {
         anthropicContextTokens = try container.decodeIfPresent(Int.self, forKey: .anthropicContextTokens) ?? 200_000
         claudeCLIPath = try container.decodeIfPresent(String.self, forKey: .claudeCLIPath)
         codexCLIPath = try container.decodeIfPresent(String.self, forKey: .codexCLIPath)
+        geminiCLIPath = try container.decodeIfPresent(String.self, forKey: .geminiCLIPath)
+        fastLookupEnabled = try container.decodeIfPresent(Bool.self, forKey: .fastLookupEnabled) ?? true
         lookupUsesDefault = try container.decodeIfPresent(Bool.self, forKey: .lookupUsesDefault) ?? true
         lookupProvider = try container.decodeIfPresent(ProviderID.self, forKey: .lookupProvider) ?? .openai
         suggestedNotes = try container.decodeIfPresent(Bool.self, forKey: .suggestedNotes) ?? false
@@ -589,6 +600,8 @@ public struct AISettings: Codable, Equatable, Sendable {
         try container.encode(anthropicContextTokens, forKey: .anthropicContextTokens)
         try container.encodeIfPresent(claudeCLIPath, forKey: .claudeCLIPath)
         try container.encodeIfPresent(codexCLIPath, forKey: .codexCLIPath)
+        try container.encodeIfPresent(geminiCLIPath, forKey: .geminiCLIPath)
+        try container.encode(fastLookupEnabled, forKey: .fastLookupEnabled)
         try container.encode(lookupUsesDefault, forKey: .lookupUsesDefault)
         try container.encode(lookupProvider, forKey: .lookupProvider)
         try container.encode(suggestedNotes, forKey: .suggestedNotes)
@@ -603,7 +616,7 @@ public struct AISettings: Codable, Equatable, Sendable {
         switch provider {
         case .openai: return openAIContextTokens
         case .anthropic: return anthropicContextTokens
-        case .claudeCLI, .codexCLI: return Int.max
+        case .claudeCLI, .codexCLI, .geminiCLI: return Int.max
         }
     }
 
@@ -611,7 +624,7 @@ public struct AISettings: Codable, Equatable, Sendable {
         switch provider {
         case .openai: return openAIModel
         case .anthropic: return anthropicModel
-        case .claudeCLI, .codexCLI: return nil
+        case .claudeCLI, .codexCLI, .geminiCLI: return nil
         }
     }
 }

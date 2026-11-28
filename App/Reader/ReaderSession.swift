@@ -93,6 +93,7 @@ final class ReaderSession: ObservableObject {
     @Published var annotationRevision = 0
     @Published var showMarginNotes = false
     var onPresentNote: ((String) -> Void)?
+    var onPresentLookup: (() -> Void)?
     var onRevealInObsidian: ((String?) -> Void)?
     var onRevealVocabularyInObsidian: (() -> Void)?
     var onRelocateNotes: ((String, String, Bool) -> Void)?
@@ -126,7 +127,12 @@ final class ReaderSession: ObservableObject {
     var navigation = NavigationHistory()
     private var markChord = MarkChord.idle
     private var lastLookupUndo: WordUndo?
+    private var lastLookupSelection: SelectionContext?
+    private var lastLookupTerm: String?
+    private var lookupGeneration = 0
     private var runner = ProcessCommandRunner()
+    private var lookupRunner = ProcessCommandRunner()
+    private var settingsObserver: NSObjectProtocol?
     private var toastTimer: Timer?
     private var viewStateTimer: Timer?
     private let globalObserver = UUID()
@@ -186,11 +192,28 @@ final class ReaderSession: ObservableObject {
         self.pageCount = 1
         self.sectionTitle = ""
         self.outline = []
-        self.settings = SettingsStore.load()
-        self.provider = SettingsStore.load().defaultProvider
+        let loadedSettings = SettingsStore.load()
+        self.settings = loadedSettings
+        self.provider = loadedSettings.defaultProvider
         let fs = LocalFileSystem()
         globalHub.ensureLoaded(applicationSupport: AppPaths.support, fs: fs)
         self.globalMarks = globalHub.marks
+        self.settingsObserver = NotificationCenter.default.addObserver(
+            forName: SettingsStore.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            let previousDefault = self.settings.defaultProvider
+            let refreshed = SettingsStore.load()
+            self.settings = refreshed
+            if self.provider == previousDefault {
+                self.provider = refreshed.defaultProvider
+            }
+            if self.askChoice.isEmpty || self.askChoice == previousDefault.rawValue {
+                self.askChoice = self.tutorAvailable ? "tutor" : refreshed.defaultProvider.rawValue
+            }
+        }
         globalHub.observe(globalObserver) { [weak self] marks in
             guard let self else { return }
             self.globalMarks = marks
@@ -205,6 +228,7 @@ final class ReaderSession: ObservableObject {
     }
 
     deinit {
+        if let settingsObserver { NotificationCenter.default.removeObserver(settingsObserver) }
         globalHub.unobserve(globalObserver)
     }
 
@@ -558,51 +582,256 @@ final class ReaderSession: ObservableObject {
         }
     }
 
+    /// Returns the best available definition text for display or export, falling back to
+    /// the AI plain-language explanation when `definition` is blank or an old placeholder.
+    static func effectiveDefinition(for word: WordEntry) -> String {
+        let trimmed = word.definition.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty && trimmed != "No dictionary entry." {
+            return trimmed
+        }
+        return word.explanation?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
     func lookUp() {
         guard let selection else { return }
-        let word = selection.text.split(whereSeparator: { !$0.isLetter && $0 != "'" && $0 != "’" }).first.map(String.init) ?? selection.text
+        let word = selection.text.split(whereSeparator: { !$0.isLetter && $0 != "'" && $0 != "’" && $0 != "-" }).first.map(String.init) ?? selection.text
         let term = word.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !term.isEmpty else { return }
-        let rawDefinition = ReaderDictionaryDefinition(term) ?? ""
-        let definition = rawDefinition.isEmpty || rawDefinition.hasPrefix("Error") || rawDefinition.contains("ReaderFailure")
-            ? "No dictionary entry."
+        performLookUp(term: term, selection: selection, recordOccurrence: true)
+    }
+
+    func retryLookup() {
+        guard let term = lastLookupTerm, let selection = lastLookupSelection ?? self.selection else { return }
+        performLookUp(term: term, selection: selection, recordOccurrence: false)
+    }
+
+    func dismissLookup() {
+        lookupGeneration += 1
+        lookupRunner.cancel()
+        lookup = nil
+    }
+
+    private func performLookUp(term: String, selection: SelectionContext, recordOccurrence: Bool) {
+        let rawDefinition = ReaderDictionaryDefinition(term)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let dictDefinition: String? = (rawDefinition.isEmpty || rawDefinition.hasPrefix("Error") || rawDefinition.contains("ReaderFailure"))
+            ? nil
             : VocabularyFile.shortMeaning(rawDefinition)
-        let occurrence = LookupEntry(
-            id: IDs.make("l"),
-            page: selection.page,
-            cfi: selection.cfi,
-            section: selection.section,
-            quote: term,
-            prefix: selection.prefix,
-            suffix: selection.suffix,
-            sentence: selection.sentence.isEmpty ? selection.text : selection.sentence,
-            date: ISO8601DateFormatter().string(from: Date())
+        let normalized = WordStore.normalize(term)
+        let existing = package.words.words.first { WordStore.normalize($0.word) == normalized }
+        let existingDef = existing.map(Self.effectiveDefinition(for:)) ?? ""
+        let initialDef = !existingDef.isEmpty ? existingDef : (dictDefinition ?? "")
+        let sentence = selection.sentence.isEmpty ? selection.text : selection.sentence
+
+        let undo: WordUndo
+        if recordOccurrence {
+            let occurrence = LookupEntry(
+                id: IDs.make("l"),
+                page: selection.page,
+                cfi: selection.cfi,
+                section: selection.section,
+                quote: term,
+                prefix: selection.prefix,
+                suffix: selection.suffix,
+                sentence: sentence,
+                date: ISO8601DateFormatter().string(from: Date())
+            )
+            undo = WordStore.record(
+                words: &package.words.words,
+                word: term,
+                definition: initialDef,
+                explanation: existing?.explanation,
+                explanationProvider: existing?.explanationProvider,
+                occurrence: occurrence,
+                id: "w_\(normalized)"
+            )
+            lastLookupUndo = undo
+            dirty()
+        } else {
+            undo = lookup?.undo ?? lastLookupUndo ?? WordUndo(word: normalized, previous: existing)
+        }
+
+        lastLookupSelection = selection
+        lastLookupTerm = term
+        lookupGeneration += 1
+        let generation = lookupGeneration
+        lookupRunner.cancel()
+        let activeRunner = ProcessCommandRunner()
+        lookupRunner = activeRunner
+
+        let currentSettings = SettingsStore.load()
+        self.settings = currentSettings
+        let cachedCandidates = FastLookupRouter.shared.candidates(
+            claudePath: currentSettings.claudeCLIPath,
+            codexPath: currentSettings.codexCLIPath,
+            geminiPath: currentSettings.geminiCLIPath
         )
-        let undo = WordStore.record(
-            words: &package.words.words,
-            word: term,
-            definition: definition,
-            explanation: nil,
-            explanationProvider: nil,
-            occurrence: occurrence,
-            id: "w_\(WordStore.normalize(term))"
-        )
-        lastLookupUndo = undo
-        dirty()
-        let chosen = settings.lookupUsesDefault ? settings.defaultProvider : settings.lookupProvider
+        let initialProviderLabel: String
+        if currentSettings.fastLookupEnabled {
+            initialProviderLabel = cachedCandidates.first?.label ?? "Sonnet · low effort"
+        } else {
+            let chosen = currentSettings.lookupUsesDefault ? currentSettings.defaultProvider : currentSettings.lookupProvider
+            initialProviderLabel = chosen.label
+        }
+
         lookup = LookupPresentation(
-            word: WordStore.normalize(term),
-            partOfSpeech: "",
-            definition: definition,
+            word: normalized,
+            partOfSpeech: existing?.partOfSpeech ?? "",
+            definition: dictDefinition ?? initialDef,
             explanation: "",
-            sentence: occurrence.sentence,
+            sentence: sentence,
             location: locationLabel(selection),
-            providerLabel: usesVault ? "Saved to the vocabulary file" : "Saved to words.md",
+            providerLabel: initialProviderLabel,
             undo: undo,
-            busy: true
+            busy: true,
+            errorMessage: nil,
+            hasDictionaryFallback: dictDefinition != nil
         )
-        show(tab: .words)
-        ask(purpose: .explainWord(term), provider: chosen, storeExplanationFor: term)
+        onPresentLookup?()
+
+        let bookTitle = bookURL.deletingPathExtension().lastPathComponent
+        let section = selection.section ?? sectionTitle
+        let openAIKey = KeychainStore.load(account: "openai")
+        let anthropicKey = KeychainStore.load(account: "anthropic")
+        let capturedBookText = bookText
+        let originalBookPath = bookURL.path
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let resolvedSettings = Self.withResolvedCLIs(currentSettings)
+            let tmpDir = Paths.join(NSTemporaryDirectory(), "reader-lookup-\(UUID().uuidString)")
+            try? FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(atPath: tmpDir) }
+
+            do {
+                let outcome: (result: WordDefinitionResult, providerLabel: String, provider: ProviderID)
+                let fastCandidates = FastLookupRouter.shared.candidates(
+                    claudePath: resolvedSettings.claudeCLIPath,
+                    codexPath: resolvedSettings.codexCLIPath,
+                    geminiPath: resolvedSettings.geminiCLIPath
+                )
+
+                if resolvedSettings.fastLookupEnabled && !fastCandidates.isEmpty {
+                    outcome = try FastLookupRouter.shared.lookup(
+                        word: term,
+                        sentence: sentence,
+                        bookTitle: bookTitle,
+                        section: section,
+                        candidates: fastCandidates,
+                        workingDirectory: tmpDir,
+                        runner: activeRunner,
+                        timeout: 45
+                    )
+                } else {
+                    let chosen = Self.resolveUsableProvider(
+                        requested: resolvedSettings.lookupUsesDefault ? resolvedSettings.defaultProvider : resolvedSettings.lookupProvider,
+                        settings: resolvedSettings,
+                        openAIKey: openAIKey,
+                        anthropicKey: anthropicKey
+                    )
+                    if chosen.isCLI, !fastCandidates.isEmpty,
+                       let match = fastCandidates.first(where: { $0.provider == chosen }) {
+                        outcome = try FastLookupRouter.shared.lookup(
+                            word: term,
+                            sentence: sentence,
+                            bookTitle: bookTitle,
+                            section: section,
+                            candidates: [match],
+                            workingDirectory: tmpDir,
+                            runner: activeRunner,
+                            timeout: 45
+                        )
+                    } else {
+                        let prompt = WordLookupParser.prompt(word: term, sentence: sentence, bookTitle: bookTitle, section: section)
+                        let fallbackBook = capturedBookText ?? BookText(title: bookTitle, pages: [BookPage(marker: "p. 1", section: section, text: sentence, page: selection.page)])
+                        let focus = Focus(quote: selection.text, page: selection.page, section: selection.section, cfi: selection.cfi)
+                        let router = AIRouter(
+                            settings: resolvedSettings,
+                            openAIKey: openAIKey,
+                            anthropicKey: anthropicKey,
+                            transport: URLSessionTransport(),
+                            runner: activeRunner
+                        )
+                        let aiResult = try await router.answer(
+                            book: fallbackBook,
+                            focus: focus,
+                            purpose: .ask(prompt),
+                            provider: chosen,
+                            cliDirectory: tmpDir,
+                            originalBookPath: originalBookPath,
+                            fs: LocalFileSystem(),
+                            timeout: 45
+                        )
+                        outcome = (WordLookupParser.parse(aiResult.text), chosen.label, chosen)
+                    }
+                }
+
+                await MainActor.run {
+                    guard let self, self.lookupGeneration == generation else { return }
+                    if resolvedSettings != self.settings {
+                        self.settings = resolvedSettings
+                        SettingsStore.save(resolvedSettings)
+                    }
+                    let parsed = outcome.result
+                    if let index = self.package.words.words.firstIndex(where: { WordStore.normalize($0.word) == normalized }) {
+                        if !parsed.definition.isEmpty {
+                            self.package.words.words[index].definition = parsed.definition
+                        }
+                        if !parsed.partOfSpeech.isEmpty {
+                            self.package.words.words[index].partOfSpeech = parsed.partOfSpeech
+                        }
+                        self.package.words.words[index].explanation = parsed.inContext.isEmpty ? parsed.definition : parsed.inContext
+                        self.package.words.words[index].explanationProvider = outcome.providerLabel
+                        self.dirty()
+                    }
+                    self.lookup?.partOfSpeech = parsed.partOfSpeech
+                    if !parsed.definition.isEmpty {
+                        self.lookup?.definition = parsed.definition
+                    }
+                    self.lookup?.explanation = parsed.inContext
+                    self.lookup?.providerLabel = outcome.providerLabel
+                    self.lookup?.errorMessage = nil
+                    self.lookup?.busy = false
+                }
+            } catch {
+                let message = (error as? AIError)?.userMessage ?? (error as? ReaderFailure)?.message ?? error.localizedDescription
+                await MainActor.run {
+                    guard let self, self.lookupGeneration == generation else { return }
+                    if message.contains("Settings") { self.aiSetup = message }
+                    self.lookup?.errorMessage = message
+                    self.lookup?.busy = false
+                }
+            }
+        }
+    }
+
+    private static func withResolvedCLIs(_ base: AISettings) -> AISettings {
+        var copy = base
+        copy.claudeCLIPath = CLILocator.resolvedPath(override: copy.claudeCLIPath, name: "claude")
+        copy.codexCLIPath = CLILocator.resolvedPath(override: copy.codexCLIPath, name: "codex")
+        copy.geminiCLIPath = CLILocator.resolvedPath(override: copy.geminiCLIPath, name: "gemini")
+        return copy
+    }
+
+    private static func resolveUsableProvider(
+        requested: ProviderID,
+        settings: AISettings,
+        openAIKey: String?,
+        anthropicKey: String?
+    ) -> ProviderID {
+        let fm = FileManager.default
+        func isUsable(_ provider: ProviderID) -> Bool {
+            switch provider {
+            case .openai: return !(openAIKey?.isEmpty ?? true)
+            case .anthropic: return !(anthropicKey?.isEmpty ?? true)
+            case .claudeCLI: return settings.claudeCLIPath.map { fm.isExecutableFile(atPath: $0) } ?? false
+            case .codexCLI: return settings.codexCLIPath.map { fm.isExecutableFile(atPath: $0) } ?? false
+            case .geminiCLI: return settings.geminiCLIPath.map { fm.isExecutableFile(atPath: $0) } ?? false
+            }
+        }
+        if isUsable(requested) { return requested }
+        for fallback: ProviderID in [.claudeCLI, .codexCLI, .geminiCLI, .openai, .anthropic] where isUsable(fallback) {
+            return fallback
+        }
+        return requested
     }
 
     func undoLookup() {
@@ -675,7 +904,8 @@ final class ReaderSession: ObservableObject {
             chat.append(ReaderChatLine(id: UUID(), mine: false, text: message))
             return
         }
-        let chosen = override ?? provider
+        let chosenOverride = override
+        let requested = override ?? provider
         asking = true
         if word == nil {
             let quote = selection?.text ?? ""
@@ -690,21 +920,36 @@ final class ReaderSession: ObservableObject {
         }
         let focus = selection.map { Focus(quote: $0.text, page: $0.page, section: $0.section, cfi: $0.cfi) }
         let directory = Paths.join(NSTemporaryDirectory(), "reader-ai-\(UUID().uuidString)")
-        let router = AIRouter(
-            settings: settings,
-            openAIKey: KeychainStore.load(account: "openai"),
-            anthropicKey: KeychainStore.load(account: "anthropic"),
-            transport: URLSessionTransport(),
-            runner: runner
-        ) { [weak self] partial in
-            Task { @MainActor in
-                if word == nil {
-                    self?.answer = partial
-                    if let last = self?.chat.indices.last { self?.chat[last].text = partial }
+        let baseSettings = SettingsStore.load()
+        self.settings = baseSettings
+        let openAIKey = KeychainStore.load(account: "openai")
+        let anthropicKey = KeychainStore.load(account: "anthropic")
+        let activeRunner = runner
+        let originalBookPath = bookURL.path
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let resolvedSettings = Self.withResolvedCLIs(baseSettings)
+            let chosen: ProviderID
+            if let explicit = chosenOverride {
+                // Respect explicit CLI/API choice if usable; otherwise fall back to an available CLI.
+                chosen = Self.resolveUsableProvider(requested: explicit, settings: resolvedSettings, openAIKey: openAIKey, anthropicKey: anthropicKey)
+            } else {
+                chosen = Self.resolveUsableProvider(requested: requested, settings: resolvedSettings, openAIKey: openAIKey, anthropicKey: anthropicKey)
+            }
+            let router = AIRouter(
+                settings: resolvedSettings,
+                openAIKey: openAIKey,
+                anthropicKey: anthropicKey,
+                transport: URLSessionTransport(),
+                runner: activeRunner
+            ) { [weak self] partial in
+                guard !chosen.isCLI else { return }
+                Task { @MainActor in
+                    if word == nil {
+                        self?.answer = partial
+                        if let last = self?.chat.indices.last { self?.chat[last].text = partial }
+                    }
                 }
             }
-        }
-        Task { @MainActor in
             do {
                 let result = try await router.answer(
                     book: bookText,
@@ -712,36 +957,51 @@ final class ReaderSession: ObservableObject {
                     purpose: purpose,
                     provider: chosen,
                     cliDirectory: directory,
-                    originalBookPath: bookURL.path,
+                    originalBookPath: originalBookPath,
                     fs: LocalFileSystem()
                 )
-                if let word {
-                    if let index = package.words.words.firstIndex(where: { WordStore.normalize($0.word) == WordStore.normalize(word) }) {
-                        package.words.words[index].explanation = result.text
-                        package.words.words[index].explanationProvider = chosen.label
-                        dirty()
+                await MainActor.run {
+                    guard let self else { return }
+                    if resolvedSettings != self.settings {
+                        self.settings = resolvedSettings
+                        SettingsStore.save(resolvedSettings)
                     }
-                    lookup?.explanation = result.text
-                    lookup?.providerLabel = result.providerLabel
-                    lookup?.busy = false
-                } else {
-                    answer = result.text
-                    answerLabel = result.providerLabel
-                    if let last = chat.indices.last { chat[last].text = result.text }
+                    self.aiSetup = nil
+                    if let word {
+                        if let index = self.package.words.words.firstIndex(where: { WordStore.normalize($0.word) == WordStore.normalize(word) }) {
+                            self.package.words.words[index].explanation = result.text
+                            self.package.words.words[index].explanationProvider = chosen.label
+                            if self.package.words.words[index].definition.isEmpty || self.package.words.words[index].definition == "No dictionary entry." {
+                                self.package.words.words[index].definition = VocabularyFile.shortMeaning(result.text)
+                            }
+                            self.dirty()
+                        }
+                        self.lookup?.explanation = result.text
+                        self.lookup?.providerLabel = result.providerLabel
+                        self.lookup?.busy = false
+                    } else {
+                        self.answer = result.text
+                        self.answerLabel = result.providerLabel
+                        if let last = self.chat.indices.last { self.chat[last].text = result.text }
+                    }
+                    self.asking = false
                 }
             } catch {
                 let message = (error as? AIError)?.userMessage ?? (error as? ReaderFailure)?.message ?? error.localizedDescription
-                if message.contains("Settings") { aiSetup = message }
-                if word != nil {
-                    lookup?.explanation = message
-                    lookup?.busy = false
-                } else {
-                    answer = message
-                    answerLabel = ""
-                    if let last = chat.indices.last { chat[last].text = message }
+                await MainActor.run {
+                    guard let self else { return }
+                    if message.contains("Settings") { self.aiSetup = message }
+                    if word != nil {
+                        self.lookup?.errorMessage = message
+                        self.lookup?.busy = false
+                    } else {
+                        self.answer = message
+                        self.answerLabel = ""
+                        if let last = self.chat.indices.last { self.chat[last].text = message }
+                    }
+                    self.asking = false
                 }
             }
-            asking = false
         }
     }
 
