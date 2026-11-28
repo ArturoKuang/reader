@@ -914,6 +914,7 @@ struct WordList: View {
     @State private var sort = "recent"
     @State private var filter = "all"
     @State private var hoveredWordID: String?
+    @State private var expandedWords: Set<String> = []
 
     private var vocabularyCaption: String {
         guard session.vaultEnabled, let root = session.vaultRoot, let folder = session.bookFolder else {
@@ -931,7 +932,7 @@ struct WordList: View {
         let rows = ordered
         VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading, spacing: 6) {
-                TextField("Search words", text: $query)
+                TextField("Search words or definitions", text: $query)
                     .textFieldStyle(.roundedBorder)
                 HStack {
                     Menu {
@@ -953,6 +954,19 @@ struct WordList: View {
                     .help("Sort and filter saved words")
                     Spacer()
                     if !rows.isEmpty {
+                        Button {
+                            if expandedWords.count == rows.count {
+                                expandedWords.removeAll()
+                            } else {
+                                expandedWords = Set(rows.map(\.id))
+                            }
+                        } label: {
+                            Image(systemName: expandedWords.count == rows.count ? "rectangle.compress.vertical" : "rectangle.expand.vertical")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.borderless)
+                        .help(expandedWords.count == rows.count ? "Collapse all word details" : "Expand all word details")
+
                         Menu {
                             Button("Select All (\(rows.count))") {
                                 session.wordSelection = Set(rows.map(\.id))
@@ -983,7 +997,7 @@ struct WordList: View {
 
             if rows.isEmpty {
                 if query.isEmpty && filter == "all" {
-                    ContentUnavailableView("No words yet", systemImage: "character.book.closed", description: Text("Look up a word with ⌃⌘D or Force Click. It lands here with its sentence."))
+                    ContentUnavailableView("No words yet", systemImage: "character.book.closed", description: Text("Select a word and click Look Up or press ⌃⌘D. Its definition and context appear here."))
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ContentUnavailableView.search(text: query)
@@ -992,46 +1006,8 @@ struct WordList: View {
             } else {
                 List(selection: $session.wordSelection) {
                     ForEach(rows) { word in
-                        HStack(alignment: .top, spacing: 6) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                HStack(spacing: 4) {
-                                    Text(word.word).font(.body.weight(.semibold))
-                                    if word.learned {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
-                                if !word.definition.isEmpty {
-                                    Text(word.definition).font(.callout).lineLimit(2)
-                                }
-                                if let sentence = word.lookups.first?.sentence, !sentence.isEmpty {
-                                    Text(sentence).font(.caption).lineLimit(1)
-                                }
-                                let location = word.lookups.first?.page.map { "p. \($0)" } ?? word.lookups.first?.section ?? ""
-                                if !location.isEmpty {
-                                    Text(location).font(.caption).foregroundStyle(.secondary)
-                                }
-                            }
-                            Spacer(minLength: 4)
-                            if hoveredWordID == word.id || session.wordSelection.contains(word.id) {
-                                Button {
-                                    session.deleteWord(id: word.id)
-                                } label: {
-                                    Image(systemName: "trash")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                                .buttonStyle(.plain)
-                                .help("Remove “\(word.word)”")
-                            }
-                        }
-                        .padding(.vertical, 2)
-                        .contentShape(Rectangle())
-                        .onHover { hovering in
-                            hoveredWordID = hovering ? word.id : (hoveredWordID == word.id ? nil : hoveredWordID)
-                        }
-                        .tag(word.id)
+                        wordRowView(word)
+                            .tag(word.id)
                     }
                     .onDelete { offsets in
                         let ids = Set(offsets.map { rows[$0].id })
@@ -1050,8 +1026,14 @@ struct WordList: View {
                         Button("Remove \(ids.count) Words", role: .destructive) { session.deleteWords(ids: ids) }
                     } else if let id = ids.first, let word = session.words.first(where: { $0.id == id }) {
                         Button("Go to Page") { jumpToWord(word) }
+                        Button(expandedWords.contains(word.id) ? "Collapse Details" : "Expand Details") {
+                            toggleExpanded(word.id)
+                        }
                         Divider()
-                        Button("Copy") { copy(word.word) }
+                        Button("Copy Word & Definition") {
+                            let def = ReaderSession.effectiveDefinition(for: word)
+                            copy(def.isEmpty ? word.word : "\(word.word): \(def)")
+                        }
                         Button("Copy with Sentence") { copy("\(word.word) — \(word.lookups.first?.sentence ?? "")") }
                         Button(word.learned ? "Mark Learning" : "Mark Learned") { session.setLearned(id: word.id, learned: !word.learned) }
                         Divider()
@@ -1103,6 +1085,157 @@ struct WordList: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
+    @ViewBuilder
+    private func wordRowView(_ word: WordEntry) -> some View {
+        let isExpanded = expandedWords.contains(word.id)
+        let definition = ReaderSession.effectiveDefinition(for: word)
+        let explanation = word.explanation?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let hasDistinctExplanation = !explanation.isEmpty && explanation.caseInsensitiveCompare(definition) != .orderedSame
+        let sentence = word.lookups.first?.sentence.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let location = word.lookups.first?.page.map { "p. \($0)" } ?? word.lookups.first?.section ?? ""
+
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(word.word)
+                    .font(.body.weight(.semibold))
+                    .lineLimit(1)
+                if let pos = word.partOfSpeech, !pos.isEmpty {
+                    Text(pos)
+                        .font(.caption)
+                        .italic()
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                if word.learned {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                        .help("Marked as learned")
+                }
+                Spacer(minLength: 4)
+                if !location.isEmpty {
+                    Text(location)
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color(nsColor: .quaternaryLabelColor).opacity(0.25))
+                        .clipShape(Capsule())
+                }
+                if hoveredWordID == word.id || session.wordSelection.contains(word.id) {
+                    Button {
+                        session.deleteWord(id: word.id)
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Remove “\(word.word)”")
+                }
+                Button {
+                    toggleExpanded(word.id)
+                } label: {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 14, height: 14)
+                }
+                .buttonStyle(.plain)
+                .help(isExpanded ? "Hide details" : "Show full definition and context")
+            }
+
+            if !definition.isEmpty {
+                Text(definition)
+                    .font(.callout)
+                    .foregroundStyle(.primary.opacity(0.92))
+                    .lineLimit(isExpanded ? nil : 3)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("No definition saved yet.")
+                    .font(.caption)
+                    .italic()
+                    .foregroundStyle(.secondary)
+            }
+
+            if isExpanded {
+                if hasDistinctExplanation {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("IN THIS PASSAGE")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        Text(explanation)
+                            .font(.caption)
+                            .foregroundStyle(.primary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(7)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.accentColor.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                if !sentence.isEmpty {
+                    HStack(alignment: .top, spacing: 6) {
+                        Rectangle()
+                            .fill(Color.secondary.opacity(0.4))
+                            .frame(width: 2)
+                        Text("“\(sentence)”")
+                            .font(.caption)
+                            .italic()
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.vertical, 1)
+                }
+                HStack(spacing: 10) {
+                    Button {
+                        jumpToWord(word)
+                    } label: {
+                        Label("Go to Page", systemImage: "arrow.up.forward.square")
+                    }
+                    .help("Jump to where “\(word.word)” appears in the book")
+                    Button(word.learned ? "Learning" : "Learned") {
+                        session.setLearned(id: word.id, learned: !word.learned)
+                    }
+                    .help(word.learned ? "Mark as still learning" : "Mark as learned")
+                    Button("Copy") {
+                        copy(definition.isEmpty ? word.word : "\(word.word): \(definition)")
+                    }
+                    .help("Copy word and definition")
+                    Spacer()
+                    if let provider = word.explanationProvider, !provider.isEmpty {
+                        Text(provider)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
+                }
+                .font(.caption)
+                .buttonStyle(.borderless)
+                .padding(.top, 2)
+            } else if !sentence.isEmpty {
+                Text("“\(sentence)”")
+                    .font(.caption)
+                    .italic()
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            hoveredWordID = hovering ? word.id : (hoveredWordID == word.id ? nil : hoveredWordID)
+        }
+    }
+
+    private func toggleExpanded(_ id: String) {
+        if expandedWords.contains(id) {
+            expandedWords.remove(id)
+        } else {
+            expandedWords.insert(id)
+        }
+    }
+
     private var wordSelectionStrip: some View {
         HStack(spacing: 10) {
             Text("\(session.wordSelection.count) selected")
@@ -1138,8 +1271,15 @@ struct WordList: View {
 
     private var ordered: [WordEntry] {
         var rows = session.words.filter { word in
-            (query.isEmpty || word.word.localizedCaseInsensitiveContains(query) || word.definition.localizedCaseInsensitiveContains(query))
-                && (filter == "all" || (filter == "learned" ? word.learned : !word.learned))
+            let def = ReaderSession.effectiveDefinition(for: word)
+            let explanation = word.explanation ?? ""
+            let sentence = word.lookups.first?.sentence ?? ""
+            let matchesQuery = query.isEmpty
+                || word.word.localizedCaseInsensitiveContains(query)
+                || def.localizedCaseInsensitiveContains(query)
+                || explanation.localizedCaseInsensitiveContains(query)
+                || sentence.localizedCaseInsensitiveContains(query)
+            return matchesQuery && (filter == "all" || (filter == "learned" ? word.learned : !word.learned))
         }
         switch sort {
         case "alpha": rows.sort { $0.word.localizedCaseInsensitiveCompare($1.word) == .orderedAscending }
@@ -1160,36 +1300,168 @@ struct LookupCard: View {
     var dismiss: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             if let lookup = session.lookup {
-                Text(lookup.word).font(.title2.weight(.semibold))
-                if let times = session.words.first(where: { $0.word.caseInsensitiveCompare(lookup.word) == .orderedSame })?.count, times > 1 {
-                    Text("Looked up \(times)×").font(.caption).foregroundStyle(.secondary)
-                }
-                Text("Dictionary").font(.caption).foregroundStyle(.secondary)
-                Text(lookup.definition)
-                Text(lookup.busy ? "Explaining…" : "In this passage").font(.caption).foregroundStyle(.secondary)
-                Text(lookup.explanation.isEmpty ? " " : lookup.explanation)
-                if lookup.explanation.contains("Settings") {
-                    Button("Open Settings…") { NSApp.sendAction(#selector(AppDelegate.showSettings(_:)), to: nil, from: nil) }
-                        .buttonStyle(.borderless)
-                }
-                Text("“\(lookup.sentence)” · \(lookup.location)").font(.caption).italic()
-                HStack {
-                    Text("Saved to Words").font(.caption).foregroundStyle(.secondary)
-                    Button("Undo") { session.undoLookup(); dismiss() }.buttonStyle(.borderless)
+                // Header: Preview-style word title, part of speech, and dismiss button
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(lookup.word)
+                        .font(.title2.weight(.bold))
+                        .textSelection(.enabled)
+                    if !lookup.partOfSpeech.isEmpty {
+                        Text(lookup.partOfSpeech)
+                            .font(.callout)
+                            .italic()
+                            .foregroundStyle(.secondary)
+                    }
+                    if let times = session.words.first(where: { $0.word.caseInsensitiveCompare(lookup.word) == .orderedSame })?.count, times > 1 {
+                        Text("\(times)×")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color(nsColor: .quaternaryLabelColor).opacity(0.3))
+                            .clipShape(Capsule())
+                            .help("Looked up \(times) times in this book")
+                    }
                     Spacer()
-                    Button("Open in Dictionary") {
+                    Button(action: dismiss) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title3)
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Close (Esc)")
+                }
+
+                Divider()
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        if lookup.busy {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("Looking up with \(lookup.providerLabel)…")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                            }
+                            if !lookup.definition.isEmpty {
+                                Text(lookup.definition)
+                                    .font(.body)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        } else {
+                            if !lookup.definition.isEmpty {
+                                Text(lookup.definition)
+                                    .font(.body)
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            let cleanExplanation = lookup.explanation.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !cleanExplanation.isEmpty && cleanExplanation.caseInsensitiveCompare(lookup.definition) != .orderedSame {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("IN THIS PASSAGE")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(.secondary)
+                                    Text(cleanExplanation)
+                                        .font(.callout)
+                                        .textSelection(.enabled)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                .padding(9)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color.accentColor.opacity(0.08))
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                            }
+                            if let error = lookup.errorMessage, !error.isEmpty {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text(error)
+                                        .font(.caption)
+                                        .foregroundStyle(.orange)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    HStack(spacing: 10) {
+                                        Button("Retry") { session.retryLookup() }
+                                            .buttonStyle(.bordered)
+                                            .controlSize(.small)
+                                        if error.contains("Settings") || error.contains("CLI") || error.contains("not found") {
+                                            Button("Open Settings…") {
+                                                dismiss()
+                                                NSApp.sendAction(#selector(AppDelegate.showSettings(_:)), to: nil, from: nil)
+                                            }
+                                            .buttonStyle(.borderless)
+                                            .controlSize(.small)
+                                        }
+                                    }
+                                }
+                                .padding(8)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color.orange.opacity(0.1))
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                            }
+                        }
+
+                        if !lookup.sentence.isEmpty {
+                            HStack(alignment: .top, spacing: 6) {
+                                Rectangle()
+                                    .fill(Color.secondary.opacity(0.35))
+                                    .frame(width: 2)
+                                Text("“\(lookup.sentence)”\(lookup.location.isEmpty ? "" : " · \(lookup.location)")")
+                                    .font(.caption)
+                                    .italic()
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 240)
+
+                Divider()
+
+                HStack(spacing: 10) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "sparkles")
+                            .font(.caption2)
+                        Text(lookup.providerLabel)
+                            .font(.caption)
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Undo") {
+                        session.undoLookup()
+                        dismiss()
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                    .help("Remove this word from saved vocabulary")
+                    Button("Words") {
+                        session.show(tab: .words)
+                        dismiss()
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                    .help("Open this word in the Words inspector")
+                    Button {
                         if let url = URL(string: "dict://\(lookup.word.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? lookup.word)") {
                             NSWorkspace.shared.open(url)
                         }
+                    } label: {
+                        Image(systemName: "book.closed")
+                            .font(.caption)
                     }
                     .buttonStyle(.borderless)
+                    .help("Open in Apple Dictionary")
                 }
             }
         }
-        .padding(16)
-        .frame(width: 360, alignment: .leading)
+        .padding(14)
+        .frame(width: 380, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
+        .onExitCommand { dismiss() }
     }
 }
 
@@ -1259,7 +1531,7 @@ struct SettingsView: View {
                 Picker("Provider", selection: $settings.defaultProvider) {
                     ForEach(ProviderID.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
-                Text("ChatGPT is the default for Ask AI and for word explanations.").font(.caption).foregroundStyle(.secondary)
+                Text("Choose your default provider for Ask AI. Installed CLIs (Claude Code, Codex, Gemini CLI) are detected automatically.").font(.caption).foregroundStyle(.secondary)
             }
             Section("API keys") {
                 SecureField("OpenAI API key", text: $openAIKey)
@@ -1278,31 +1550,28 @@ struct SettingsView: View {
             Section("Terminal providers") {
                 TextField("claude path", text: Binding(get: { settings.claudeCLIPath ?? "" }, set: { settings.claudeCLIPath = $0.isEmpty ? nil : $0 }))
                 TextField("codex path", text: Binding(get: { settings.codexCLIPath ?? "" }, set: { settings.codexCLIPath = $0.isEmpty ? nil : $0 }))
-                Button("Detect installed CLIs") {
-                    detectingCLIs = true
-                    Task.detached {
-                        let claude = CLILocator.locate("claude")
-                        let codex = CLILocator.locate("codex")
-                        await MainActor.run {
-                            settings.claudeCLIPath = claude
-                            settings.codexCLIPath = codex
-                            detectingCLIs = false
-                        }
-                    }
+                TextField("gemini path", text: Binding(get: { settings.geminiCLIPath ?? "" }, set: { settings.geminiCLIPath = $0.isEmpty ? nil : $0 }))
+                HStack(spacing: 10) {
+                    Button("Detect installed CLIs") { detectInstalledCLIs(manual: true) }
+                        .disabled(detectingCLIs)
+                    if detectingCLIs { ProgressView().controlSize(.small) }
                 }
-                if detectingCLIs { ProgressView().controlSize(.small) }
                 HStack {
                     Circle().fill(aiReady ? Color.green : Color.secondary).frame(width: 8, height: 8)
                     Text(aiReady ? "Ready" : "Not configured").font(.caption)
                     Button("Test") { testAI() }
                 }
-                Text("A saved claude path overrides detection. Otherwise Reader looks in ~/.local/bin, Homebrew, /usr/local/bin, then `zsh -lc 'command -v claude'`.").font(.caption).foregroundStyle(.secondary)
+                Text("A saved path overrides detection. Otherwise Reader checks ~/.local/bin, Homebrew, /usr/local/bin, Node/Bun bins, and `zsh -lc 'command -v …'`.").font(.caption).foregroundStyle(.secondary)
             }
             Section("Look up") {
-                Toggle("Use the default provider for word explanations", isOn: $settings.lookupUsesDefault)
-                if !settings.lookupUsesDefault {
-                    Picker("Look up provider", selection: $settings.lookupProvider) {
-                        ForEach(ProviderID.allCases, id: \.self) { Text($0.label).tag($0) }
+                Toggle("Use fastest available low-effort model (Sonnet, Sol 6.2, or Gemini 4 Neon)", isOn: $settings.fastLookupEnabled)
+                Text("Automatically picks the fastest available low-effort model for Look Up definitions and falls back if a provider is unavailable.").font(.caption).foregroundStyle(.secondary)
+                if !settings.fastLookupEnabled {
+                    Toggle("Use the default provider for word explanations", isOn: $settings.lookupUsesDefault)
+                    if !settings.lookupUsesDefault {
+                        Picker("Look up provider", selection: $settings.lookupProvider) {
+                            ForEach(ProviderID.allCases, id: \.self) { Text($0.label).tag($0) }
+                        }
                     }
                 }
                 Toggle("Suggested notes", isOn: $settings.suggestedNotes)
@@ -1310,6 +1579,15 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .onAppear {
+            let fm = FileManager.default
+            let needsDetect = (settings.claudeCLIPath.map { !fm.isExecutableFile(atPath: $0) } ?? true)
+                || (settings.codexCLIPath.map { !fm.isExecutableFile(atPath: $0) } ?? true)
+                || (settings.geminiCLIPath.map { !fm.isExecutableFile(atPath: $0) } ?? true)
+            if needsDetect {
+                detectInstalledCLIs(manual: false)
+            }
+        }
         .tabItem { Text("AI") }
         VaultLibrarySettings()
             .tabItem { Text("Vault") }
@@ -1380,10 +1658,49 @@ struct SettingsView: View {
     }
 
     private var aiReady: Bool {
-        if settings.defaultProvider == .openai { return !openAIKey.isEmpty }
-        if settings.defaultProvider == .anthropic { return !anthropicKey.isEmpty }
-        let path = settings.defaultProvider == .claudeCLI ? settings.claudeCLIPath : settings.codexCLIPath
-        return path.map { FileManager.default.isExecutableFile(atPath: $0) } ?? false
+        let fm = FileManager.default
+        switch settings.defaultProvider {
+        case .openai: return !openAIKey.isEmpty
+        case .anthropic: return !anthropicKey.isEmpty
+        case .claudeCLI: return settings.claudeCLIPath.map { fm.isExecutableFile(atPath: $0) } ?? false
+        case .codexCLI: return settings.codexCLIPath.map { fm.isExecutableFile(atPath: $0) } ?? false
+        case .geminiCLI: return settings.geminiCLIPath.map { fm.isExecutableFile(atPath: $0) } ?? false
+        }
+    }
+
+    private func detectInstalledCLIs(manual: Bool) {
+        detectingCLIs = true
+        Task.detached(priority: .userInitiated) {
+            let claude = CLILocator.locate("claude")
+            let codex = CLILocator.locate("codex")
+            let gemini = CLILocator.locate("gemini")
+            await MainActor.run {
+                let fm = FileManager.default
+                if manual || (settings.claudeCLIPath.map { !fm.isExecutableFile(atPath: $0) } ?? true) {
+                    settings.claudeCLIPath = claude
+                }
+                if manual || (settings.codexCLIPath.map { !fm.isExecutableFile(atPath: $0) } ?? true) {
+                    settings.codexCLIPath = codex
+                }
+                if manual || (settings.geminiCLIPath.map { !fm.isExecutableFile(atPath: $0) } ?? true) {
+                    settings.geminiCLIPath = gemini
+                }
+                if !aiReady {
+                    if let p = settings.claudeCLIPath, fm.isExecutableFile(atPath: p) {
+                        settings.defaultProvider = .claudeCLI
+                    } else if let p = settings.codexCLIPath, fm.isExecutableFile(atPath: p) {
+                        settings.defaultProvider = .codexCLI
+                    } else if let p = settings.geminiCLIPath, fm.isExecutableFile(atPath: p) {
+                        settings.defaultProvider = .geminiCLI
+                    }
+                }
+                if manual {
+                    let found = [claude != nil ? "claude" : nil, codex != nil ? "codex" : nil, gemini != nil ? "gemini" : nil].compactMap { $0 }
+                    keyStatus = found.isEmpty ? "No CLI found on PATH." : "Detected: \(found.joined(separator: ", "))"
+                }
+                detectingCLIs = false
+            }
+        }
     }
 
     private func testAI() {
@@ -1400,14 +1717,25 @@ struct SettingsView: View {
         let current = settings
         let openAI = openAIKey
         let anthropic = anthropicKey
-        Task {
-            let router = AIRouter(settings: current, openAIKey: openAI, anthropicKey: anthropic, transport: URLSessionTransport(), runner: ProcessCommandRunner())
+        Task.detached(priority: .userInitiated) {
+            var resolved = current
+            resolved.claudeCLIPath = CLILocator.resolvedPath(override: resolved.claudeCLIPath, name: "claude")
+            resolved.codexCLIPath = CLILocator.resolvedPath(override: resolved.codexCLIPath, name: "codex")
+            resolved.geminiCLIPath = CLILocator.resolvedPath(override: resolved.geminiCLIPath, name: "gemini")
+            let finalResolved = resolved
+            let router = AIRouter(settings: finalResolved, openAIKey: openAI, anthropicKey: anthropic, transport: URLSessionTransport(), runner: ProcessCommandRunner())
             do {
                 let book = BookText(title: "Test", pages: [BookPage(marker: "p. 1", text: "Hello.", page: 1)])
-                _ = try await router.answer(book: book, focus: nil, purpose: .ask("Reply with one word."), provider: provider, cliDirectory: NSTemporaryDirectory(), fs: LocalFileSystem())
-                keyStatus = "Ready"
+                _ = try await router.answer(book: book, focus: nil, purpose: .ask("Reply with one word."), provider: provider, cliDirectory: Paths.join(NSTemporaryDirectory(), "reader-test-\(UUID().uuidString)"), fs: LocalFileSystem())
+                await MainActor.run {
+                    settings = finalResolved
+                    keyStatus = "Ready (\(provider.label))"
+                }
             } catch {
-                keyStatus = (error as? AIError)?.userMessage ?? (error as? ReaderFailure)?.message ?? error.localizedDescription
+                let message = (error as? AIError)?.userMessage ?? (error as? ReaderFailure)?.message ?? error.localizedDescription
+                await MainActor.run {
+                    keyStatus = message
+                }
             }
         }
     }
@@ -1583,7 +1911,7 @@ struct WordsBrowser: View {
             guard let package = try? SidecarPackage.read(from: entry.sidecarPath, fs: LocalFileSystem()) else { return [] }
             return package.words.words.map { word in
                 let lookup = word.lookups.first
-                return WordRow(word: word.word, definition: word.definition, sentence: lookup?.sentence ?? "", book: entry.title, location: lookup?.page.map { "p. \($0)" } ?? "", page: lookup?.page ?? Int.max)
+                return WordRow(word: word.word, definition: ReaderSession.effectiveDefinition(for: word), sentence: lookup?.sentence ?? "", book: entry.title, location: lookup?.page.map { "p. \($0)" } ?? "", page: lookup?.page ?? Int.max)
             }
         }.sorted { sort == "az" ? $0.word < $1.word : $0.page < $1.page }
     }

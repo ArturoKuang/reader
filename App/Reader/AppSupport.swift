@@ -30,6 +30,8 @@ enum AppPaths {
 }
 
 enum SettingsStore {
+    static let didChangeNotification = Notification.Name("ReaderSettingsDidChange")
+
     static func load() -> AISettings {
         let fs = LocalFileSystem()
         guard let data = try? fs.read(AppPaths.settingsFile),
@@ -44,6 +46,63 @@ enum SettingsStore {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(settings) else { return }
         try? LocalFileSystem().write(AppPaths.settingsFile, data)
+        if Thread.isMainThread {
+            NotificationCenter.default.post(name: didChangeNotification, object: nil)
+        } else {
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: didChangeNotification, object: nil)
+            }
+        }
+    }
+
+    /// Detects installed AI CLIs (`claude`, `codex`, `gemini`) and fills in missing or stale paths.
+    /// If the current default provider is an API provider with no Keychain key (or a missing CLI),
+    /// promotes the first available CLI so models work out of the box.
+    static func autoConfigureCLIsInBackground() {
+        Task.detached(priority: .utility) {
+            let detectedClaude = CLILocator.locate("claude")
+            let detectedCodex = CLILocator.locate("codex")
+            let detectedGemini = CLILocator.locate("gemini")
+            await MainActor.run {
+                let current = load()
+                var updated = current
+                let fm = FileManager.default
+                if updated.claudeCLIPath.map({ !fm.isExecutableFile(atPath: $0) }) ?? true {
+                    updated.claudeCLIPath = detectedClaude
+                }
+                if updated.codexCLIPath.map({ !fm.isExecutableFile(atPath: $0) }) ?? true {
+                    updated.codexCLIPath = detectedCodex
+                }
+                if updated.geminiCLIPath.map({ !fm.isExecutableFile(atPath: $0) }) ?? true {
+                    updated.geminiCLIPath = detectedGemini
+                }
+                let defaultUsable: Bool
+                switch updated.defaultProvider {
+                case .openai:
+                    defaultUsable = !(KeychainStore.load(account: "openai")?.isEmpty ?? true)
+                case .anthropic:
+                    defaultUsable = !(KeychainStore.load(account: "anthropic")?.isEmpty ?? true)
+                case .claudeCLI:
+                    defaultUsable = updated.claudeCLIPath.map { fm.isExecutableFile(atPath: $0) } ?? false
+                case .codexCLI:
+                    defaultUsable = updated.codexCLIPath.map { fm.isExecutableFile(atPath: $0) } ?? false
+                case .geminiCLI:
+                    defaultUsable = updated.geminiCLIPath.map { fm.isExecutableFile(atPath: $0) } ?? false
+                }
+                if !defaultUsable {
+                    if let p = updated.claudeCLIPath, fm.isExecutableFile(atPath: p) {
+                        updated.defaultProvider = .claudeCLI
+                    } else if let p = updated.codexCLIPath, fm.isExecutableFile(atPath: p) {
+                        updated.defaultProvider = .codexCLI
+                    } else if let p = updated.geminiCLIPath, fm.isExecutableFile(atPath: p) {
+                        updated.defaultProvider = .geminiCLI
+                    }
+                }
+                if updated != current {
+                    save(updated)
+                }
+            }
+        }
     }
 }
 
@@ -92,19 +151,47 @@ enum CLILocator {
     /// Dock-launched apps do not see a login shell's PATH.
     static func locate(_ name: String) -> String? {
         let home = NSHomeDirectory()
-        let candidates = name == "claude"
-            ? ClaudeExecutable.searchPaths(home: home)
-            : [home + "/.local/bin/\(name)", "/opt/homebrew/bin/\(name)", "/usr/local/bin/\(name)"]
-        for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
-            return path
+        let fm = FileManager.default
+        var candidates: [String] = []
+        if name == "claude" {
+            candidates.append(contentsOf: ClaudeExecutable.searchPaths(home: home))
+        }
+        candidates.append(contentsOf: [
+            home + "/.local/bin/\(name)",
+            "/opt/homebrew/bin/\(name)",
+            "/usr/local/bin/\(name)",
+            home + "/.bun/bin/\(name)",
+            home + "/.npm-global/bin/\(name)",
+            home + "/.volta/bin/\(name)",
+            home + "/.asdf/shims/\(name)",
+        ])
+        let nvmRoot = home + "/.nvm/versions/node"
+        if let versions = try? fm.contentsOfDirectory(atPath: nvmRoot) {
+            for version in versions.sorted(by: { $0.localizedStandardCompare($1) == .orderedDescending }) {
+                candidates.append(nvmRoot + "/\(version)/bin/\(name)")
+            }
+        }
+        var seen = Set<String>()
+        for path in candidates where seen.insert(path).inserted {
+            if fm.isExecutableFile(atPath: path) {
+                return path
+            }
         }
         return loginCommand(name)
+    }
+
+    static func resolvedPath(override: String?, name: String) -> String? {
+        if let override, !override.isEmpty, FileManager.default.isExecutableFile(atPath: override) {
+            return override
+        }
+        return locate(name)
     }
 
     static func loginCommand(_ name: String) -> String? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = ["-lc", "command -v \(name)"]
+        process.standardInput = FileHandle.nullDevice
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = Pipe()
@@ -152,6 +239,8 @@ struct LookupPresentation: Identifiable, Equatable {
     var providerLabel: String
     var undo: WordUndo
     var busy: Bool
+    var errorMessage: String? = nil
+    var hasDictionaryFallback: Bool = false
 }
 
 struct OutlineRow: Identifiable, Equatable {

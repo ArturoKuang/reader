@@ -129,30 +129,105 @@ public enum ClaudeCommand {
             workingDirectory: workingDirectory
         )
     }
-}
 
-public enum CodexCommand {
-    /// `codex exec` is the non-interactive command. `--sandbox read-only` is the default
-    /// and is set explicitly. `--ask-for-approval never` keeps a scripted run from waiting
-    /// on a person. `--skip-git-repo-check` is required because the temp folder is not a
-    /// git checkout. `--ephemeral` skips session rollout files. `--json` is JSONL.
-    /// `-C` is the documented short form of `--cd`. `--full-auto` is not used; current
-    /// docs say it is no longer supported.
-    public static func invocation(executable: String, prompt: String, workingDirectory: String) -> CLIInvocation {
+    /// Lightweight, low-latency invocation for word definitions: skips MCP/slash plugins and
+    /// uses Sonnet at low effort with no tools or session persistence.
+    public static func fastLookupInvocation(
+        executable: String,
+        prompt: String,
+        workingDirectory: String,
+        model: String = "sonnet",
+        effort: String = "low"
+    ) -> CLIInvocation {
         CLIInvocation(
             executable: executable,
             arguments: [
-                "exec",
-                "--sandbox", "read-only",
-                "--ask-for-approval", "never",
-                "--skip-git-repo-check",
-                "--ephemeral",
-                "--json",
-                "-C", workingDirectory,
+                "--print",
+                "--verbose",
+                "--output-format", "stream-json",
+                "--no-session-persistence",
+                "--strict-mcp-config",
+                "--disable-slash-commands",
+                "--model", model,
+                "--effort", effort,
+                "--tools", "",
+                "--",
                 prompt,
             ],
             workingDirectory: workingDirectory
         )
+    }
+}
+
+public enum CodexCommand {
+    /// `codex exec` is the non-interactive command. `--sandbox read-only` keeps it read-only.
+    /// `-c approval_policy="never"` prevents blocking prompts (modern `codex exec` rejects `--ask-for-approval`).
+    /// `--skip-git-repo-check` allows running in temp workspaces; `--ephemeral` skips session rollout files.
+    public static func invocation(executable: String, prompt: String, workingDirectory: String, model: String? = nil, effort: String? = nil) -> CLIInvocation {
+        var args = [
+            "exec",
+            "--sandbox", "read-only",
+            "-c", "approval_policy=\"never\"",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--json",
+        ]
+        if let model, !model.isEmpty {
+            args.append(contentsOf: ["--ignore-user-config", "-m", model])
+        }
+        if let effort, !effort.isEmpty {
+            args.append(contentsOf: ["-c", "model_reasoning_effort=\"\(effort)\""])
+        }
+        args.append(contentsOf: ["-C", workingDirectory, prompt])
+        return CLIInvocation(executable: executable, arguments: args, workingDirectory: workingDirectory)
+    }
+
+    public static func fastLookupInvocation(
+        executable: String,
+        prompt: String,
+        workingDirectory: String,
+        model: String? = nil,
+        effort: String = "low"
+    ) -> CLIInvocation {
+        let resolvedModel = model ?? resolveSolModel(home: NSHomeDirectory())
+        return invocation(executable: executable, prompt: prompt, workingDirectory: workingDirectory, model: resolvedModel, effort: effort)
+    }
+
+    /// Resolves the best available Sol model from `~/.codex/models_cache.json`, preferring `gpt-6.2-sol`
+    /// and falling back to the highest available `*-sol` slug (e.g. `gpt-6.1-sol`).
+    public static func resolveSolModel(home: String, fs: FileSystem = LocalFileSystem()) -> String {
+        let cachePath = Paths.join(home, ".codex/models_cache.json")
+        guard let data = try? fs.read(cachePath),
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let models = root["models"] as? [[String: Any]] else {
+            return "gpt-6.2-sol"
+        }
+        let visibleModels = models.filter { ($0["visibility"] as? String) != "hide" }
+        let slugs = (visibleModels.isEmpty ? models : visibleModels).compactMap { $0["slug"] as? String }
+        if slugs.contains("gpt-6.2-sol") { return "gpt-6.2-sol" }
+        let sols = slugs.filter { $0.lowercased().contains("sol") }
+        if let best = sols.sorted(by: { lhs, rhs in lhs.localizedStandardCompare(rhs) == .orderedDescending }).first {
+            return best
+        }
+        return slugs.first ?? "gpt-6.2-sol"
+    }
+}
+
+public enum GeminiCommand {
+    /// Non-interactive headless Gemini CLI invocation. Uses `--skip-trust` so temporary directories
+    /// do not block on workspace trust prompts.
+    public static func invocation(
+        executable: String,
+        prompt: String,
+        workingDirectory: String,
+        model: String = "gemini-4-neon"
+    ) -> CLIInvocation {
+        var args = ["--skip-trust", "-o", "json"]
+        if !model.isEmpty {
+            args.append(contentsOf: ["-m", model])
+        }
+        args.append(contentsOf: ["-p", prompt])
+        return CLIInvocation(executable: executable, arguments: args, workingDirectory: workingDirectory)
     }
 }
 
@@ -215,6 +290,25 @@ public enum CLIOutput {
         if let failed { throw ReaderFailure(failed) }
         let trimmed = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { throw ReaderFailure("Codex returned no text.") }
+        return trimmed
+    }
+
+    public static func parseGemini(_ stdout: String) throws -> String {
+        let trimmed = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { throw ReaderFailure("Gemini returned no text.") }
+        if let json = JSONValue.parse(trimmed)?.object {
+            if let error = json["error"]?["message"]?.string, !error.isEmpty {
+                throw ReaderFailure(error)
+            }
+            if let response = json["response"]?.string, !response.isEmpty { return response }
+            if let text = json["text"]?.string, !text.isEmpty { return text }
+        }
+        for line in trimmed.split(separator: "\n").reversed() {
+            let s = String(line).trimmingCharacters(in: .whitespaces)
+            guard let json = JSONValue.parse(s)?.object else { continue }
+            if let response = json["response"]?.string, !response.isEmpty { return response }
+            if let text = json["text"]?.string, !text.isEmpty { return text }
+        }
         return trimmed
     }
 
@@ -378,7 +472,237 @@ public enum ProviderLabels {
             return "Answered by Claude Code (`claude --print`) · read the whole book, focused on your selection"
         case .codexCLI:
             return "Answered by Codex (`codex exec`) · read the whole book, focused on your selection"
+        case .geminiCLI:
+            return "Answered by Gemini CLI (`gemini -p`) · focused on your selection"
         }
+    }
+}
+
+/// Structured word lookup response for the Preview-like definition bubble and Words sidebar.
+public struct WordDefinitionResult: Equatable, Sendable {
+    public var partOfSpeech: String
+    public var definition: String
+    public var inContext: String
+
+    public init(partOfSpeech: String = "", definition: String, inContext: String = "") {
+        self.partOfSpeech = partOfSpeech
+        self.definition = definition
+        self.inContext = inContext
+    }
+}
+
+public enum WordLookupParser {
+    public static func prompt(word: String, sentence: String, bookTitle: String?, section: String?) -> String {
+        var lines = [
+            "Define the word \"\(word)\" concisely like the macOS Preview dictionary popup.",
+            "Return ONLY a JSON object with keys: \"partOfSpeech\" (e.g. noun, verb, adjective), \"definition\" (1 clear, concise sentence), and \"inContext\" (1 short plain-language sentence explaining what it means in the passage below).",
+        ]
+        if let bookTitle, !bookTitle.isEmpty {
+            lines.append("Book: \(bookTitle)")
+        }
+        if let section, !section.isEmpty {
+            lines.append("Section: \(section)")
+        }
+        if !sentence.isEmpty {
+            lines.append("Sentence: \"\(sentence)\"")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    public static func parse(_ raw: String) -> WordDefinitionResult {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let jsonObj = extractJSON(trimmed) {
+            let pos = (jsonObj["partOfSpeech"]?.string ?? jsonObj["part_of_speech"]?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let def = (jsonObj["definition"]?.string ?? jsonObj["meaning"]?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let ctx = (jsonObj["inContext"]?.string ?? jsonObj["in_context"]?.string ?? jsonObj["explanation"]?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !def.isEmpty || !ctx.isEmpty {
+                return WordDefinitionResult(partOfSpeech: pos, definition: def.isEmpty ? ctx : def, inContext: ctx)
+            }
+        }
+        // Fallback: split first sentence as definition, remainder as context if multi-paragraph.
+        let paragraphs = trimmed
+            .components(separatedBy: "\n\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        if paragraphs.count >= 2 {
+            return WordDefinitionResult(definition: paragraphs[0], inContext: paragraphs.dropFirst().joined(separator: " "))
+        }
+        return WordDefinitionResult(definition: trimmed, inContext: "")
+    }
+
+    private static func extractJSON(_ text: String) -> [String: JSONValue]? {
+        if let parsed = JSONValue.parse(text)?.object { return parsed }
+        guard let start = text.firstIndex(of: "{"), let end = text.lastIndex(of: "}"), start < end else { return nil }
+        return JSONValue.parse(String(text[start...end]))?.object
+    }
+}
+
+public struct FastLookupCandidate: Equatable, Sendable {
+    public var provider: ProviderID
+    public var executable: String
+    public var model: String
+    public var label: String
+
+    public init(provider: ProviderID, executable: String, model: String, label: String) {
+        self.provider = provider
+        self.executable = executable
+        self.model = model
+        self.label = label
+    }
+}
+
+/// Picks the fastest available low-effort lookup model among Sonnet, Sol 6.2 (or latest Sol),
+/// and Gemini 4 Neon, caching observed latency and falling back automatically if a backend fails.
+public final class FastLookupRouter: @unchecked Sendable {
+    public static let shared = FastLookupRouter()
+    private let lock = NSLock()
+    private var latencySeconds: [ProviderID: TimeInterval] = [:]
+    private var failedUntil: [ProviderID: Date] = [:]
+
+    public init() {}
+
+    public func candidates(
+        claudePath: String?,
+        codexPath: String?,
+        geminiPath: String?,
+        codexSolModel: String? = nil,
+        now: Date = Date()
+    ) -> [FastLookupCandidate] {
+        var list: [FastLookupCandidate] = []
+        if let claudePath, !claudePath.isEmpty {
+            list.append(FastLookupCandidate(provider: .claudeCLI, executable: claudePath, model: "sonnet", label: "Sonnet · low effort"))
+        }
+        if let codexPath, !codexPath.isEmpty {
+            let model = codexSolModel ?? CodexCommand.resolveSolModel(home: NSHomeDirectory())
+            let display = model.replacingOccurrences(of: "gpt-", with: "").replacingOccurrences(of: "-sol", with: "")
+            let label = display.isEmpty ? "Sol · low effort" : "Sol \(display) · low effort"
+            list.append(FastLookupCandidate(provider: .codexCLI, executable: codexPath, model: model, label: label))
+        }
+        if let geminiPath, !geminiPath.isEmpty {
+            list.append(FastLookupCandidate(provider: .geminiCLI, executable: geminiPath, model: "gemini-4-neon", label: "Gemini 4 Neon · low effort"))
+        }
+
+        lock.lock()
+        let latencies = latencySeconds
+        let cooldowns = failedUntil
+        lock.unlock()
+
+        // Default speed order before measurements: Sonnet (0) -> Sol (1) -> Gemini 4 Neon (2).
+        // Healthy providers ordered by measured latency come before providers in failure cooldown.
+        func defaultRank(_ provider: ProviderID) -> Double {
+            switch provider {
+            case .claudeCLI: return 100
+            case .codexCLI: return 200
+            case .geminiCLI: return 300
+            default: return 400
+            }
+        }
+        return list.sorted { lhs, rhs in
+            let lhsCooling = (cooldowns[lhs.provider] ?? .distantPast) > now
+            let rhsCooling = (cooldowns[rhs.provider] ?? .distantPast) > now
+            if lhsCooling != rhsCooling { return !lhsCooling }
+            let lScore = latencies[lhs.provider] ?? defaultRank(lhs.provider)
+            let rScore = latencies[rhs.provider] ?? defaultRank(rhs.provider)
+            return lScore < rScore
+        }
+    }
+
+    public func recordSuccess(provider: ProviderID, elapsed: TimeInterval) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let prev = latencySeconds[provider] {
+            latencySeconds[provider] = prev * 0.6 + elapsed * 0.4
+        } else {
+            latencySeconds[provider] = elapsed
+        }
+        failedUntil[provider] = nil
+    }
+
+    public func recordFailure(provider: ProviderID, now: Date = Date()) {
+        lock.lock()
+        defer { lock.unlock() }
+        failedUntil[provider] = now.addingTimeInterval(300)
+    }
+
+    public func lookup(
+        word: String,
+        sentence: String,
+        bookTitle: String?,
+        section: String?,
+        candidates: [FastLookupCandidate],
+        workingDirectory: String,
+        runner: CommandRunning,
+        timeout: TimeInterval = 45
+    ) throws -> (result: WordDefinitionResult, providerLabel: String, provider: ProviderID) {
+        guard !candidates.isEmpty else {
+            throw AIError.missingCLI(name: "Claude Code, Codex, or Gemini CLI")
+        }
+        let prompt = WordLookupParser.prompt(word: word, sentence: sentence, bookTitle: bookTitle, section: section)
+        var lastError: Error = ReaderFailure("No fast lookup model responded.")
+        for candidate in candidates {
+            let invocation: CLIInvocation
+            switch candidate.provider {
+            case .claudeCLI:
+                invocation = ClaudeCommand.fastLookupInvocation(
+                    executable: candidate.executable,
+                    prompt: prompt,
+                    workingDirectory: workingDirectory,
+                    model: candidate.model,
+                    effort: "low"
+                )
+            case .codexCLI:
+                invocation = CodexCommand.fastLookupInvocation(
+                    executable: candidate.executable,
+                    prompt: prompt,
+                    workingDirectory: workingDirectory,
+                    model: candidate.model,
+                    effort: "low"
+                )
+            case .geminiCLI:
+                invocation = GeminiCommand.invocation(
+                    executable: candidate.executable,
+                    prompt: prompt,
+                    workingDirectory: workingDirectory,
+                    model: candidate.model
+                )
+            default:
+                continue
+            }
+            let started = Date()
+            do {
+                let output = try runner.run(invocation, timeout: timeout) { _ in }
+                if output.cancelled { throw ReaderFailure("Stopped.") }
+                if output.timedOut {
+                    recordFailure(provider: candidate.provider)
+                    lastError = ReaderFailure("\(candidate.label) timed out.")
+                    continue
+                }
+                let rawText: String
+                switch candidate.provider {
+                case .claudeCLI: rawText = try CLIOutput.parseClaude(output.stdout)
+                case .codexCLI: rawText = try CLIOutput.parseCodex(output.stdout)
+                case .geminiCLI:
+                    if output.exitCode != 0 {
+                        let detail = output.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                        throw ReaderFailure(detail.isEmpty ? "Gemini exited with status \(output.exitCode)." : detail)
+                    }
+                    rawText = try CLIOutput.parseGemini(output.stdout)
+                default: rawText = ""
+                }
+                if output.exitCode != 0 && rawText.isEmpty {
+                    let detail = output.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                    throw ReaderFailure(detail.isEmpty ? "\(candidate.label) exited with status \(output.exitCode)." : detail)
+                }
+                let parsed = WordLookupParser.parse(rawText)
+                recordSuccess(provider: candidate.provider, elapsed: Date().timeIntervalSince(started))
+                return (parsed, candidate.label, candidate.provider)
+            } catch {
+                recordFailure(provider: candidate.provider)
+                lastError = error
+                continue
+            }
+        }
+        throw lastError
     }
 }
 
@@ -434,7 +758,7 @@ public final class AIRouter {
                 throw ReaderFailure("Anthropic returned HTTP \(response.status). \(response.text.prefix(400))")
             }
             text = try AnthropicProvider.parse(response.text)
-        case .claudeCLI, .codexCLI:
+        case .claudeCLI, .codexCLI, .geminiCLI:
             throw ReaderFailure("Internal: CLI provider handled elsewhere.")
         }
         onDelta(text)
@@ -456,6 +780,7 @@ public final class AIRouter {
         switch provider {
         case .claudeCLI: executable = settings.claudeCLIPath
         case .codexCLI: executable = settings.codexCLIPath
+        case .geminiCLI: executable = settings.geminiCLIPath
         default: executable = nil
         }
         guard let executable, !executable.isEmpty else {
@@ -475,7 +800,9 @@ public final class AIRouter {
         case .claudeCLI:
             invocation = ClaudeCommand.invocation(executable: executable, prompt: CLIWorkspace.prompt, workingDirectory: directory)
         case .codexCLI:
-            invocation = CodexCommand.invocation(executable: executable, prompt: CLIWorkspace.prompt, workingDirectory: directory)
+            invocation = CodexCommand.invocation(executable: executable, prompt: CLIWorkspace.prompt, workingDirectory: directory, model: CodexCommand.resolveSolModel(home: NSHomeDirectory(), fs: fs))
+        case .geminiCLI:
+            invocation = GeminiCommand.invocation(executable: executable, prompt: CLIWorkspace.prompt, workingDirectory: directory)
         default:
             throw ReaderFailure("Not a terminal provider.")
         }
@@ -490,6 +817,7 @@ public final class AIRouter {
         switch provider {
         case .claudeCLI: text = try CLIOutput.parseClaude(result.stdout.isEmpty ? buffer : result.stdout)
         case .codexCLI: text = try CLIOutput.parseCodex(result.stdout.isEmpty ? buffer : result.stdout)
+        case .geminiCLI: text = try CLIOutput.parseGemini(result.stdout.isEmpty ? buffer : result.stdout)
         default: text = ""
         }
         if result.exitCode != 0 && text.isEmpty {
@@ -533,13 +861,45 @@ public final class ProcessCommandRunner: CommandRunning {
         }
     }
 
+    /// Enriches PATH for GUI-launched apps so `#!/usr/bin/env node` CLIs (like codex/gemini)
+    /// and CLI helpers resolve Homebrew and user-local binaries reliably.
+    public static func enrichedPATH(existing: String?, executable: String, home: String = NSHomeDirectory()) -> String {
+        let trimmedHome = home.hasSuffix("/") ? String(home.dropLast()) : home
+        let execURL = URL(fileURLWithPath: executable)
+        let resolvedURL = execURL.resolvingSymlinksInPath()
+        var parts: [String] = [
+            execURL.deletingLastPathComponent().path,
+            resolvedURL.deletingLastPathComponent().path,
+            "\(trimmedHome)/.local/bin",
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            "\(trimmedHome)/.bun/bin",
+            "\(trimmedHome)/.npm-global/bin",
+        ]
+        if let existing, !existing.isEmpty {
+            parts.append(contentsOf: existing.split(separator: ":").map(String.init))
+        }
+        parts.append(contentsOf: ["/usr/bin", "/bin", "/usr/sbin", "/sbin"])
+        var seen = Set<String>()
+        var unique: [String] = []
+        for dir in parts where !dir.isEmpty && seen.insert(dir).inserted {
+            unique.append(dir)
+        }
+        return unique.joined(separator: ":")
+    }
+
     public func run(_ invocation: CLIInvocation, timeout: TimeInterval, onStdout: @escaping (String) -> Void) throws -> CommandResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: invocation.executable)
         process.arguments = invocation.arguments
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = Self.enrichedPATH(existing: env["PATH"], executable: invocation.executable)
+        process.environment = env
         if let directory = invocation.workingDirectory {
             process.currentDirectoryURL = URL(fileURLWithPath: directory)
         }
+        process.standardInput = FileHandle.nullDevice
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardOutput = stdout
