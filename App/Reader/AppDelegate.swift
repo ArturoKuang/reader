@@ -360,9 +360,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             separator(),
             item("Bookmark This Page", #selector(ReaderWindowController.bookmarkPage(_:)), "d", .command),
             item("Reveal in Obsidian", #selector(ReaderWindowController.revealInObsidian(_:))),
+            item("Reveal Vocabulary in Obsidian", #selector(ReaderWindowController.revealVocabulary(_:))),
             item("Open Vault Folder", #selector(ReaderWindowController.openVaultFolder(_:))),
             item("Pause Saving to Vault", #selector(ReaderWindowController.pauseVault(_:))),
-            item("Vault Settings", #selector(showSettings(_:))),
+            item("Vault Settings…", #selector(ReaderWindowController.showVaultSettings(_:))),
             item("Concept Markers", #selector(ReaderWindowController.toggleConceptMarkers(_:))),
             item("Words", #selector(showWords(_:)), "w", [.command, .shift]),
         ]))

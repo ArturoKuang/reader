@@ -95,7 +95,6 @@ final class ReaderSession: ObservableObject {
     var onPresentNote: ((String) -> Void)?
     var onPresentLookup: (() -> Void)?
     var onRevealInObsidian: ((String?) -> Void)?
-    var onRevealVocabularyInObsidian: (() -> Void)?
     var onRelocateNotes: ((String, String, Bool) -> Void)?
     private var noteSaveTimer: Timer?
     private var noteEdits = NoteEditBuffer()

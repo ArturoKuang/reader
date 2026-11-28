@@ -6,7 +6,6 @@ struct AnnotationBrowser: View {
     @ObservedObject var session: ReaderSession
     var onJump: (Annotation) -> Void
     @State private var editing: InlineEdit?
-    @State private var vaultSettings = false
     @State private var suppressJump = false
     @State private var conceptCache = ConceptLabelCache()
 
@@ -119,7 +118,6 @@ struct AnnotationBrowser: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            vaultFooter
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear {
@@ -275,55 +273,6 @@ struct AnnotationBrowser: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
     }
-
-    private var notesCaption: String {
-        guard let root = session.vaultRoot, let folder = session.bookFolder else { return "notes" }
-        return ObsidianLink.noteFile(
-            vaultRoot: root,
-            bookFolder: folder,
-            notesFolder: session.vaultNotesFolder,
-            chapter: ChapterFiles.number(in: session.sectionTitle),
-            bookTitle: session.bookURL.deletingPathExtension().lastPathComponent
-        )
-    }
-
-    @ViewBuilder private var vaultFooter: some View {
-        if session.usesVault {
-            HStack {
-                if session.vaultEnabled {
-                    Button(notesCaption) { session.onRevealInObsidian?(nil) }
-                        .buttonStyle(.borderless)
-                        .font(.caption)
-                        .lineLimit(1)
-                        .help("Open \(notesCaption) in Obsidian")
-                } else {
-                    Text("Obsidian vault found · Not saving here")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Spacer()
-                Button(session.vaultEnabled ? "Reveal" : "Enable") {
-                    if session.vaultEnabled {
-                        session.onRevealInObsidian?(nil)
-                    } else {
-                        session.vaultEnabled = true
-                        session.onSaveVaultState?()
-                    }
-                }
-                .buttonStyle(.borderless)
-                .help(session.vaultEnabled ? "Open this chapter's notes in Obsidian" : "Start saving highlights and notes into this Obsidian vault")
-                Button("Settings") { vaultSettings = true }
-                    .buttonStyle(.borderless)
-                    .help("Configure vault notes folder and vocabulary file")
-            }
-            .padding(.horizontal, 12)
-            .padding(.bottom, 8)
-            .popover(isPresented: $vaultSettings) {
-                VaultMappingForm(session: session)
-            }
-        }
-    }
 }
 
 private struct InlineEdit {
@@ -370,74 +319,5 @@ private struct NoteDraftEditor: View {
     private func close() {
         send(draft)
         finish()
-    }
-}
-
-private struct VaultMappingForm: View {
-    @ObservedObject var session: ReaderSession
-    @State private var notesDraft = ""
-    @State private var vocabDraft = ""
-    @FocusState private var field: Field?
-    private enum Field { case notes, vocab }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Toggle("Write notes into this vault", isOn: $session.vaultEnabled)
-                .onChange(of: session.vaultEnabled) { _, _ in session.onSaveVaultState?() }
-            TextField("Notes folder", text: $notesDraft)
-                .focused($field, equals: .notes)
-                .onSubmit { commitNotes() }
-            TextField("Vocabulary file", text: $vocabDraft)
-                .focused($field, equals: .vocab)
-                .onSubmit { commitVocabulary() }
-        }
-        .padding(12)
-        .frame(width: 280)
-        .onAppear {
-            notesDraft = session.vaultNotesFolder
-            vocabDraft = session.vaultVocabularyFile
-        }
-        .onChange(of: field) { _, _ in
-            commitNotes()
-            commitVocabulary()
-        }
-        .onDisappear {
-            commitNotes()
-            commitVocabulary()
-        }
-    }
-
-    private func commitNotes() {
-        let next = notesDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard next != session.vaultNotesFolder else { return }
-        guard Paths.isSafeRelative(next) else {
-            notesDraft = session.vaultNotesFolder
-            return
-        }
-        let alert = NSAlert()
-        alert.messageText = "Move existing notes?"
-        alert.informativeText = "Notes currently live in \(session.vaultNotesFolder)."
-        alert.addButton(withTitle: "Move Existing Notes")
-        alert.addButton(withTitle: "Start Empty")
-        alert.addButton(withTitle: "Cancel")
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            session.onRelocateNotes?(session.vaultNotesFolder, next, true)
-        case .alertSecondButtonReturn:
-            session.onRelocateNotes?(session.vaultNotesFolder, next, false)
-        default:
-            notesDraft = session.vaultNotesFolder
-        }
-    }
-
-    private func commitVocabulary() {
-        let next = vocabDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard next != session.vaultVocabularyFile else { return }
-        guard next.isEmpty || Paths.isSafeRelative(next) else {
-            vocabDraft = session.vaultVocabularyFile
-            return
-        }
-        session.vaultVocabularyFile = next
-        session.onSaveVaultState?()
     }
 }
