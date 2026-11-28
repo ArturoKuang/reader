@@ -1,6 +1,6 @@
 # Reader for iPhone and Android
 
-Expo spike for highlighting PDF and EPUB. The Mac app and `Packages/ReaderCore` are unchanged. Shared schemas will live in `spec/` later; until those files exist, the phone keeps its own copy of the record and anchor types.
+Expo spike for highlighting PDF and EPUB. The Mac app and `Packages/ReaderCore` are unchanged. The shared sync schemas now live in `docs/sync-design/spec/`, but nothing is generated from them yet, so the phone keeps its own hand-written copy of the record and anchor types.
 
 A long-press on a word highlights it in the last-used color (color 1 the first time). The bottom sheet can change that color, save a separate note, or remove the highlight. PDF.js draws the text layer locally. foliate-js draws the EPUB locally. Neither library is loaded from a CDN.
 
@@ -19,10 +19,13 @@ Anchor vectors are JSON in `src/contract/fixtures/` so they can move to `spec/` 
 
 ```bash
 cd apps/mobile
-npm install
+npm ci
 npm test
 npm run typecheck
+npm run lint
 npm run web
 ```
+
+From the repo root, `Scripts/check.sh mobile` runs typecheck, tests, and lint together.
 
 Tap the first word of a passage, then the last, then a color. The swatches are the shared highlight palette at the token opacity on the page. "Move chapter 4 and re-anchor" shifts that sentence and finds it again from the quote, prefix, and suffix.

@@ -11,3 +11,5 @@ dist/
 Reader.xcodeproj/
 # Screenshots and logs from the verify-reader runs
 .verify-evidence/
+# xcodebuild -derivedDataPath build (Scripts/check.sh app and local app builds)
+/build/

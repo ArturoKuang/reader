@@ -43,7 +43,7 @@ claude --print --verbose --output-format stream-json \
   --allowedTools Read,Grep,Glob \
   -- "Answer the question in focus.md. Use book.txt for context and cite pages. Do not modify any files."
 
-codex exec --sandbox read-only --ask-for-approval never \
+codex exec --sandbox read-only -c 'approval_policy="never"' \
   --skip-git-repo-check --ephemeral --json \
   -C "$TMP" "Answer the question in focus.md. Use book.txt for context and cite pages. Do not modify any files."
 ```
@@ -55,22 +55,22 @@ Why this differs from the draft:
 - `stream-json` requires `--verbose`, so the panel can read events as they arrive.
 - `--permission-mode dontAsk` refuses anything that would pop a dialog Reader cannot answer. `--dangerously-skip-permissions` is not used.
 - `--` ends the variadic tool flags so the prompt is not swallowed as another tool name.
-- `codex exec` is the non-interactive command. `--ask-for-approval never` stops it waiting for a person. `--skip-git-repo-check` is required because the temp folder is not a git repo. `--ephemeral` skips session rollout files. `--json` is JSONL. `-C` is the documented short form of `--cd`. `--full-auto` is not used; current docs say it is no longer supported.
+- `codex exec` is the non-interactive command. `-c approval_policy="never"` stops it waiting for a person; current `codex exec` rejects `--ask-for-approval`. `--skip-git-repo-check` is required because the temp folder is not a git repo. `--ephemeral` skips session rollout files. `--json` is JSONL. `-C` is the documented short form of `--cd`. `--full-auto` is not used; current docs say it is no longer supported.
 
 Each run gets a fresh temp folder with `book.txt` (the whole book, with page or section markers), `focus.md` (the selection and the question), and a symlink to the original file. Stop ends the process.
 
 If a book is longer than the model’s context window, API providers get the current section in full plus passages that overlap the question, and the answer label says so. The CLI providers still receive the whole `book.txt`.
 
-## Tests on Linux or a Mac
+## Tests
 
-The storage, anchors, word list, export, prompts, and CLI argument builders live in `Packages/ReaderCore` and do not import AppKit or PDFKit.
+The storage, anchors, word list, export, prompts, and CLI argument builders live in `Packages/ReaderCore` and do not import AppKit or PDFKit. The Mac sync client is `Packages/ReaderSync`.
 
 ```bash
-cd Packages/ReaderCore
-swift test
+Scripts/check.sh        # the checks for what changed since origin/main
+Scripts/check.sh all    # ReaderCore, ReaderSync, the phone app, the sync spec, and an app build
 ```
 
-Swift 5.9 or later. On Linux the package links libz (`zlib1g-dev`).
+Or run one package directly: `swift test --package-path Packages/ReaderCore`. Swift 5.9 or later. On Linux ReaderCore links libz (`zlib1g-dev`). `Scripts/smoke-test.sh` also builds the app and launches it in isolation against a throwaway PDF. `AGENTS.md` lists what each check covers.
 
 ## How a book is stored
 
@@ -148,20 +148,25 @@ Books outside a vault keep the `.reader` sidecar.
 ## Layout
 
 ```
-project.yml                  XcodeGen project
-App/Reader                   SwiftUI + AppKit shell, PDFView, WKWebView, menus
-Packages/ReaderCore          Sidecars, anchors, EPUB, words, prompts, CLI argv
+project.yml                  XcodeGen project (Reader.xcodeproj is generated, not committed)
+App/Reader                   SwiftUI + AppKit shell, PDFView, WKWebView, menus, TTS, sync UI, updater
+Packages/ReaderCore          Sidecars, anchors, EPUB, Markdown, words, marks, prompts, CLI argv, TTS planning
+Packages/ReaderSync          Mac sync client for the TailDrive server on the Mac mini
+Packages/ReaderKokoro        Kokoro text-to-speech (FluidAudio)
+apps/mobile                  Expo phone app (see apps/mobile/README.md)
+docs/sync-design             Sync spec, OpenAPI, JSON schemas, fixtures, validators
+spec/tokens.json             Design tokens shared by the Mac and the phone
+Scripts                      Checks, smoke test, packaging, release signing, installer
 ```
 
 ## Known gaps
 
-Verified here: `Packages/ReaderCore` unit tests on Linux. Vault tests cover block preservation, vocabulary order, concept parsing, mastery, tutor events, and sync conflicts. That covers SHA-256, PDF trailer ids, ZIP store and deflate, EPUB package/nav/text, CFI parse and build, Markdown round-trip for notes, words, highlights, and marks, sidecar create / rename / move offer / unwritable fallback / stable-id refresh / re-anchor, word undo and export, prompt assembly including the long-book fallback, OpenAI and Anthropic request shape and SSE parsing, and the exact `claude` / `codex` argument lists.
+Covered by unit tests in `Packages/ReaderCore`: vault tests cover block preservation, vocabulary order, concept parsing, mastery, tutor events, and sync conflicts. That covers SHA-256, PDF trailer ids, ZIP store and deflate, EPUB package/nav/text, CFI parse and build, Markdown round-trip for notes, words, highlights, and marks, sidecar create / rename / move offer / unwritable fallback / stable-id refresh / re-anchor, word undo and export, prompt assembly including the long-book fallback, OpenAI and Anthropic request shape and SSE parsing, and the exact `claude` / `codex` argument lists.
 
-Not verified here, because this environment has no Xcode and no Mac:
+Not covered by automated tests. `Scripts/check.sh app` only proves the app compiles, and `Scripts/smoke-test.sh` only proves it launches:
 
-- The Xcode project has not been generated or built. `xcodegen generate` then build the Reader scheme on a Mac.
-- Nothing about the window was run: PDFView smoothness, pinch zoom, contact sheet, note overlay, lookup popover, keychain, or Dictionary Services.
-- `claude` and `codex` were not executed. Flags come from the public CLI docs as of November 2026 (`--tools` vs `--allowedTools`, `codex exec`, `--ask-for-approval never`, `--skip-git-repo-check`). A future CLI can rename a flag; the panel shows the tool’s own error text.
+- No test drives the window: PDFView smoothness, pinch zoom, contact sheet, note overlay, lookup popover, keychain, or Dictionary Services.
+- Tests assert the exact `claude` and `codex` argument lists but never run either tool. A future CLI can rename a flag; the panel shows the tool’s own error text.
 - EPUB rendering quality is below Readium: spine-level “pages”, CSS columns for two-page mode, a CFI subset, and looked-up words are not yet painted with a dotted underline in the web view.
 - PDF notes are cards anchored under the passage. PDFKit does not reflow text, so the note does not push the paragraph down. Space scrolls the page, as in Preview; it expands a note when that note’s margin control is focused.
 - Highlights, underlines, bookmarks, and rotation are not written into the PDF. Other apps will not see them. “Edited” means the sidecar has unsaved changes.
