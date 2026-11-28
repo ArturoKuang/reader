@@ -1,0 +1,74 @@
+name: Checks
+
+# Runs every check on pull requests to main, so a PR gets a pass/fail before it merges.
+# It only builds and tests. Packaging, signing, and publishing stay in release-main.yml.
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    # The self-hosted Mac mini. Fork PRs are skipped here so their code does not run on it.
+    # A fork can edit this file, though, so the real guard is the repo setting
+    # Settings > Actions > General > "Approval for running fork pull request workflows".
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, macOS, ARM64, macmini-ci]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Configure toolchain PATH
+        run: echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+
+      - name: Install xcodegen if missing
+        run: command -v xcodegen >/dev/null || brew install xcodegen
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+          xcodegen --version
+          node --version
+          python3 --version
+
+      - name: Install mobile dependencies
+        run: npm ci --prefix apps/mobile --no-audit --no-fund
+
+      - name: Install spec validator packages
+        run: |
+          python3 -m venv "$RUNNER_TEMP/spec-venv"
+          "$RUNNER_TEMP/spec-venv/bin/python" -m pip install --quiet --disable-pip-version-check \
+            jsonschema referencing openapi-spec-validator pyyaml
+          echo "READER_SPEC_PYTHON=$RUNNER_TEMP/spec-venv/bin/python" >> "$GITHUB_ENV"
+
+      # Named checks rather than "all": with names, a missing tool fails the run instead of
+      # being reported as SKIP, so a green run means every check really ran.
+      - name: Run checks
+        env:
+          READER_CHECK_LOG_DIR: ${{ runner.temp }}/reader-check
+        run: Scripts/check.sh core sync mobile spec app
+
+      - name: Upload check logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-logs
+          path: ${{ runner.temp }}/reader-check/
+          if-no-files-found: ignore

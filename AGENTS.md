@@ -54,6 +54,8 @@ Scripts/check.sh core app   # only these
 
 It prints one line per check and only the error lines of a failure. Full logs go to `$TMPDIR/reader-check/`. A check whose tools are missing shows `SKIP … not verified`. That is not a pass, so say so in your report.
 
+**CI:** every pull request to `main` runs all five checks (the same as `Scripts/check.sh all`) in `.github/workflows/checks.yml` on the self-hosted Mac mini runner. CI names the checks (`Scripts/check.sh core sync mobile spec app`), so a missing tool fails the run instead of being skipped. Wait for it to pass before merging. Fork PRs don't run it. That workflow never packages, signs, or publishes: releases happen only in `release-main.yml`.
+
 Setup the checks need:
 
 - Xcode (Swift 5.9+; the TTS package needs Swift 6.2 and macOS 15) and `brew install xcodegen`.
