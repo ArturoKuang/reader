@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Fast staged-file pre-commit hook for Reader.
+# Installed via: ./Scripts/install-hooks.sh (git config core.hooksPath .githooks)
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+echo "[pre-commit] Running G0 staged static analysis & code-quality ratchet..."
+"$ROOT/Scripts/static-analysis.sh" --staged
+
+STAGED="$(git diff --cached --name-only --diff-filter=ACMR)"
+
+if printf '%s\n' "$STAGED" | grep -qE '^(formal/|Packages/.*/Tests/.*/Formal|apps/mobile/src/formal/|\.cursor/skills/formal-verify-reader/)'; then
+  echo "[pre-commit] Formal artifacts staged; running G3 guard..."
+  "$ROOT/Scripts/verify-harness-guard.sh"
+fi
+
+if printf '%s\n' "$STAGED" | grep -qE '^formal/tla/.*\.(tla|cfg)$'; then
+  if [[ -f "${TLA2TOOLS_JAR:-$HOME/ci/tools/tla2tools.jar}" ]]; then
+    echo "[pre-commit] TLA+ spec/config staged; running TLC + canary check..."
+    "$ROOT/Scripts/formal-verify.sh" --skip-static --skip-code
+  else
+    echo "[pre-commit] WARN: tla2tools.jar not found locally; CI on macmini-ci will run TLC."
+  fi
+fi
+
+"$ROOT/Scripts/check-formal-drift.sh" --staged

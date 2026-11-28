@@ -1,0 +1,12 @@
+{
+  "description": "Code quality ceilings for Reader. Values may tighten over time but CI blocks regressions.",
+  "ceilings": {
+    "swift_prod_try_bang": 0,
+    "swift_prod_fatal_or_precondition_fail": 0,
+    "swift_prod_force_cast": 1,
+    "swift_prod_files_over_600_loc": 9,
+    "swift_prod_max_file_loc": 1451,
+    "mobile_ts_prod_any_or_ignore": 4,
+    "mobile_ts_prod_files_over_600_loc": 3
+  }
+}

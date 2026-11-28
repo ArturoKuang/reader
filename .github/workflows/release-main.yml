@@ -17,7 +17,55 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  formal-verify:
+    runs-on: [self-hosted, macOS, ARM64, macmini-ci]
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure toolchain PATH
+        run: |
+          {
+            echo "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home/bin"
+            echo "/opt/homebrew/bin"
+          } >> "$GITHUB_PATH"
+
+      - name: Install mobile dependencies for TypeScript & formal checks
+        run: |
+          if [ -f apps/mobile/package-lock.json ]; then
+            (cd apps/mobile && npm ci --no-audit --no-fund)
+          fi
+
+      - name: Run formal verification gate before release
+        env:
+          CI: "true"
+          JAVA_HOME: /opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
+          TLA2TOOLS_JAR: /Users/arturokuang/ci/tools/tla2tools.jar
+          TLC_WORKERS: "2"
+          TLC_META_ROOT: ${{ runner.temp }}
+          FORMAL_REPORT_DIR: ${{ runner.temp }}/formal-reports
+        run: |
+          chmod +x Scripts/formal-verify.sh Scripts/static-analysis.sh Scripts/code-quality.sh Scripts/verify-harness-guard.sh Scripts/check-formal-drift.sh
+          ./Scripts/formal-verify.sh --mode standard
+
+      - name: Upload formal verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reader-release-formal-report-${{ github.run_id }}
+          path: ${{ runner.temp }}/formal-reports/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Clean up TLC temp state
+        if: always()
+        run: |
+          rm -rf "${{ runner.temp }}"/tlc-reader-*
+
   build-and-release:
+    needs: formal-verify
     runs-on: [self-hosted, macOS, ARM64, macmini-ci]
     steps:
       - name: Checkout full history

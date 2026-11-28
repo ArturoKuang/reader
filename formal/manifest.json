@@ -1,0 +1,329 @@
+{
+  "repo": "ArturoKuang/reader",
+  "sync_commit": "82f73bd9864eb93dfe58d50a33ed68d74e647a1a",
+  "tla2tools_sha256": "18e0d9caa517a6553ef50c7105191b1bfcfe5cc630bdbceefc087093e0520ce3",
+  "models": [
+    {
+      "name": "ReaderClientSync",
+      "spec": "formal/tla/ReaderClientSync.tla",
+      "config": "formal/tla/ReaderClientSync.cfg",
+      "deep_config": "formal/tla/ReaderClientSync_Deep.cfg",
+      "canary_config": "formal/tla/ReaderClientSync_Canary.cfg",
+      "canary_expected_invariant": "DirtyRecordNeverOverwrittenByPull",
+      "covered_files": [
+        "Packages/ReaderSync/Sources/ReaderSync/SyncEngine.swift",
+        "Packages/ReaderSync/Sources/ReaderSync/SyncStore.swift",
+        "Packages/ReaderSync/Sources/ReaderSync/ConflictResolution.swift",
+        "apps/mobile/src/sync/engine.ts",
+        "App/Reader/Sync/SyncController.swift"
+      ],
+      "covered_symbols": [
+        "SyncEngine.enqueueLocalRecords",
+        "SyncEngine.pushOutbox",
+        "SyncEngine.pullAll",
+        "SyncEngine.resolve(conflict:choice:)",
+        "SyncEngine.uploadBook",
+        "SyncStore.mergeOutbox",
+        "SyncStore.upsertRecord",
+        "SyncStore.markClean",
+        "SyncStore.resetForNewServer",
+        "ConflictResolution.prepare",
+        "ConflictResolution.currentHeadVersion",
+        "SyncController.applyOpeningPosition",
+        "apps/mobile/src/sync/engine.ts:SyncEngine.stage",
+        "apps/mobile/src/sync/engine.ts:SyncEngine.enqueue",
+        "apps/mobile/src/sync/engine.ts:SyncEngine.coalesce",
+        "apps/mobile/src/sync/engine.ts:SyncEngine.flushOnce",
+        "apps/mobile/src/sync/engine.ts:SyncEngine.applyPush",
+        "apps/mobile/src/sync/engine.ts:SyncEngine.applyPulledPage",
+        "apps/mobile/src/sync/engine.ts:SyncEngine.pull",
+        "apps/mobile/src/sync/engine.ts:SyncEngine.openBook",
+        "apps/mobile/src/sync/engine.ts:SyncEngine.uploadBook",
+        "apps/mobile/src/sync/engine.ts:SyncEngine.resetForNewServer"
+      ],
+      "properties": [
+        {
+          "name": "TypeOK",
+          "summary": "All server, client store, outbox, conflict, and reading-position variables remain within well-formed types and bounds.",
+          "harm": "Malformed state or out-of-range sequence/version counters corrupt sync persistence or crash clients."
+        },
+        {
+          "name": "OutboxUniquePerKey",
+          "summary": "Each client's durable outbox holds at most one pending entry per (bookId, kind, recordId) key after coalescing.",
+          "harm": "Duplicate outbox items for the same record cause redundant pushes, stale baseVersion conflicts, and unbounded offline queue growth."
+        },
+        {
+          "name": "DirtyRecordNeverOverwrittenByPull",
+          "summary": "Pulling remote pages never overwrites a local record that still has an unpushed edit in the durable outbox.",
+          "harm": "Silent loss of user highlights or notes edited offline when a background pull lands before push completes."
+        },
+        {
+          "name": "CursorMonotonicWithinServer",
+          "summary": "Within a given serverId, each client's pull cursor never moves backward and never exceeds the server's sequence number.",
+          "harm": "Cursor regression causes redundant re-application loops or skipped envelopes; advancing past serverSeq drops remote edits."
+        },
+        {
+          "name": "ResolvedVersionMatchesServerHead",
+          "summary": "Immediately after Mac resolves a conflict, Mac's local serverVersion equals the server's new head version (headVersion + 1).",
+          "harm": "Storing a stale version (such as conflict.baseVersion + 1) causes the next Mac edit to push a stale baseVersion and trigger a spurious second conflict."
+        },
+        {
+          "name": "MidSessionPositionNeverJumps",
+          "summary": "Pulling a remote reading position while a book is open stores it for the next open without moving the reader's active page.",
+          "harm": "Reader's viewport jumps away mid-reading when another device finishes syncing its last page."
+        },
+        {
+          "name": "DiskFullNeverBlocksRecordSync",
+          "summary": "HTTP 507 disk_full / quota_exceeded pauses book blob uploads without halting annotation record push/pull.",
+          "harm": "A full sync server disk silently blocks all highlight, note, and vocabulary syncing."
+        },
+        {
+          "name": "EventualConvergence",
+          "summary": "Temporal liveness: once finite edits, position scrolls, dropped responses, and server rebuilds stop, Mac and Phone converge to the server head, versions, and cursor even if book uploads remain paused for disk_full.",
+          "harm": "Mac and Phone stay permanently diverged with different annotation bodies or stale versions while displaying a green 'Synced' chip."
+        }
+      ],
+      "bounds": {
+        "standard": {
+          "KEYS": 1,
+          "VALUES": 2,
+          "POSITIONS": 2,
+          "MAX_EDITS": 2,
+          "MAX_POS_EDITS": 1,
+          "MAX_DROPS": 1,
+          "MAX_RESETS": 1,
+          "MAX_DISK_EVENTS": 1,
+          "MAX_FAULTS": 1
+        },
+        "deep": {
+          "KEYS": 1,
+          "VALUES": 2,
+          "POSITIONS": 2,
+          "MAX_EDITS": 2,
+          "MAX_POS_EDITS": 1,
+          "MAX_DROPS": 1,
+          "MAX_RESETS": 1,
+          "MAX_DISK_EVENTS": 1,
+          "MAX_FAULTS": 3
+        }
+      },
+      "non_goals": [
+        "TailDrive server internal SQLite implementation and authentication/QR token cryptography.",
+        "Multi-megabyte resumable blob Range/Content-Range byte-offset chunking.",
+        "JSON serialization schema validation or SwiftUI/React Native UI rendering of conflict sheets."
+      ]
+    },
+    {
+      "name": "VaultOwnedBlocks",
+      "spec": "formal/tla/VaultOwnedBlocks.tla",
+      "config": "formal/tla/VaultOwnedBlocks.cfg",
+      "deep_config": "formal/tla/VaultOwnedBlocks_Deep.cfg",
+      "canary_config": "formal/tla/VaultOwnedBlocks_Canary.cfg",
+      "canary_expected_invariant": "NoSilentClobberOnConcurrentEdit",
+      "covered_files": [
+        "Packages/ReaderCore/Sources/ReaderCore/OwnedBlocks.swift",
+        "Packages/ReaderCore/Sources/ReaderCore/VaultSync.swift",
+        "Packages/ReaderCore/Sources/ReaderCore/Annotations.swift",
+        "App/Reader/VaultCoordinator.swift"
+      ],
+      "covered_symbols": [
+        "OwnedBlocks.parse",
+        "OwnedBlocks.render",
+        "OwnedBlocks.body",
+        "OwnedBlocks.upsert",
+        "OwnedBlocks.remove",
+        "VaultSync.applyExternal",
+        "VaultSync.isOwnWrite",
+        "VaultAnnotationSync.render",
+        "VaultCoordinator.reload",
+        "VaultCoordinator.mergeExternal",
+        "VaultCoordinator.writeNotes",
+        "VaultCoordinator.writeIfChanged",
+        "VaultCoordinator.flush"
+      ],
+      "properties": [
+        {
+          "name": "TypeOK",
+          "summary": "All disk file, user-slice, block-body, session, watcher, and delete-provenance variables stay well-typed.",
+          "harm": "Corrupted coordinator state produces malformed Markdown markers or lost block tracking."
+        },
+        {
+          "name": "UserTextByteInvariant",
+          "summary": "Every user-authored Markdown slice outside Reader's HTML comment markers remains byte-for-byte identical across all Reader upserts, removes, flushes, and merges.",
+          "harm": "Reader mutates or erases a user's handwritten Obsidian notes outside Reader-owned blocks."
+        },
+        {
+          "name": "NoSilentClobberOnConcurrentEdit",
+          "summary": "An external Obsidian edit to a Reader-owned block is never silently overwritten by a concurrent Reader flush; conflicting edits preserve both bodies via 3-way merge.",
+          "harm": "User edits made in Obsidian during Reader's watcher/flush window vanish silently without a conflict callout."
+        },
+        {
+          "name": "MissingFileNeverPushesDeletes",
+          "summary": "Q-M1 delete guard: external deletion or renaming of a chapter Markdown file never synthesizes delete tombstones into sync.",
+          "harm": "Renaming or temporarily moving a notes file in Obsidian wipes synced highlights and notes across all paired devices."
+        },
+        {
+          "name": "OwnWriteEchoIgnored",
+          "summary": "Filesystem watcher events caused by Reader's own write matching lastWritten are recognized via VaultSync.isOwnWrite and ignored as echoes.",
+          "harm": "Self-write echo loops cause repeated re-parses, flicker, or spurious conflict callouts."
+        }
+      ],
+      "bounds": {
+        "standard": {
+          "BLOCK_IDS": 2,
+          "VALUES": 3,
+          "USER_TEXTS": 2,
+          "MAX_OPS": 3
+        },
+        "deep": {
+          "BLOCK_IDS": 2,
+          "VALUES": 3,
+          "USER_TEXTS": 2,
+          "MAX_OPS": 4
+        }
+      },
+      "non_goals": [
+        "Malicious or syntactically broken HTML comments nested inside code fences (covered by property tests in ReaderCoreTests).",
+        "POSIX kqueue / DispatchSourceFileSystemObject kernel event coalescing timing.",
+        "Vocabulary Markdown file table layout or concepts/mastery JSON parsing."
+      ]
+    },
+    {
+      "name": "AppUpdaterStateMachine",
+      "spec": "formal/tla/AppUpdaterStateMachine.tla",
+      "config": "formal/tla/AppUpdaterStateMachine.cfg",
+      "deep_config": "formal/tla/AppUpdaterStateMachine_Deep.cfg",
+      "canary_config": "formal/tla/AppUpdaterStateMachine_Canary.cfg",
+      "canary_expected_invariant": "RollbackPreservesRunnableApp",
+      "covered_files": [
+        "Packages/ReaderCore/Sources/ReaderCore/Updater.swift",
+        "App/Reader/Updater/AppUpdater.swift"
+      ],
+      "covered_symbols": [
+        "AppBuildInfo.isDev",
+        "UpdateEvaluator.parseManifest",
+        "UpdateEvaluator.evaluate",
+        "UpdateSwapScript.build",
+        "AppUpdater.checkForUpdates",
+        "AppUpdater.verifySignature",
+        "AppUpdater.stageUpdateInBackground",
+        "AppUpdater.downloadAndStage",
+        "AppUpdater.sha256Hex",
+        "AppUpdater.validateAppBundle",
+        "AppUpdater.installUpdate",
+        "AppUpdater.applyStagedUpdateOnQuitIfNeeded",
+        "AppUpdater.launchSwap"
+      ],
+      "properties": [
+        {
+          "name": "TypeOK",
+          "summary": "All updater phases, bundle slots (TARGET, BACKUP, STAGED), candidate attributes, and audit flags remain well-typed.",
+          "harm": "Invalid updater state transitions leak stale bundles or spawn duplicate swap scripts."
+        },
+        {
+          "name": "NoUnverifiedInstall",
+          "summary": "No candidate release can reach ready_to_install, swap execution, or TARGET without passing Ed25519 signature verification, schema/channel/URL-prefix policy checks, SHA-256 checksum verification, and bundle/codesign validation.",
+          "harm": "Tampered, MITM'd, or corrupted app archive replaces Reader.app on the user's Mac."
+        },
+        {
+          "name": "NoSilentDowngrade",
+          "summary": "Production builds never accept a lower buildNumber or identical (buildNumber, commitSHA); dev builds never upgrade silently during background checks.",
+          "harm": "Replay of an older signed manifest silently downgrades Reader to a vulnerable or broken release, or overwrites a developer's local dev build."
+        },
+        {
+          "name": "RollbackPreservesRunnableApp",
+          "summary": "At every swap step a runnable app exists in TARGET or BACKUP; if mv/ditto or launch fails, restore_backup restores TARGET to the prior valid bundle and cleans BACKUP.",
+          "harm": "Failed cross-volume swap or broken launch leaves the user with a missing or half-copied Reader.app."
+        },
+        {
+          "name": "StagedSwapTerminatesCleanly",
+          "summary": "Temporal liveness: once a staged swap script spawns, it always terminates cleanly in either done_installed or done_rolled_back.",
+          "harm": "Swap script hangs or stalls midway with Reader.app stranded in .Reader.app.backup."
+        }
+      ],
+      "bounds": {
+        "standard": {
+          "BUILDS": 3,
+          "INIT_BUILD": 2,
+          "COMMITS": 2,
+          "CHANNELS": 2,
+          "SCHEMAS": 2
+        },
+        "deep": {
+          "BUILDS": 4,
+          "INIT_BUILD": 2,
+          "COMMITS": 3,
+          "CHANNELS": 2,
+          "SCHEMAS": 2
+        }
+      },
+      "non_goals": [
+        "Cryptographic hardness of Curve25519 / Ed25519 or SHA-256 primitives (assumed sound in Apple CryptoKit).",
+        "macOS Gatekeeper / notarization ticket stapling and LaunchServices caching.",
+        "External deletion of TARGET or BACKUP by another process while swap-and-relaunch.sh is running."
+      ]
+    }
+  ],
+  "code_harnesses": [
+    {
+      "name": "ReaderCoreFormalPropertyTests",
+      "path": "Packages/ReaderCore/Tests/ReaderCoreTests/FormalPropertyTests.swift",
+      "runner": "swift test --package-path Packages/ReaderCore --filter FormalPropertyTests",
+      "covered_files": [
+        "Packages/ReaderCore/Sources/ReaderCore/OwnedBlocks.swift",
+        "Packages/ReaderCore/Sources/ReaderCore/VaultSync.swift",
+        "Packages/ReaderCore/Sources/ReaderCore/Annotations.swift",
+        "Packages/ReaderCore/Sources/ReaderCore/Updater.swift"
+      ],
+      "covered_symbols": [
+        "OwnedBlocks.parse",
+        "OwnedBlocks.upsert",
+        "OwnedBlocks.remove",
+        "VaultSync.applyExternal",
+        "VaultSync.isOwnWrite",
+        "VaultAnnotationSync.render",
+        "UpdateEvaluator.evaluate",
+        "UpdateSwapScript.build"
+      ]
+    },
+    {
+      "name": "ReaderSyncFormalHarnessTests",
+      "path": "Packages/ReaderSync/Tests/ReaderSyncTests/FormalSyncHarnessTests.swift",
+      "runner": "swift test --package-path Packages/ReaderSync --filter FormalSyncHarnessTests",
+      "covered_files": [
+        "Packages/ReaderSync/Sources/ReaderSync/SyncEngine.swift",
+        "Packages/ReaderSync/Sources/ReaderSync/SyncStore.swift",
+        "Packages/ReaderSync/Sources/ReaderSync/ConflictResolution.swift",
+        "Packages/ReaderSync/Sources/ReaderSync/SyncStatus.swift"
+      ],
+      "covered_symbols": [
+        "SyncEngine.sync",
+        "SyncEngine.ingest",
+        "SyncEngine.resolve(conflict:choice:)",
+        "SyncStore.mergeOutbox",
+        "SyncStore.resetForNewServer",
+        "ConflictResolution.prepare",
+        "SyncChipState.resolve"
+      ]
+    },
+    {
+      "name": "MobileSyncFormalTests",
+      "path": "apps/mobile/src/formal/syncFormal.test.ts",
+      "runner": "npm --prefix apps/mobile test -- src/formal/syncFormal.test.ts",
+      "covered_files": [
+        "apps/mobile/src/sync/engine.ts",
+        "apps/mobile/src/sync/storage.ts",
+        "apps/mobile/src/sync/status.ts"
+      ],
+      "covered_symbols": [
+        "SyncEngine.flush",
+        "SyncEngine.pull",
+        "SyncEngine.applyPulledPage",
+        "SyncEngine.openBook",
+        "SyncEngine.uploadBook",
+        "SyncEngine.resetForNewServer",
+        "deriveSyncStatus"
+      ]
+    }
+  ]
+}
